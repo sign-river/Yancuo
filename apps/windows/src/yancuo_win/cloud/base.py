@@ -17,6 +17,8 @@ class CloudCapabilities:
     large_file_upload: bool = False
     delete_release: bool = False
     max_asset_bytes: int | None = None
+    # True：先上传附件再创建/更新 Release（GitLink 成熟模式）
+    assets_first: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -27,6 +29,7 @@ class CloudCapabilities:
             "large_file_upload": self.large_file_upload,
             "delete_release": self.delete_release,
             "max_asset_bytes": self.max_asset_bytes,
+            "assets_first": self.assets_first,
         }
 
 

@@ -54,10 +54,9 @@ class CloudBackupService:
                 raise DomainError("请先在设置中启用云端备份（cloud.enabled）")
 
         caps = self.provider.get_capabilities()
-        if not caps.release_assets and self.provider.name != "local_folder":
+        if not caps.release_assets and self.provider.name not in ("local_folder",):
             raise DomainError(
-                "当前 GitLink 适配器尚未确认附件上传能力。请将 default_provider 设为 local_folder，"
-                "或等待兼容性验证通过后再用 GitLink 上传大文件。"
+                "当前提供商不支持 Release 附件。请改用 local_folder，或检查 GitLink 适配器。"
             )
 
         device_id = self.runtime.identity.device_id
@@ -71,31 +70,48 @@ class CloudBackupService:
         )
         sha = _sha256(pack)
         asset_name = "snapshot.ebpack"
+        release_name = f"研错库数据备份 · {stamp}"
+        release_body = json.dumps(
+            {
+                "sha256": sha,
+                "database_id": self.runtime.identity.database_id,
+                "schema_version": self.runtime.schema_version,
+            },
+            ensure_ascii=False,
+        )
 
-        # 1) 创建 release（尚不更新 latest）
-        release = self.provider.create_release(
-            self.owner,
-            self.repo,
-            tag=tag,
-            name=f"研错库数据备份 · {stamp}",
-            body=json.dumps(
-                {
-                    "sha256": sha,
-                    "database_id": self.runtime.identity.database_id,
-                    "schema_version": self.runtime.schema_version,
-                },
-                ensure_ascii=False,
-            ),
-        )
-        # 2) 上传完整附件
-        asset_info = self.provider.upload_release_asset(
-            self.owner,
-            self.repo,
-            tag=tag,
-            file_path=pack,
-            asset_name=asset_name,
-        )
-        # 3) 本地再校验文件仍在
+        # GitLink：先附件后 Release；LocalFolder：先建目录再拷文件
+        if caps.assets_first:
+            asset_info = self.provider.upload_release_asset(
+                self.owner,
+                self.repo,
+                tag=tag,
+                file_path=pack,
+                asset_name=asset_name,
+            )
+            release = self.provider.create_release(
+                self.owner,
+                self.repo,
+                tag=tag,
+                name=release_name,
+                body=release_body,
+            )
+        else:
+            release = self.provider.create_release(
+                self.owner,
+                self.repo,
+                tag=tag,
+                name=release_name,
+                body=release_body,
+            )
+            asset_info = self.provider.upload_release_asset(
+                self.owner,
+                self.repo,
+                tag=tag,
+                file_path=pack,
+                asset_name=asset_name,
+            )
+
         if _sha256(pack) != sha:
             raise DomainError("上传前后哈希不一致，已中止更新 latest")
 
@@ -113,7 +129,7 @@ class CloudBackupService:
             "size": pack.stat().st_size,
             "asset": asset_info,
         }
-        # 4) 最后更新指针
+        # 完整包就绪后再写指针
         self.provider.write_sync_manifest(self.owner, self.repo, latest)
         return {"tag": tag, "sha256": sha, "latest": latest, "release": release.tag}
 

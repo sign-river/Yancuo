@@ -96,8 +96,9 @@ class SettingsDialog(QDialog):
 
         tip = QLabel(
             "API 密钥/令牌只保存在操作系统凭据管理器，配置文件仅保存 credential_key 名称。\n"
-            "云功能用于完整备份与迁移，不是每题实时同步。切换提供商后，请重启应用使默认提供商生效"
-            "（或通过环境变量覆盖）。当前会话可用「测试连接」验证。"
+            "云功能是完整备份与迁移，不是每题实时同步。\n"
+            "GitLink：请手动填写 owner/repo；认证为 Bearer；发布走「先上传附件再挂 Release」。\n"
+            "切换提供商后点「应用提供商到当前会话」，或重启使默认配置生效。"
         )
         tip.setWordWrap(True)
         layout.addWidget(tip)
