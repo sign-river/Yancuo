@@ -68,15 +68,15 @@ assets/
 
 导出时**默认排除**（即使用户未勾选，下列也不得出现在包内）：
 
-| 类别 | 字段/内容 |
-|------|-----------|
-| 手写错误过程 | `user_answer` |
-| 私人备注 | `notes` |
-| 复习史 | `next_review_at`、`review_count`、`mastery`、复习打分记录 |
-| 密钥 | 任意 token / API key / credential |
-| 设备与身份 | `identity.json`、device_id、user_id、database_id |
-| 云与同步 | cloud 配置、`sync_operations`、locks |
-| AI 私货 | prompts 中的用户密钥、原始 AI 响应全文（可选后续） |
+| 类别         | 字段/内容                                                 |
+| ------------ | --------------------------------------------------------- |
+| 手写错误过程 | `user_answer`                                             |
+| 私人备注     | `notes`                                                   |
+| 复习史       | `next_review_at`、`review_count`、`mastery`、复习打分记录 |
+| 密钥         | 任意 token / API key / credential                         |
+| 设备与身份   | `identity.json`、device_id、user_id、database_id          |
+| 云与同步     | cloud 配置、`sync_operations`、locks                      |
+| AI 私货      | prompts 中的用户密钥、原始 AI 响应全文（可选后续）        |
 
 可选包含（默认开）：题目正文、LaTeX、正确答案、解析、标签、来源元数据、`role=original` 图片。  
 `error_analysis` 默认关（偏个人错因时可不开）。
@@ -103,7 +103,12 @@ assets/
   "original_number": "",
   "priority": 3,
   "assets": [
-    {"role": "original", "sha256": "…", "relative_path": "objects/ab/ab….jpg", "mime_type": "image/jpeg"}
+    {
+      "role": "original",
+      "sha256": "…",
+      "relative_path": "objects/ab/ab….jpg",
+      "mime_type": "image/jpeg"
+    }
   ]
 }
 ```
@@ -114,10 +119,10 @@ assets/
 
 ## 6. 导入语义
 
-1. 校验 manifest 与 checksums  
-2. 每题：若本地已有相同 `(origin_package_id, origin_problem_id)` → **跳过**  
-3. 否则分配新本地 `problem_*` id，写入 `problem_origins`  
-4. 复制允许的 assets（内容寻址，同哈希不覆盖）  
+1. 校验 manifest 与 checksums
+2. 每题：若本地已有相同 `(origin_package_id, origin_problem_id)` → **跳过**
+3. 否则分配新本地 `problem_*` id，写入 `problem_origins`
+4. 复制允许的 assets（内容寻址，同哈希不覆盖）
 5. 状态默认 `inbox` 或 `active`（实现可选；建议 `inbox`）
 
 ```json
@@ -132,9 +137,9 @@ assets/
 
 ## 7. 与 `.ebpack` 的区别
 
-| | `.ebpack` | `.gmshare` |
-|--|-----------|------------|
-| 用途 | 本人备份/迁移 | 朋友分享 |
-| 载荷 | 完整 SQLite | 脱敏 JSONL + 可选原图 |
-| 身份 | 可含 identity | **禁止** |
-| 再导入 | 换机恢复 | 新 ID + origin 去重 |
+|        | `.ebpack`     | `.gmshare`            |
+| ------ | ------------- | --------------------- |
+| 用途   | 本人备份/迁移 | 朋友分享              |
+| 载荷   | 完整 SQLite   | 脱敏 JSONL + 可选原图 |
+| 身份   | 可含 identity | **禁止**              |
+| 再导入 | 换机恢复      | 新 ID + origin 去重   |

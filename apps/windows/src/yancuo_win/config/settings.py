@@ -1,4 +1,4 @@
-"""配置加载与校验（TOML + Pydantic Settings）。密钥仅引用环境变量名。"""
+"""配置加载与校验（TOML + Pydantic Settings）。密钥只存引用名（环境变量 / 系统凭据）。"""
 
 from __future__ import annotations
 
@@ -52,6 +52,8 @@ class ImportConfig(BaseModel):
 class AiProviderConfig(BaseModel):
     base_url: str = ""
     api_key_env: str = "YANCUO_AI_API_KEY"
+    # 系统凭据键名；设置页保存的密钥读这里（环境变量优先，配置不存明文）
+    credential_key: str = "yancuo_ai_api_key"
 
 
 class AiConfig(BaseModel):

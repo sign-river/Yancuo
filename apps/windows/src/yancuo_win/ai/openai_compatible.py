@@ -1,4 +1,4 @@
-"""OpenAI 兼容视觉结构化提供商（密钥仅来自环境变量）。"""
+"""OpenAI 兼容视觉结构化提供商（密钥：环境变量优先，其次系统凭据）。"""
 
 from __future__ import annotations
 
@@ -13,24 +13,34 @@ from typing import Any
 
 from yancuo_win.ai.base import AIProvider, StructuredResult
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.infrastructure.credentials import get_secret
 
 
 class OpenAICompatibleProvider(AIProvider):
     name = "openai_compatible"
 
-    def __init__(self, *, base_url: str, api_key_env: str) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key_env: str,
+        credential_key: str = "yancuo_ai_api_key",
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
+        self.credential_key = credential_key or "yancuo_ai_api_key"
 
     def _api_key(self) -> str:
-        if not self.api_key_env:
-            raise DomainError("未配置 api_key_env")
-        key = os.environ.get(self.api_key_env, "").strip()
-        if not key:
-            raise DomainError(
-                f"环境变量 {self.api_key_env} 未设置；禁止在配置文件中明文存放密钥"
-            )
-        return key
+        if self.api_key_env:
+            key = os.environ.get(self.api_key_env, "").strip()
+            if key:
+                return key
+        secret = get_secret(self.credential_key)
+        if secret:
+            return secret.strip()
+        raise DomainError(
+            f"未配置 AI 密钥：请在设置中保存，或设置环境变量 {self.api_key_env or 'YANCUO_AI_API_KEY'}"
+        )
 
     def structure_from_image(
         self,

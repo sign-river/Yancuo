@@ -24,6 +24,7 @@ def test_load_default_settings() -> None:
     openai = settings.ai.providers.get("openai_compatible")
     assert openai is not None
     assert openai.api_key_env == "YANCUO_AI_API_KEY"
+    assert openai.credential_key == "yancuo_ai_api_key"
 
 
 def test_invalid_config_raises(tmp_path: Path) -> None:
