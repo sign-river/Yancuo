@@ -4,12 +4,12 @@ Windows / 安卓 / 云端共享的**唯一规范真相**。
 
 | 文件 | 状态 |
 |------|------|
-| `data-format-v1.md` | 阶段 A 初稿 |
-| `workspace-format-v1.md` | 待阶段 D |
-| `ebpack-format-v1.md` | 待阶段 F |
-| `sync-protocol-v1.md` | 待阶段 J |
-| `encryption-v1.md` | 待阶段 G+ |
-| `schemas/` | 随各阶段补充 JSON Schema |
-| `test-vectors/` | 随各阶段补充 |
+| `data-format-v1.md` | 阶段 A 初稿（schema 现为 3，见变更说明） |
+| `workspace-format-v1.md` | 阶段 D 定稿 |
+| `ebpack-format-v1.md` | 阶段 F 定稿 |
+| `sync-protocol-v1.md` | 阶段 J 定稿 |
+| `encryption-v1.md` | 待加密启用 |
+| `schemas/operation.schema.json` | 阶段 J |
+| `test-vectors/` | hash-v1 / ebpack-v1 / sync-v1 |
 
 变更流程：先改文档说明原因与兼容性 → 再改实现。
