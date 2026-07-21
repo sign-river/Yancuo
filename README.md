@@ -14,8 +14,11 @@
 
 ## 当前进度
 
-**阶段 H（已完成）**：GitHub Releases 备用后端（与 GitLink / 本地文件夹可切换）；令牌仅存系统凭据。  
-下一阶段：**I 安卓采集与复习端**。
+**阶段 I（已完成）**：安卓采集/复习端（Kotlin + Compose；导入 `.ebpack`；哈希与 Windows 对齐）。  
+下一阶段：**J 增量多端同步**。
+
+安卓工程：`android/`（Android Studio 打开）。  
+哈希向量：`protocol/test-vectors/hash-v1/`。
 
 ## 快速开始（Windows）
 
