@@ -1,14 +1,22 @@
-"""主窗口壳（阶段 A：布局框架，无业务功能）。"""
+"""主窗口：列表、筛选、导入、导出、备份（阶段 B）。"""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QSplitter,
     QStatusBar,
     QToolBar,
@@ -17,27 +25,51 @@ from PySide6.QtWidgets import (
 )
 
 from yancuo_win.application.bootstrap import RuntimeContext
+from yancuo_win.application.services import AppServices, ProblemFilter
+from yancuo_win.domain.rules import DomainError
+from yancuo_win.ui.problem_editor import ProblemEditorDialog
+from yancuo_win.ui.settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
     def __init__(self, runtime: RuntimeContext) -> None:
         super().__init__()
-        self._runtime = runtime
+        self.runtime = runtime
+        self.services = AppServices(runtime)
+        self._nav_mode = "library"  # library / inbox / active / trashed / subject:<id>
+        self._selected_problem_id: str | None = None
+
         self.setWindowTitle("研错库")
         self.resize(1280, 800)
-
         self._build_toolbar()
         self._build_central()
         self._build_status()
+        self.refresh_all()
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("主工具栏")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
-        for label in ("搜索", "AI 任务", "导入", "打印"):
-            action = toolbar.addAction(label)
-            action.setEnabled(False)
-            action.setToolTip("阶段 B 及之后实现")
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索题目 / 答案 / 备注 / 书名…")
+        self.search_edit.setFixedWidth(260)
+        self.search_edit.returnPressed.connect(self.refresh_problems)
+        toolbar.addWidget(self.search_edit)
+
+        actions = [
+            ("新建题目", self._new_problem),
+            ("导入图片", self._import_images),
+            ("导入文件夹", self._import_folder),
+            ("导出 Word", self._export_word),
+            ("备份", self._backup),
+            ("恢复备份", self._restore_backup),
+            ("设置", self._open_settings),
+        ]
+        for label, slot in actions:
+            act = QAction(label, self)
+            act.triggered.connect(slot)
+            toolbar.addAction(act)
 
     def _build_central(self) -> None:
         root = QWidget()
@@ -48,30 +80,49 @@ class MainWindow(QMainWindow):
 
         left = QFrame()
         left_layout = QVBoxLayout(left)
-        left_layout.addWidget(QLabel("科目 / 章节"))
-        nav = QListWidget()
-        nav.addItems(["全部题目", "收件箱", "智能列表（即将推出）", "标签（即将推出）"])
-        left_layout.addWidget(nav)
+        left_layout.addWidget(QLabel("导航"))
+        self.nav_list = QListWidget()
+        self.nav_list.currentItemChanged.connect(self._on_nav_changed)
+        left_layout.addWidget(self.nav_list)
+        from PySide6.QtWidgets import QPushButton
+
+        btn_row = QHBoxLayout()
+        b1 = QPushButton("新建科目")
+        b1.clicked.connect(self._new_subject)
+        b2 = QPushButton("新建标签")
+        b2.clicked.connect(self._new_tag)
+        btn_row.addWidget(b1)
+        btn_row.addWidget(b2)
+        left_layout.addLayout(btn_row)
 
         center = QFrame()
         center_layout = QVBoxLayout(center)
-        center_layout.addWidget(QLabel("错题列表"))
-        empty = QLabel(
-            "阶段 A：骨架已就绪。\n"
-            "本地数据库与资源目录已初始化。\n"
-            "请进入阶段 B 实现录入、整理与导出。"
-        )
-        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.setWordWrap(True)
-        center_layout.addWidget(empty, stretch=1)
+        center_layout.addWidget(QLabel("错题列表（双击编辑）"))
+        self.problem_list = QListWidget()
+        self.problem_list.itemSelectionChanged.connect(self._on_problem_selected)
+        self.problem_list.itemDoubleClicked.connect(self._edit_selected)
+        center_layout.addWidget(self.problem_list)
+
+        action_row = QHBoxLayout()
+        for text, slot in (
+            ("编辑", self._edit_selected),
+            ("入正式库", self._promote_selected),
+            ("删除", self._trash_selected),
+            ("恢复", self._restore_selected),
+            ("清空回收站", self._purge_trash),
+        ):
+            btn = QPushButton(text)
+            btn.clicked.connect(slot)
+            action_row.addWidget(btn)
+        center_layout.addLayout(action_row)
 
         right = QFrame()
         right_layout = QVBoxLayout(right)
-        right_layout.addWidget(QLabel("属性与标签"))
-        right_layout.addWidget(
-            QLabel("选中题目后将显示优先级、标签与复习状态。"),
-            stretch=1,
-        )
+        right_layout.addWidget(QLabel("属性"))
+        self.detail = QLabel("未选中题目")
+        self.detail.setWordWrap(True)
+        self.detail.setAlignment(Qt.AlignmentFlag.AlignTop)
+        right_layout.addWidget(self.detail, stretch=1)
 
         splitter.addWidget(left)
         splitter.addWidget(center)
@@ -79,15 +130,313 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
         splitter.setStretchFactor(2, 1)
-
         layout.addWidget(splitter)
         self.setCentralWidget(root)
 
     def _build_status(self) -> None:
-        bar = QStatusBar()
-        self.setStatusBar(bar)
-        rt = self._runtime
-        bar.showMessage(
-            f"题目 0 · schema v{rt.schema_version} · "
-            f"db={rt.identity.database_id[:16]}… · {rt.paths.root}"
+        self.status = QStatusBar()
+        self.setStatusBar(self.status)
+
+    def refresh_all(self) -> None:
+        self.refresh_nav()
+        self.refresh_problems()
+        self._update_status()
+
+    def refresh_nav(self) -> None:
+        current_mode = self._nav_mode
+        self.nav_list.blockSignals(True)
+        self.nav_list.clear()
+        items = [
+            ("全部（收件箱+正式）", "library"),
+            ("收件箱", "inbox"),
+            ("正式题库", "active"),
+            ("归档", "archived"),
+            ("回收站", "trashed"),
+        ]
+        for label, mode in items:
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, mode)
+            self.nav_list.addItem(item)
+
+        for sub in self.services.list_subjects():
+            item = QListWidgetItem(f"科目 · {sub.name}")
+            item.setData(Qt.ItemDataRole.UserRole, f"subject:{sub.id}")
+            self.nav_list.addItem(item)
+
+        # 恢复选中
+        for i in range(self.nav_list.count()):
+            it = self.nav_list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == current_mode:
+                self.nav_list.setCurrentRow(i)
+                break
+        else:
+            self.nav_list.setCurrentRow(0)
+            self._nav_mode = "library"
+        self.nav_list.blockSignals(False)
+
+    def _filter_from_nav(self) -> ProblemFilter:
+        mode = self._nav_mode
+        q = self.search_edit.text().strip() or None
+        if mode.startswith("subject:"):
+            return ProblemFilter(
+                status="library", subject_id=mode.split(":", 1)[1], query=q
+            )
+        if mode == "library":
+            return ProblemFilter(status="library", query=q)
+        return ProblemFilter(status=mode, query=q)
+
+    def refresh_problems(self) -> None:
+        self.problem_list.clear()
+        try:
+            problems = self.services.list_problems(self._filter_from_nav())
+        except DomainError as exc:
+            QMessageBox.warning(self, "筛选失败", str(exc))
+            return
+        for p in problems:
+            title = p.title or "(无标题)"
+            tags = ",".join(t.name for t in (p.tags or []))
+            text = f"[{p.status}] P{p.priority}  {title}"
+            if tags:
+                text += f"  #{tags}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, p.id)
+            self.problem_list.addItem(item)
+        self._update_status()
+
+    def _update_status(self) -> None:
+        total = self.services.count_problems()
+        inbox = self.services.count_problems("inbox")
+        active = self.services.count_problems("active")
+        trash = self.services.count_problems("trashed")
+        self.status.showMessage(
+            f"共 {total} · 收件箱 {inbox} · 正式 {active} · 回收站 {trash} · "
+            f"schema v{self.runtime.schema_version} · {self.runtime.paths.root}"
         )
+
+    def _on_nav_changed(self, current: QListWidgetItem | None, _prev: QListWidgetItem | None) -> None:
+        if current is None:
+            return
+        self._nav_mode = current.data(Qt.ItemDataRole.UserRole) or "library"
+        self.refresh_problems()
+
+    def _on_problem_selected(self) -> None:
+        items = self.problem_list.selectedItems()
+        if not items:
+            self._selected_problem_id = None
+            self.detail.setText("未选中题目")
+            return
+        pid = items[0].data(Qt.ItemDataRole.UserRole)
+        self._selected_problem_id = pid
+        p = self.services.get_problem(pid)
+        if not p:
+            self.detail.setText("题目不存在")
+            return
+        assets = "\n".join(
+            f"- {a.role}: {a.relative_path}{' (不可变)' if a.is_immutable else ''}"
+            for a in (p.assets or [])
+        ) or "（无）"
+        tags = ", ".join(t.name for t in (p.tags or [])) or "（无）"
+        self.detail.setText(
+            f"ID: {p.id}\n"
+            f"标题: {p.title or '（无）'}\n"
+            f"状态: {p.status}\n"
+            f"优先级: {p.priority}\n"
+            f"修订: r{p.revision}\n"
+            f"标签: {tags}\n"
+            f"原题预览:\n{(p.question_markdown or '')[:300]}\n\n"
+            f"附件:\n{assets}"
+        )
+
+    def _selected_ids(self) -> list[str]:
+        return [
+            it.data(Qt.ItemDataRole.UserRole)
+            for it in self.problem_list.selectedItems()
+        ]
+
+    def _require_one(self) -> str | None:
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "提示", "请先选择一道题")
+            return None
+        return ids[0]
+
+    def _new_problem(self) -> None:
+        try:
+            p = self.services.create_problem(title="新题目", status="inbox")
+            self.refresh_problems()
+            self._open_editor(p.id)
+        except DomainError as exc:
+            QMessageBox.warning(self, "创建失败", str(exc))
+
+    def _edit_selected(self) -> None:
+        pid = self._require_one()
+        if pid:
+            self._open_editor(pid)
+
+    def _open_editor(self, problem_id: str) -> None:
+        p = self.services.get_problem(problem_id)
+        if not p:
+            return
+        dlg = ProblemEditorDialog(self.services, p, self)
+        if dlg.exec():
+            self.refresh_problems()
+            self._on_problem_selected()
+
+    def _promote_selected(self) -> None:
+        pid = self._require_one()
+        if not pid:
+            return
+        try:
+            self.services.promote_to_active(pid)
+            self.refresh_problems()
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法转入正式库", str(exc))
+
+    def _trash_selected(self) -> None:
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "提示", "请先选择题目")
+            return
+        if self.runtime.settings.application.confirm_before_delete:
+            if (
+                QMessageBox.question(self, "确认", f"将 {len(ids)} 道题移入回收站？")
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+        try:
+            for pid in ids:
+                self.services.trash_problem(pid)
+            self.refresh_all()
+        except DomainError as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+
+    def _restore_selected(self) -> None:
+        pid = self._require_one()
+        if not pid:
+            return
+        try:
+            self.services.restore_problem(pid, "inbox")
+            self.refresh_problems()
+        except DomainError as exc:
+            QMessageBox.warning(self, "恢复失败", str(exc))
+
+    def _purge_trash(self) -> None:
+        if (
+            QMessageBox.question(self, "确认", "清空回收站？此操作不可撤销。")
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        n = self.services.purge_trashed()
+        QMessageBox.information(self, "完成", f"已永久删除 {n} 道题")
+        self.refresh_all()
+
+    def _import_images(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择图片",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp);;All (*.*)",
+        )
+        if not files:
+            return
+        try:
+            result = self.services.import_images([Path(f) for f in files])
+            QMessageBox.information(
+                self,
+                "导入完成",
+                f"新建 {len(result['created'])} 题，跳过重复 {len(result['skipped'])} 个",
+            )
+            self.refresh_all()
+        except DomainError as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
+
+    def _import_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
+        if not folder:
+            return
+        try:
+            result = self.services.import_folder(Path(folder))
+            QMessageBox.information(
+                self,
+                "导入完成",
+                f"新建 {len(result['created'])} 题，跳过重复 {len(result['skipped'])} 个",
+            )
+            self.refresh_all()
+        except DomainError as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
+
+    def _export_word(self) -> None:
+        ids = self._selected_ids()
+        if not ids:
+            # 导出当前列表全部
+            ids = [
+                self.problem_list.item(i).data(Qt.ItemDataRole.UserRole)
+                for i in range(self.problem_list.count())
+            ]
+        if not ids:
+            QMessageBox.information(self, "提示", "没有可导出的题目")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出 Word",
+            str(self.runtime.paths.export_dir / "错题导出.docx"),
+            "Word (*.docx)",
+        )
+        if not path:
+            return
+        try:
+            dest = self.services.export_problems_docx(ids, Path(path))
+            QMessageBox.information(self, "导出完成", str(dest))
+        except DomainError as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+
+    def _backup(self) -> None:
+        try:
+            dest = self.services.create_backup()
+            QMessageBox.information(self, "备份完成", str(dest))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "备份失败", str(exc))
+
+    def _restore_backup(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择备份包", str(self.runtime.paths.backup_dir), "Zip (*.zip)"
+        )
+        if not path:
+            return
+        target = QFileDialog.getExistingDirectory(
+            self, "选择恢复到的空数据目录（将写入库与资源）"
+        )
+        if not target:
+            return
+        try:
+            root = self.services.restore_backup(Path(path), Path(target))
+            QMessageBox.information(
+                self,
+                "恢复完成",
+                f"已恢复到：{root}\n请将 YANCUO_DATA_ROOT 指向该目录后重启。",
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "恢复失败", str(exc))
+
+    def _open_settings(self) -> None:
+        SettingsDialog(self.runtime, self).exec()
+
+    def _new_subject(self) -> None:
+        name, ok = QInputDialog.getText(self, "新建科目", "科目名称：")
+        if not ok or not name.strip():
+            return
+        try:
+            self.services.create_subject(name.strip())
+            self.refresh_nav()
+        except DomainError as exc:
+            QMessageBox.warning(self, "失败", str(exc))
+
+    def _new_tag(self) -> None:
+        name, ok = QInputDialog.getText(self, "新建标签", "标签名称：")
+        if not ok or not name.strip():
+            return
+        try:
+            self.services.create_tag(name.strip())
+            QMessageBox.information(self, "完成", f"已创建标签：{name.strip()}")
+        except DomainError as exc:
+            QMessageBox.warning(self, "失败", str(exc))

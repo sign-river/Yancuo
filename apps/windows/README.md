@@ -1,38 +1,33 @@
 # 研错库 Windows 客户端
 
-阶段 A：工程骨架、配置、本地库表与主窗口壳。
+当前进度：**阶段 B 本地 MVP**。
 
 ## 环境
 
 - Python 3.11+
-- 依赖见 `pyproject.toml`
 
 ```powershell
 cd apps/windows
 pip install -e ".[dev]"
-```
-
-## 启动
-
-```powershell
-# 在仓库根目录或 apps/windows 下均可
 python -m yancuo_win
 ```
 
-或安装后：
+## 阶段 B 已具备
 
-```powershell
-yancuo
-```
+- 科目 / 章节 / 标签
+- 错题 CRUD、收件箱 ↔ 正式库、回收站
+- 图片导入（去重、原图不可变）
+- Markdown 编辑（文本框级撤销）
+- 搜索筛选
+- 本地 zip 备份与恢复
+- Word 导出（`python-docx`）
 
-默认数据目录：`apps/windows/.yancuo_data/`（可用环境变量 `YANCUO_DATA_ROOT` 覆盖）。
+## 已知降级
+
+- **PDF 导出**：本阶段未接入 WeasyPrint，避免 Windows 依赖阻断；打印路径以 Word 为准。
 
 ## 迁移
 
-启动时自动执行迁移。也可手动：
-
 ```powershell
-yancuo-migrate
-# 或
 python -m yancuo_win.data.migrate_cli
 ```

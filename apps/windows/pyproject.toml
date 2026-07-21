@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yancuo-win"
-version = "0.1.0a1"
-description = "研错库 Windows 桌面客户端（阶段 A 骨架）"
+version = "0.1.0b1"
+description = "研错库 Windows 桌面客户端（阶段 B 本地 MVP）"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "See repository LICENSE" }
@@ -15,6 +15,7 @@ dependencies = [
   "SQLAlchemy>=2.0",
   "pydantic>=2.0",
   "pydantic-settings>=2.0",
+  "python-docx>=1.1",
 ]
 
 [project.optional-dependencies]

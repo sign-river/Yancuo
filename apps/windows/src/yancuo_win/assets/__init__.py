@@ -1,1 +1,5 @@
-"""图片对象库（阶段 B 实现）。"""
+"""图片对象库。"""
+
+from yancuo_win.assets.object_store import ObjectStore, StoredObject
+
+__all__ = ["ObjectStore", "StoredObject"]

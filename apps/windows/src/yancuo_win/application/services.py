@@ -1,0 +1,677 @@
+"""应用服务：科目、标签、错题、导入、备份、导出。UI 只依赖本层。"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import zipfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from sqlalchemy import Select, func, or_, select
+from sqlalchemy.orm import Session, selectinload
+
+from yancuo_win.application.bootstrap import RuntimeContext
+from yancuo_win.assets.object_store import ObjectStore
+from yancuo_win.data.ids import new_id
+from yancuo_win.data.models import Asset, Chapter, Problem, Subject, Tag, Version, utcnow
+from yancuo_win.domain.rules import (
+    DomainError,
+    assert_transition,
+    validate_priority,
+    validate_status,
+)
+
+
+@dataclass
+class ProblemFilter:
+    status: str | None = None  # None=非回收站日常；"all"=全部；具体状态；"library"=inbox+active
+    subject_id: str | None = None
+    chapter_id: str | None = None
+    tag_id: str | None = None
+    priority: int | None = None
+    query: str | None = None
+    include_trashed: bool = False
+
+
+class AppServices:
+    def __init__(self, runtime: RuntimeContext) -> None:
+        self.runtime = runtime
+        self.store = ObjectStore(runtime.paths.asset_objects_dir)
+
+    def session(self) -> Session:
+        return self.runtime.session_factory()
+
+    # ---- catalog ----
+
+    def list_subjects(self) -> list[Subject]:
+        with self.session() as s:
+            rows = s.scalars(
+                select(Subject).order_by(Subject.sort_order, Subject.name)
+            ).all()
+            s.expunge_all()
+            return list(rows)
+
+    def create_subject(self, name: str, sort_order: int = 0) -> Subject:
+        name = name.strip()
+        if not name:
+            raise DomainError("科目名称不能为空")
+        with self.session() as s:
+            existing = s.scalar(select(Subject).where(Subject.name == name))
+            if existing:
+                raise DomainError(f"科目已存在：{name}")
+            sub = Subject(id=new_id("sub"), name=name, sort_order=sort_order)
+            s.add(sub)
+            s.commit()
+            s.refresh(sub)
+            s.expunge(sub)
+            return sub
+
+    def rename_subject(self, subject_id: str, name: str) -> None:
+        name = name.strip()
+        if not name:
+            raise DomainError("科目名称不能为空")
+        with self.session() as s:
+            sub = s.get(Subject, subject_id)
+            if not sub:
+                raise DomainError("科目不存在")
+            sub.name = name
+            sub.updated_at = utcnow()
+            s.commit()
+
+    def delete_subject(self, subject_id: str) -> None:
+        with self.session() as s:
+            sub = s.get(Subject, subject_id)
+            if not sub:
+                return
+            chapter_count = s.scalar(
+                select(func.count()).select_from(Chapter).where(Chapter.subject_id == subject_id)
+            )
+            problem_count = s.scalar(
+                select(func.count()).select_from(Problem).where(Problem.subject_id == subject_id)
+            )
+            if chapter_count or problem_count:
+                raise DomainError("科目下仍有章节或题目，无法删除")
+            s.delete(sub)
+            s.commit()
+
+    def list_chapters(self, subject_id: str) -> list[Chapter]:
+        with self.session() as s:
+            rows = s.scalars(
+                select(Chapter)
+                .where(Chapter.subject_id == subject_id)
+                .order_by(Chapter.sort_order, Chapter.name)
+            ).all()
+            s.expunge_all()
+            return list(rows)
+
+    def create_chapter(
+        self, subject_id: str, name: str, parent_id: str | None = None, sort_order: int = 0
+    ) -> Chapter:
+        name = name.strip()
+        if not name:
+            raise DomainError("章节名称不能为空")
+        with self.session() as s:
+            if not s.get(Subject, subject_id):
+                raise DomainError("科目不存在")
+            ch = Chapter(
+                id=new_id("ch"),
+                subject_id=subject_id,
+                parent_id=parent_id,
+                name=name,
+                sort_order=sort_order,
+            )
+            s.add(ch)
+            s.commit()
+            s.refresh(ch)
+            s.expunge(ch)
+            return ch
+
+    def export_chapter_template(self, subject_id: str, dest: Path) -> Path:
+        with self.session() as s:
+            sub = s.get(Subject, subject_id)
+            if not sub:
+                raise DomainError("科目不存在")
+            chapters = s.scalars(
+                select(Chapter).where(Chapter.subject_id == subject_id)
+            ).all()
+            payload = {
+                "format": "yancuo-chapter-template",
+                "version": 1,
+                "subject": {"name": sub.name},
+                "chapters": [
+                    {
+                        "name": c.name,
+                        "parent_name": next(
+                            (p.name for p in chapters if p.id == c.parent_id), None
+                        ),
+                        "sort_order": c.sort_order,
+                    }
+                    for c in chapters
+                ],
+            }
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return dest
+
+    def import_chapter_template(self, path: Path) -> str:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if raw.get("format") != "yancuo-chapter-template":
+            raise DomainError("不是有效的章节模板")
+        subject_name = str(raw["subject"]["name"])
+        with self.session() as s:
+            sub = s.scalar(select(Subject).where(Subject.name == subject_name))
+            if not sub:
+                sub = Subject(id=new_id("sub"), name=subject_name)
+                s.add(sub)
+                s.flush()
+            name_to_id: dict[str, str] = {
+                c.name: c.id
+                for c in s.scalars(select(Chapter).where(Chapter.subject_id == sub.id))
+            }
+            for item in raw.get("chapters", []):
+                name = str(item["name"])
+                if name in name_to_id:
+                    continue
+                parent_name = item.get("parent_name")
+                parent_id = name_to_id.get(parent_name) if parent_name else None
+                ch = Chapter(
+                    id=new_id("ch"),
+                    subject_id=sub.id,
+                    parent_id=parent_id,
+                    name=name,
+                    sort_order=int(item.get("sort_order") or 0),
+                )
+                s.add(ch)
+                s.flush()
+                name_to_id[name] = ch.id
+            s.commit()
+            return sub.id
+
+    # ---- tags ----
+
+    def list_tags(self) -> list[Tag]:
+        with self.session() as s:
+            rows = s.scalars(select(Tag).order_by(Tag.name)).all()
+            s.expunge_all()
+            return list(rows)
+
+    def create_tag(self, name: str, color: str | None = None) -> Tag:
+        name = name.strip()
+        if not name:
+            raise DomainError("标签名称不能为空")
+        with self.session() as s:
+            existing = s.scalar(select(Tag).where(Tag.name == name))
+            if existing:
+                raise DomainError(f"标签已存在：{name}")
+            tag = Tag(id=new_id("tag"), name=name, color=color, is_system=False)
+            s.add(tag)
+            s.commit()
+            s.refresh(tag)
+            s.expunge(tag)
+            return tag
+
+    def delete_tag(self, tag_id: str) -> None:
+        with self.session() as s:
+            tag = s.get(Tag, tag_id)
+            if not tag:
+                return
+            if tag.is_system:
+                raise DomainError("系统标签不可删除")
+            s.delete(tag)
+            s.commit()
+
+    def set_problem_tags(self, problem_id: str, tag_ids: list[str]) -> None:
+        with self.session() as s:
+            problem = s.get(Problem, problem_id)
+            if not problem:
+                raise DomainError("题目不存在")
+            tags = list(s.scalars(select(Tag).where(Tag.id.in_(tag_ids))).all()) if tag_ids else []
+            problem.tags = tags
+            problem.updated_at = utcnow()
+            self._add_version(s, problem, source="manual", summary="更新标签")
+            s.commit()
+
+    # ---- problems ----
+
+    def _problem_query(self, filt: ProblemFilter) -> Select[tuple[Problem]]:
+        stmt = select(Problem).options(
+            selectinload(Problem.tags),
+            selectinload(Problem.assets),
+        )
+        if filt.status == "library":
+            stmt = stmt.where(Problem.status.in_(("inbox", "active")))
+        elif filt.status == "all":
+            pass
+        elif filt.status:
+            stmt = stmt.where(Problem.status == validate_status(filt.status))
+        elif not filt.include_trashed:
+            stmt = stmt.where(Problem.status != "trashed")
+
+        if filt.subject_id:
+            stmt = stmt.where(Problem.subject_id == filt.subject_id)
+        if filt.chapter_id:
+            stmt = stmt.where(Problem.chapter_id == filt.chapter_id)
+        if filt.priority is not None:
+            stmt = stmt.where(Problem.priority == filt.priority)
+        if filt.tag_id:
+            stmt = stmt.where(Problem.tags.any(Tag.id == filt.tag_id))
+        if filt.query:
+            q = f"%{filt.query.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    Problem.title.ilike(q),
+                    Problem.question_markdown.ilike(q),
+                    Problem.correct_answer.ilike(q),
+                    Problem.notes.ilike(q),
+                    Problem.source_book.ilike(q),
+                    Problem.original_number.ilike(q),
+                )
+            )
+        return stmt.order_by(Problem.updated_at.desc())
+
+    def list_problems(self, filt: ProblemFilter | None = None) -> list[Problem]:
+        filt = filt or ProblemFilter(status="library")
+        with self.session() as s:
+            rows = s.scalars(self._problem_query(filt)).all()
+            s.expunge_all()
+            return list(rows)
+
+    def get_problem(self, problem_id: str) -> Problem | None:
+        with self.session() as s:
+            problem = s.scalars(
+                select(Problem)
+                .where(Problem.id == problem_id)
+                .options(selectinload(Problem.tags), selectinload(Problem.assets))
+            ).first()
+            if problem:
+                s.expunge_all()
+            return problem
+
+    def count_problems(self, status: str | None = None) -> int:
+        with self.session() as s:
+            stmt = select(func.count()).select_from(Problem)
+            if status:
+                stmt = stmt.where(Problem.status == status)
+            return int(s.scalar(stmt) or 0)
+
+    def create_problem(
+        self,
+        *,
+        title: str | None = None,
+        question_markdown: str = "",
+        status: str = "inbox",
+        subject_id: str | None = None,
+        chapter_id: str | None = None,
+        priority: int = 3,
+    ) -> Problem:
+        validate_status(status)
+        validate_priority(priority)
+        with self.session() as s:
+            problem = Problem(
+                id=new_id("problem"),
+                status=status,
+                title=title,
+                question_markdown=question_markdown,
+                subject_id=subject_id,
+                chapter_id=chapter_id,
+                priority=priority,
+                revision=1,
+            )
+            s.add(problem)
+            s.flush()
+            self._add_version(s, problem, source="manual", summary="创建题目", bump=False)
+            s.commit()
+            s.refresh(problem)
+            s.expunge(problem)
+            return problem
+
+    def update_problem(self, problem_id: str, fields: dict[str, Any], *, summary: str = "编辑题目") -> Problem:
+        with self.session() as s:
+            problem = s.get(Problem, problem_id)
+            if not problem:
+                raise DomainError("题目不存在")
+            allowed = {
+                "title",
+                "question_markdown",
+                "question_latex",
+                "user_answer",
+                "correct_answer",
+                "solution_markdown",
+                "error_analysis",
+                "notes",
+                "source_book",
+                "source_year",
+                "page_number",
+                "original_number",
+                "problem_type",
+                "subject_id",
+                "chapter_id",
+                "priority",
+                "difficulty",
+                "mastery",
+                "is_favorite",
+                "needs_redo",
+                "allow_print",
+                "human_confirmed",
+            }
+            changed = False
+            for key, value in fields.items():
+                if key not in allowed:
+                    continue
+                if key == "priority" and value is not None:
+                    value = validate_priority(int(value))
+                if getattr(problem, key) != value:
+                    setattr(problem, key, value)
+                    changed = True
+            if changed:
+                problem.updated_at = utcnow()
+                self._add_version(s, problem, source="manual", summary=summary)
+            s.commit()
+            s.refresh(problem)
+            s.expunge(problem)
+            return problem
+
+    def set_problem_status(self, problem_id: str, status: str) -> None:
+        with self.session() as s:
+            problem = s.get(Problem, problem_id)
+            if not problem:
+                raise DomainError("题目不存在")
+            assert_transition(problem.status, status)
+            problem.status = status
+            problem.updated_at = utcnow()
+            if status == "trashed":
+                problem.deleted_at = utcnow()
+            elif problem.deleted_at is not None:
+                problem.deleted_at = None
+            self._add_version(s, problem, source="manual", summary=f"状态 → {status}")
+            s.commit()
+
+    def trash_problem(self, problem_id: str) -> None:
+        self.set_problem_status(problem_id, "trashed")
+
+    def restore_problem(self, problem_id: str, to_status: str = "inbox") -> None:
+        if to_status not in {"inbox", "active"}:
+            raise DomainError("恢复目标只能是 inbox 或 active")
+        self.set_problem_status(problem_id, to_status)
+
+    def purge_trashed(self) -> int:
+        with self.session() as s:
+            rows = list(
+                s.scalars(
+                    select(Problem)
+                    .where(Problem.status == "trashed")
+                    .options(selectinload(Problem.tags), selectinload(Problem.assets), selectinload(Problem.versions))
+                ).all()
+            )
+            count = len(rows)
+            for p in rows:
+                p.tags.clear()
+                s.delete(p)
+            s.commit()
+            return count
+
+    def promote_to_active(self, problem_id: str) -> None:
+        self.set_problem_status(problem_id, "active")
+
+    def _add_version(
+        self,
+        session: Session,
+        problem: Problem,
+        *,
+        source: str,
+        summary: str,
+        bump: bool = True,
+    ) -> None:
+        if bump:
+            problem.revision += 1
+        snap = {
+            "title": problem.title,
+            "status": problem.status,
+            "priority": problem.priority,
+            "question_markdown": problem.question_markdown,
+            "correct_answer": problem.correct_answer,
+            "solution_markdown": problem.solution_markdown,
+            "subject_id": problem.subject_id,
+            "chapter_id": problem.chapter_id,
+            "revision": problem.revision,
+        }
+        session.add(
+            Version(
+                id=new_id("ver"),
+                problem_id=problem.id,
+                revision=problem.revision,
+                source=source,
+                summary=summary,
+                snapshot_json=json.dumps(snap, ensure_ascii=False),
+                created_by=self.runtime.identity.user_id,
+            )
+        )
+
+    # ---- image import ----
+
+    def import_images(
+        self,
+        paths: Iterable[Path],
+        *,
+        into_status: str = "inbox",
+        skip_duplicates: bool | None = None,
+    ) -> dict[str, Any]:
+        validate_status(into_status)
+        skip = (
+            self.runtime.settings.import_cfg.skip_duplicates
+            if skip_duplicates is None
+            else skip_duplicates
+        )
+        created: list[str] = []
+        skipped: list[str] = []
+        with self.session() as s:
+            for path in paths:
+                path = Path(path)
+                stored = self.store.store_copy(path, role="original")
+                if skip:
+                    exists = s.scalar(
+                        select(Asset).where(
+                            Asset.sha256 == stored.sha256, Asset.role == "original"
+                        )
+                    )
+                    if exists:
+                        skipped.append(str(path))
+                        continue
+                problem = Problem(
+                    id=new_id("problem"),
+                    status=into_status,
+                    title=path.stem,
+                    question_markdown="",
+                    revision=1,
+                )
+                s.add(problem)
+                s.flush()
+                asset = Asset(
+                    id=new_id("asset"),
+                    problem_id=problem.id,
+                    role="original",
+                    sha256=stored.sha256,
+                    relative_path=stored.relative_path,
+                    mime_type=stored.mime_type,
+                    size_bytes=stored.size_bytes,
+                    is_immutable=True,
+                )
+                s.add(asset)
+                self._add_version(
+                    s, problem, source="import", summary=f"导入图片 {path.name}", bump=False
+                )
+                created.append(problem.id)
+            s.commit()
+        return {"created": created, "skipped": skipped}
+
+    def import_folder(self, folder: Path, *, recursive: bool | None = None) -> dict[str, Any]:
+        folder = Path(folder)
+        if not folder.is_dir():
+            raise DomainError(f"不是文件夹：{folder}")
+        scan = (
+            self.runtime.settings.import_cfg.scan_subfolders
+            if recursive is None
+            else recursive
+        )
+        exts = {e.lower() for e in self.runtime.settings.import_cfg.supported_extensions}
+        files: list[Path] = []
+        if scan:
+            for p in folder.rglob("*"):
+                if p.is_file() and p.suffix.lower() in exts and p.suffix.lower() != ".pdf":
+                    files.append(p)
+        else:
+            for p in folder.iterdir():
+                if p.is_file() and p.suffix.lower() in exts and p.suffix.lower() != ".pdf":
+                    files.append(p)
+        files.sort()
+        return self.import_images(files)
+
+    def attach_original_image(self, problem_id: str, path: Path) -> Asset:
+        with self.session() as s:
+            problem = s.get(Problem, problem_id)
+            if not problem:
+                raise DomainError("题目不存在")
+            stored = self.store.store_copy(path, role="original")
+            asset = Asset(
+                id=new_id("asset"),
+                problem_id=problem.id,
+                role="original",
+                sha256=stored.sha256,
+                relative_path=stored.relative_path,
+                mime_type=stored.mime_type,
+                size_bytes=stored.size_bytes,
+                is_immutable=True,
+            )
+            s.add(asset)
+            problem.updated_at = utcnow()
+            self._add_version(s, problem, source="import", summary="附加原图")
+            s.commit()
+            s.refresh(asset)
+            s.expunge(asset)
+            return asset
+
+    def try_overwrite_original(self, asset_id: str) -> None:
+        """供测试锁定：原图不可覆盖。"""
+        with self.session() as s:
+            asset = s.get(Asset, asset_id)
+            if not asset:
+                raise DomainError("资源不存在")
+            self.store.assert_can_replace(asset.role, asset.is_immutable)
+
+    # ---- backup ----
+
+    def create_backup(self, dest_zip: Path | None = None) -> Path:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest = dest_zip or (self.runtime.paths.backup_dir / f"yancuo-backup-{stamp}.zip")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        db_path = self.runtime.paths.database
+        asset_dir = self.runtime.paths.asset_dir
+        identity = self.runtime.paths.identity_file
+
+        # 释放连接以便复制 SQLite 文件
+        self.runtime.engine.dispose()
+
+        manifest = {
+            "format": "yancuo-local-backup",
+            "version": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "database_id": self.runtime.identity.database_id,
+            "schema_version": self.runtime.schema_version,
+        }
+        with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            zf.write(db_path, arcname="database/error_book.db")
+            if identity.is_file():
+                zf.write(identity, arcname="identity.json")
+            if asset_dir.is_dir():
+                for file in asset_dir.rglob("*"):
+                    if file.is_file():
+                        zf.write(file, arcname=f"assets/{file.relative_to(asset_dir).as_posix()}")
+        return dest
+
+    def restore_backup(self, zip_path: Path, target_root: Path) -> Path:
+        zip_path = Path(zip_path)
+        target_root = Path(target_root)
+        if not zip_path.is_file():
+            raise DomainError("备份文件不存在")
+        target_root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            if "manifest.json" not in names or "database/error_book.db" not in names:
+                raise DomainError("无效的备份包")
+            manifest = json.loads(zf.read("manifest.json"))
+            if manifest.get("format") != "yancuo-local-backup":
+                raise DomainError("备份格式不匹配")
+            tmp = target_root / ".restore_tmp"
+            if tmp.exists():
+                shutil.rmtree(tmp)
+            zf.extractall(tmp)
+
+        db_src = tmp / "database" / "error_book.db"
+        assets_src = tmp / "assets"
+        identity_src = tmp / "identity.json"
+        db_dest = target_root / "error_book.db"
+        assets_dest = target_root / "assets"
+        if db_dest.exists():
+            db_dest.unlink()
+        shutil.copy2(db_src, db_dest)
+        if assets_dest.exists():
+            shutil.rmtree(assets_dest)
+        if assets_src.exists():
+            shutil.copytree(assets_src, assets_dest)
+        else:
+            assets_dest.mkdir(parents=True, exist_ok=True)
+            (assets_dest / "objects").mkdir(parents=True, exist_ok=True)
+        if identity_src.is_file():
+            shutil.copy2(identity_src, target_root / "identity.json")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return target_root
+
+    # ---- word export ----
+
+    def export_problems_docx(self, problem_ids: list[str], dest: Path) -> Path:
+        try:
+            from docx import Document
+        except ImportError as exc:  # pragma: no cover
+            raise DomainError("未安装 python-docx，无法导出 Word") from exc
+
+        problems = []
+        for pid in problem_ids:
+            p = self.get_problem(pid)
+            if p and p.status != "trashed":
+                problems.append(p)
+        if not problems:
+            raise DomainError("没有可导出的题目")
+
+        doc = Document()
+        doc.add_heading("研错库导出", level=0)
+        for idx, p in enumerate(problems, start=1):
+            title = p.title or f"题目 {idx}"
+            doc.add_heading(f"{idx}. {title}", level=1)
+            meta = f"优先级：{p.priority}　状态：{p.status}　ID：{p.id}"
+            doc.add_paragraph(meta)
+            doc.add_heading("原题", level=2)
+            doc.add_paragraph(p.question_markdown or "（空）")
+            if p.question_latex:
+                doc.add_paragraph(f"LaTeX：{p.question_latex}")
+            doc.add_heading("我的作答", level=2)
+            doc.add_paragraph(p.user_answer or "（空）")
+            doc.add_heading("正确答案", level=2)
+            doc.add_paragraph(p.correct_answer or "（空）")
+            doc.add_heading("解析", level=2)
+            doc.add_paragraph(p.solution_markdown or "（空）")
+            if p.error_analysis:
+                doc.add_heading("错因", level=2)
+                doc.add_paragraph(p.error_analysis)
+            if p.notes:
+                doc.add_heading("备注", level=2)
+                doc.add_paragraph(p.notes)
+            doc.add_paragraph("")
+
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(dest)
+        return dest

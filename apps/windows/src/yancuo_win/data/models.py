@@ -112,8 +112,12 @@ class Problem(Base):
     tags: Mapped[list[Tag]] = relationship(
         secondary="problem_tags", back_populates="problems"
     )
-    assets: Mapped[list[Asset]] = relationship(back_populates="problem")
-    versions: Mapped[list[Version]] = relationship(back_populates="problem")
+    assets: Mapped[list[Asset]] = relationship(
+        back_populates="problem", cascade="all, delete-orphan"
+    )
+    versions: Mapped[list[Version]] = relationship(
+        back_populates="problem", cascade="all, delete-orphan"
+    )
 
 
 class Asset(Base):
