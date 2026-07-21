@@ -1,1 +1,5 @@
-"""后台任务中心（阶段 C 启用）。"""
+"""后台任务。"""
+
+from yancuo_win.tasks.worker import AIJobWorker
+
+__all__ = ["AIJobWorker"]

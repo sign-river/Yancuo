@@ -9,12 +9,28 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from yancuo_win.data.models import Base, MetaKV
+from yancuo_win.data.ids import new_id
+from yancuo_win.data.models import Base, MetaKV, Prompt
 from yancuo_win.domain.identity import SCHEMA_VERSION
 
 logger = logging.getLogger("yancuo.data.migrate")
 
 MigrationFn = Callable[[Engine], None]
+
+STRUCTURE_PROMPT = """你是考研错题结构化助手。根据题目图片输出严格 JSON（不要 Markdown 围栏），字段如下：
+{
+  "title": "短标题",
+  "question_markdown": "原题文本",
+  "question_latex": "关键公式 LaTeX，可空",
+  "user_answer": "用户作答，可空",
+  "correct_answer": "正确答案，可空",
+  "solution_markdown": "解析，可空",
+  "error_analysis": "错因，可空",
+  "tags": ["可选标签"],
+  "uncertain_fields": [{"field": "字段名", "content": "存疑内容", "reason": "原因"}]
+}
+只填写允许修改的字段语义；不要建议删除题目；不要编造不存在的原图路径。
+"""
 
 
 def get_schema_version(engine: Engine) -> int:
@@ -42,19 +58,47 @@ def set_schema_version(session: Session, version: int) -> None:
         existing.value = str(version)
 
 
+def _seed_builtin_prompts(session: Session) -> None:
+    from sqlalchemy import select
+
+    existing = session.scalar(select(Prompt).where(Prompt.key == "structure_recognize"))
+    if existing:
+        return
+    session.add(
+        Prompt(
+            id=new_id("prompt"),
+            key="structure_recognize",
+            name="题目结构化识别",
+            body=STRUCTURE_PROMPT,
+            version=1,
+            is_builtin=True,
+        )
+    )
+
+
 def _migrate_to_v1(engine: Engine) -> None:
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         set_schema_version(session, 1)
-        # 标记数据格式版本，便于后续 .ebpack / 跨端校验
         if session.get(MetaKV, "data_format_version") is None:
             session.add(MetaKV(key="data_format_version", value="1"))
         session.commit()
     logger.info("migrated database to schema_version=1")
 
 
+def _migrate_to_v2(engine: Engine) -> None:
+    # 加法：创建阶段 C 新表，并写入内置提示词
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_builtin_prompts(session)
+        set_schema_version(session, 2)
+        session.commit()
+    logger.info("migrated database to schema_version=2")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: _migrate_to_v1,
+    2: _migrate_to_v2,
 }
 
 
@@ -89,6 +133,12 @@ def verify_core_tables(engine: Engine) -> list[str]:
         "tags",
         "problem_tags",
         "versions",
+        "prompts",
+        "ai_jobs",
+        "ai_job_items",
+        "review_sessions",
+        "review_items",
+        "audit_logs",
     }
     with engine.connect() as conn:
         rows = conn.execute(

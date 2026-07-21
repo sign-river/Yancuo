@@ -56,13 +56,16 @@ class AiProviderConfig(BaseModel):
 
 class AiConfig(BaseModel):
     enabled: bool = False
-    default_provider: str = "provider_1"
+    default_provider: str = "mock"
     default_vision_model: str = ""
     default_text_model: str = ""
     request_timeout_seconds: int = Field(default=120, ge=1)
     max_concurrent_tasks: int = Field(default=2, ge=1)
     save_raw_responses: bool = True
     require_review_before_apply: bool = True
+    max_images_per_job: int = Field(default=50, ge=1)
+    max_daily_cost_yuan: float = Field(default=20.0, ge=0)
+    allow_delete: bool = False
     providers: dict[str, AiProviderConfig] = Field(default_factory=dict)
 
 

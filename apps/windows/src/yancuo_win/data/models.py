@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -178,3 +179,113 @@ class Version(Base):
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     problem: Mapped[Problem] = relationship(back_populates="versions")
+
+
+class Prompt(Base):
+    """提示词模板（不写死在业务代码中）。"""
+
+    __tablename__ = "prompts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AiJob(Base):
+    __tablename__ = "ai_jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    prompt_key: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    total_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    done_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    allowed_fields_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    items: Mapped[list[AiJobItem]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+
+
+class AiJobItem(Base):
+    __tablename__ = "ai_job_items"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("ai_jobs.id"), nullable=False, index=True)
+    problem_id: Mapped[str | None] = mapped_column(ForeignKey("problems.id"), nullable=True)
+    asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    raw_response: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    structured_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    cost_estimate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    job: Mapped[AiJob] = relationship(back_populates="items")
+
+
+class ReviewSession(Base):
+    __tablename__ = "review_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)  # ai / workspace / sync
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("ai_jobs.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    items: Mapped[list[ReviewItem]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+
+
+class ReviewItem(Base):
+    __tablename__ = "review_items"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("review_sessions.id"), nullable=False, index=True
+    )
+    problem_id: Mapped[str] = mapped_column(ForeignKey("problems.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    base_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    before_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    proposed_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    uncertain_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    applied_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    session: Mapped[ReviewSession] = relationship(back_populates="items")
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    detail_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    actor: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

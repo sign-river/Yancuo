@@ -15,12 +15,14 @@ def test_default_toml_exists() -> None:
 
 def test_load_default_settings() -> None:
     settings = load_settings(default_toml_path())
-    assert settings.application.schema_version == 1
-    assert settings.ai.enabled is False
+    assert settings.application.schema_version == 2
+    assert settings.ai.enabled is True
     assert settings.cloud.enabled is False
-    provider = settings.ai.providers.get("provider_1")
+    provider = settings.ai.providers.get("mock")
     assert provider is not None
-    assert provider.api_key_env == "YANCUO_AI_API_KEY"
+    openai = settings.ai.providers.get("openai_compatible")
+    assert openai is not None
+    assert openai.api_key_env == "YANCUO_AI_API_KEY"
 
 
 def test_invalid_config_raises(tmp_path: Path) -> None:

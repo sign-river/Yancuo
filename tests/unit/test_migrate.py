@@ -16,11 +16,11 @@ def test_migrate_creates_core_tables(tmp_path: Path) -> None:
     db = tmp_path / "t.db"
     engine = make_engine(db)
     assert get_schema_version(engine) == 0
-    version = migrate(engine, target_version=1)
-    assert version == 1
-    assert get_schema_version(engine) == 1
+    version = migrate(engine, target_version=2)
+    assert version == 2
+    assert get_schema_version(engine) == 2
     assert verify_core_tables(engine) == []
-    assert migrate(engine, target_version=1) == 1
+    assert migrate(engine, target_version=2) == 2
 
 
 def test_bootstrap_creates_layout(
@@ -30,7 +30,7 @@ def test_bootstrap_creates_layout(
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
 
     runtime = bootstrap_runtime()
-    assert runtime.schema_version == 1
+    assert runtime.schema_version == 2
     assert runtime.paths.database.is_file()
     assert runtime.paths.asset_objects_dir.is_dir()
     assert runtime.paths.identity_file.is_file()

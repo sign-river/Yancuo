@@ -6,7 +6,7 @@ language = "zh_CN"
 theme = "system"
 auto_save_seconds = 30
 confirm_before_delete = true
-schema_version = 1
+schema_version = 2
 
 [paths]
 # 相对路径相对于数据根目录解析；也可用绝对路径覆盖。
@@ -27,18 +27,25 @@ skip_duplicates = true
 supported_extensions = [".jpg", ".jpeg", ".png", ".webp", ".pdf"]
 
 [ai]
-# 阶段 A/B 不启用；预留 schema，避免日后破坏配置兼容性。
-enabled = false
-default_provider = "provider_1"
-default_vision_model = ""
-default_text_model = ""
+# 阶段 C：默认 mock（无需密钥）；真实提供商仅通过环境变量读取密钥。
+enabled = true
+default_provider = "mock"
+default_vision_model = "gpt-4o-mini"
+default_text_model = "gpt-4o-mini"
 request_timeout_seconds = 120
 max_concurrent_tasks = 2
 save_raw_responses = true
 require_review_before_apply = true
+max_images_per_job = 50
+max_daily_cost_yuan = 20.0
+allow_delete = false
 
-[ai.providers.provider_1]
+[ai.providers.mock]
 base_url = ""
+api_key_env = ""
+
+[ai.providers.openai_compatible]
+base_url = "https://api.openai.com/v1"
 api_key_env = "YANCUO_AI_API_KEY"
 
 [export]

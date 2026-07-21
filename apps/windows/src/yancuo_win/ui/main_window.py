@@ -26,9 +26,13 @@ from PySide6.QtWidgets import (
 
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.services import AppServices, ProblemFilter
+from yancuo_win.application.ai_service import AIService
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.tasks.worker import AIJobWorker
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
+from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.settings_dialog import SettingsDialog
+from yancuo_win.ui.task_center import TaskCenterDialog
 
 
 class MainWindow(QMainWindow):
@@ -36,8 +40,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.runtime = runtime
         self.services = AppServices(runtime)
+        self.ai = AIService(runtime)
         self._nav_mode = "library"  # library / inbox / active / trashed / subject:<id>
         self._selected_problem_id: str | None = None
+        self._ai_worker: AIJobWorker | None = None
 
         self.setWindowTitle("研错库")
         self.resize(1280, 800)
@@ -61,6 +67,10 @@ class MainWindow(QMainWindow):
             ("新建题目", self._new_problem),
             ("导入图片", self._import_images),
             ("导入文件夹", self._import_folder),
+            ("AI 识别", self._ai_recognize),
+            ("AI 任务", self._open_task_center),
+            ("AI 审核", self._open_review),
+            ("撤销 AI", self._undo_ai),
             ("导出 Word", self._export_word),
             ("备份", self._backup),
             ("恢复备份", self._restore_backup),
@@ -420,6 +430,51 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self) -> None:
         SettingsDialog(self.runtime, self).exec()
+
+    def _ai_recognize(self) -> None:
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "提示", "请先选择带原图的题目")
+            return
+        if self._ai_worker and self._ai_worker.isRunning():
+            QMessageBox.information(self, "提示", "已有 AI 任务在后台运行")
+            return
+        try:
+            job = self.ai.create_structure_job(ids)
+            self._ai_worker = AIJobWorker(self.ai, job.id, self)
+            self._ai_worker.finished_ok.connect(self._on_ai_job_done)
+            self._ai_worker.failed.connect(self._on_ai_job_fail)
+            self._ai_worker.start()
+            self.status.showMessage(f"AI 任务已开始：{job.id}（不阻塞界面）")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法创建 AI 任务", str(exc))
+
+    def _on_ai_job_done(self, job_id: str) -> None:
+        QMessageBox.information(self, "AI 完成", f"任务 {job_id} 完成，请打开「AI 审核」。")
+        self.refresh_all()
+
+    def _on_ai_job_fail(self, job_id: str, err: str) -> None:
+        QMessageBox.warning(self, "AI 失败", f"{job_id}\n{err}")
+
+    def _open_task_center(self) -> None:
+        TaskCenterDialog(self.ai, self).exec()
+        self.refresh_all()
+
+    def _open_review(self) -> None:
+        ReviewDialog(self.ai, self.services, self).exec()
+        self.refresh_all()
+
+    def _undo_ai(self) -> None:
+        pid = self._require_one()
+        if not pid:
+            return
+        try:
+            self.ai.undo_last_ai_accept(pid)
+            QMessageBox.information(self, "已撤销", "已恢复到接受 AI 之前的内容。")
+            self.refresh_problems()
+            self._on_problem_selected()
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法撤销", str(exc))
 
     def _new_subject(self) -> None:
         name, ok = QInputDialog.getText(self, "新建科目", "科目名称：")

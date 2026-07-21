@@ -1,10 +1,8 @@
 # 研错库 Windows 客户端
 
-当前进度：**阶段 B 本地 MVP**。
+当前进度：**阶段 C（AI 导入与审核）**。
 
 ## 环境
-
-- Python 3.11+
 
 ```powershell
 cd apps/windows
@@ -12,22 +10,16 @@ pip install -e ".[dev]"
 python -m yancuo_win
 ```
 
-## 阶段 B 已具备
+## 阶段 C 用法
 
-- 科目 / 章节 / 标签
-- 错题 CRUD、收件箱 ↔ 正式库、回收站
-- 图片导入（去重、原图不可变）
-- Markdown 编辑（文本框级撤销）
-- 搜索筛选
-- 本地 zip 备份与恢复
-- Word 导出（`python-docx`）
+1. 导入带原图的题目  
+2. 选中题目 → **AI 识别**（默认 mock，后台线程）  
+3. **AI 审核** → 查看字段差异 → 接受 / 拒绝  
+4. 选中题目 → **撤销 AI**（恢复接受前内容）  
+5. **AI 任务** 查看进度与费用粗统计  
 
-## 已知降级
+真实模型：在配置中将 `default_provider` 设为 `openai_compatible`，并设置环境变量 `YANCUO_AI_API_KEY`（禁止写入仓库）。
 
-- **PDF 导出**：本阶段未接入 WeasyPrint，避免 Windows 依赖阻断；打印路径以 Word 为准。
+## Schema
 
-## 迁移
-
-```powershell
-python -m yancuo_win.data.migrate_cli
-```
+启动自动迁移至 **schema_version=2**。说明见 `docs/05_schema_v2_变更说明.md`。
