@@ -1,8 +1,8 @@
 # 研错库 Windows 客户端
 
-当前进度：**阶段 C（AI 导入与审核）**。
+当前进度：**阶段 D（外部工作区）**。
 
-## 环境
+## 运行
 
 ```powershell
 cd apps/windows
@@ -10,16 +10,10 @@ pip install -e ".[dev]"
 python -m yancuo_win
 ```
 
-## 阶段 C 用法
+## 工作区
 
-1. 导入带原图的题目  
-2. 选中题目 → **AI 识别**（默认 mock，后台线程）  
-3. **AI 审核** → 查看字段差异 → 接受 / 拒绝  
-4. 选中题目 → **撤销 AI**（恢复接受前内容）  
-5. **AI 任务** 查看进度与费用粗统计  
+1. 选中题目 → **导出工作区**
+2. 用外部编辑器只改 `problems/*/problem.md`（勿改 SQLite）
+3. **导入工作区** → 在 **AI 审核** 中查看 diff（冲突须强制采用外部或保留内部）
 
-真实模型：在配置中将 `default_provider` 设为 `openai_compatible`，并设置环境变量 `YANCUO_AI_API_KEY`（禁止写入仓库）。
-
-## Schema
-
-启动自动迁移至 **schema_version=2**。说明见 `docs/05_schema_v2_变更说明.md`。
+格式说明：`protocol/workspace-format-v1.md`
