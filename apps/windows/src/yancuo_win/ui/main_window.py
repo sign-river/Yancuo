@@ -29,6 +29,7 @@ from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.worker import AIJobWorker
+from yancuo_win.import_export.workspace import WorkspaceService
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.settings_dialog import SettingsDialog
@@ -41,6 +42,7 @@ class MainWindow(QMainWindow):
         self.runtime = runtime
         self.services = AppServices(runtime)
         self.ai = AIService(runtime)
+        self.workspace = WorkspaceService(runtime)
         self._nav_mode = "library"  # library / inbox / active / trashed / subject:<id>
         self._selected_problem_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
@@ -71,6 +73,8 @@ class MainWindow(QMainWindow):
             ("AI 任务", self._open_task_center),
             ("AI 审核", self._open_review),
             ("撤销 AI", self._undo_ai),
+            ("导出工作区", self._export_workspace),
+            ("导入工作区", self._import_workspace),
             ("导出 Word", self._export_word),
             ("备份", self._backup),
             ("恢复备份", self._restore_backup),
@@ -470,11 +474,46 @@ class MainWindow(QMainWindow):
             return
         try:
             self.ai.undo_last_ai_accept(pid)
-            QMessageBox.information(self, "已撤销", "已恢复到接受 AI 之前的内容。")
+            QMessageBox.information(self, "已撤销", "已恢复到接受之前的内容。")
             self.refresh_problems()
             self._on_problem_selected()
         except DomainError as exc:
             QMessageBox.warning(self, "无法撤销", str(exc))
+
+    def _export_workspace(self) -> None:
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "提示", "请先选择要导出的题目")
+            return
+        try:
+            dest = self.workspace.export_workspace(ids)
+            QMessageBox.information(
+                self,
+                "导出完成",
+                f"{dest}\n\n请只编辑工作区内的 Markdown/JSON，不要直接改数据库。",
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+
+    def _import_workspace(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择工作区目录（含 manifest.json）", str(self.runtime.paths.workspace_dir)
+        )
+        if not folder:
+            return
+        try:
+            result = self.workspace.import_workspace(Path(folder))
+            msg = (
+                f"已生成审核项 {len(result['items'])} 个，"
+                f"其中冲突 {len(result['conflicts'])} 个。\n"
+                "请打开「AI 审核」查看差异（工作区与 AI 共用审核列表）。"
+            )
+            if result["errors"]:
+                msg += "\n\n部分失败：\n" + "\n".join(result["errors"][:10])
+            QMessageBox.information(self, "导入完成", msg)
+            self._open_review()
+        except DomainError as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
 
     def _new_subject(self) -> None:
         name, ok = QInputDialog.getText(self, "新建科目", "科目名称：")

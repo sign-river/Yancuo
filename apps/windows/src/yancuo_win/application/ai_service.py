@@ -88,7 +88,7 @@ class AIService:
         with self.session() as s:
             rows = s.scalars(
                 select(ReviewItem)
-                .where(ReviewItem.status == "pending")
+                .where(ReviewItem.status.in_(("pending", "conflict")))
                 .order_by(ReviewItem.id.desc())
             ).all()
             s.expunge_all()
@@ -357,15 +357,19 @@ class AIService:
                 )
                 s.commit()
 
-    def accept_review_item(self, review_item_id: str) -> None:
+    def accept_review_item(self, review_item_id: str, *, force: bool = False) -> None:
         with self.session() as s:
             item = s.get(ReviewItem, review_item_id)
-            if not item or item.status != "pending":
+            if not item or item.status not in {"pending", "conflict"}:
                 raise DomainError("审核项不可接受")
             problem = s.get(Problem, item.problem_id)
             if not problem:
                 raise DomainError("题目不存在")
-            if problem.revision != item.base_revision:
+            if problem.revision != item.base_revision and not force:
+                if item.status == "conflict":
+                    raise DomainError(
+                        "存在冲突：请确认后选择「强制采用外部」或「保留内部」"
+                    )
                 raise DomainError(
                     f"题目已变更（当前 r{problem.revision}，审核基于 r{item.base_revision}），请拒绝后重跑"
                 )
@@ -382,12 +386,11 @@ class AIService:
                         continue
                     tag = s.scalar(select(Tag).where(Tag.name == name))
                     if not tag:
-                        tag = Tag(id=new_id("tag"), name=name, is_system=True)
+                        tag = Tag(id=new_id("tag"), name=name, is_system=False)
                         s.add(tag)
                         s.flush()
                     tag_objs.append(tag)
                 if tag_objs:
-                    # 合并而非静默清空用户标签
                     existing = {t.id: t for t in problem.tags}
                     for t in tag_objs:
                         existing[t.id] = t
@@ -396,12 +399,19 @@ class AIService:
             problem.updated_at = utcnow()
             problem.revision += 1
             snap = snapshot_problem_fields(problem)
+            # 根据 session source 标注版本来源
+            session = s.get(ReviewSession, item.session_id)
+            source = "ai"
+            summary = "接受 AI 结构化结果"
+            if session and session.source == "workspace":
+                source = "workspace"
+                summary = "接受外部工作区修改" + ("（强制）" if force else "")
             ver = Version(
                 id=new_id("ver"),
                 problem_id=problem.id,
                 revision=problem.revision,
-                source="ai",
-                summary="接受 AI 结构化结果",
+                source=source,
+                summary=summary,
                 snapshot_json=json.dumps(snap, ensure_ascii=False),
                 created_by=self.runtime.identity.user_id,
             )
@@ -415,18 +425,17 @@ class AIService:
                 "review_accepted",
                 "review_item",
                 item.id,
-                {"problem_id": problem.id, "version_id": ver.id},
+                {"problem_id": problem.id, "version_id": ver.id, "force": force},
             )
             s.commit()
 
     def reject_review_item(self, review_item_id: str) -> None:
         with self.session() as s:
             item = s.get(ReviewItem, review_item_id)
-            if not item or item.status != "pending":
+            if not item or item.status not in {"pending", "conflict"}:
                 raise DomainError("审核项不可拒绝")
             item.status = "rejected"
             item.decided_at = utcnow()
-            # 拒绝不写正式字段
             self._audit(
                 s,
                 "review_rejected",

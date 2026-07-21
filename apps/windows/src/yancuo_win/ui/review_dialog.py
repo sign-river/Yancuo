@@ -68,7 +68,8 @@ class ReviewDialog(QDialog):
         row = QHBoxLayout()
         for text, slot in (
             ("接受", self._accept),
-            ("拒绝", self._reject),
+            ("强制采用外部", self._force_accept),
+            ("保留内部/拒绝", self._reject),
             ("刷新", self.refresh),
         ):
             btn = QPushButton(text)
@@ -76,7 +77,11 @@ class ReviewDialog(QDialog):
             row.addWidget(btn)
         layout.addLayout(row)
 
-        tip = QLabel("撤销请在主窗口选中题目后使用「撤销 AI」。拒绝不会写入正式字段。")
+        tip = QLabel(
+            "冲突项须用「强制采用外部」或「保留内部」。"
+            "撤销请在主窗口选中题目后使用「撤销 AI」（亦适用于工作区接受）。"
+            "请勿直接修改 SQLite。"
+        )
         tip.setWordWrap(True)
         layout.addWidget(tip)
 
@@ -90,7 +95,10 @@ class ReviewDialog(QDialog):
         for item in self.ai.list_open_review_items():
             proposed = json.loads(item.proposed_json)
             title = proposed.get("title") or item.problem_id[:16]
-            row = QListWidgetItem(f"{title} · r{item.base_revision} · {item.id[:14]}")
+            mark = "⚠冲突" if item.status == "conflict" else "待审"
+            row = QListWidgetItem(
+                f"[{mark}] {title} · r{item.base_revision} · {item.id[:14]}"
+            )
             row.setData(Qt.ItemDataRole.UserRole, item.id)
             self.list.addItem(row)
         self.diff_view.clear()
@@ -136,10 +144,34 @@ class ReviewDialog(QDialog):
             return
         try:
             item = self.ai.get_review_item(rid)
+            if item and item.status == "conflict":
+                QMessageBox.information(
+                    self, "冲突", "请使用「强制采用外部」或「保留内部/拒绝」。"
+                )
+                return
             self.ai.accept_review_item(rid)
             if item:
                 self.ai.assert_original_untouched(item.problem_id)
             QMessageBox.information(self, "已接受", "已写入题库并生成版本记录。")
+            self.refresh()
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法接受", str(exc))
+
+    def _force_accept(self) -> None:
+        rid = self._current_id()
+        if not rid:
+            return
+        if (
+            QMessageBox.question(self, "确认", "强制采用外部版本并覆盖库内当前内容？")
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            item = self.ai.get_review_item(rid)
+            self.ai.accept_review_item(rid, force=True)
+            if item:
+                self.ai.assert_original_untouched(item.problem_id)
+            QMessageBox.information(self, "已强制接受", "已写入题库并生成版本记录。")
             self.refresh()
         except DomainError as exc:
             QMessageBox.warning(self, "无法接受", str(exc))

@@ -1,1 +1,5 @@
-"""导入导出（阶段 B 实现）。"""
+"""导入导出。"""
+
+from yancuo_win.import_export.workspace import WorkspaceService
+
+__all__ = ["WorkspaceService"]
