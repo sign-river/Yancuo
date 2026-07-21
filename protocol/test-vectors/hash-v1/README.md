@@ -6,10 +6,10 @@ Windows 与 Android 内容寻址对象库必须对同一字节流得到相同 SH
 
 十六进制前缀 + ASCII 后缀（无中间分隔）：
 
-| 部分 | 内容 |
-|------|------|
-| JPEG SOI 前缀 | `FF D8 FF`（3 字节） |
-| ASCII | `yancuo-hash-vector`（UTF-8 / ASCII 相同） |
+| 部分          | 内容                                       |
+| ------------- | ------------------------------------------ |
+| JPEG SOI 前缀 | `FF D8 FF`（3 字节）                       |
+| ASCII         | `yancuo-hash-vector`（UTF-8 / ASCII 相同） |
 
 完整字节序列（hex）：
 
@@ -41,9 +41,9 @@ objects/bb/bb35a354143fe5e6514b4c23ec0ac62f1f6c82d515c5d3989aa5b33eb3ea2bc6.bin
 
 ## 实现对照
 
-| 端 | 位置 |
-|----|------|
-| Windows | `yancuo_win.assets.object_store.ObjectStore.hash_file` |
+| 端      | 位置                                                                              |
+| ------- | --------------------------------------------------------------------------------- |
+| Windows | `yancuo_win.assets.object_store.ObjectStore.hash_file`                            |
 | Android | `cn.yancuo.android.data.assets.ObjectStore.hashFile` / 单元测试 `ObjectStoreTest` |
 
 相同内容不得覆盖已有哈希文件（内容寻址、只增不改）。

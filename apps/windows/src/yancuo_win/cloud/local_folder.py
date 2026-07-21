@@ -196,4 +196,69 @@ class LocalFolderProvider(CloudProvider):
             large_file_upload=True,
             delete_release=True,
             max_asset_bytes=None,
+            assets_first=False,
+        )
+
+    # —— 阶段 J：增量 Operation ——
+
+    def _changes_dir(self, owner: str, repo: str) -> Path:
+        path = self._repo_dir(owner, repo) / "changes"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def register_device(self, owner: str, repo: str, device: dict[str, Any]) -> None:
+        path = self._repo_dir(owner, repo) / "devices.json"
+        devices: list[dict[str, Any]] = []
+        if path.is_file():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                devices = raw
+        did = str(device.get("device_id") or "")
+        devices = [d for d in devices if d.get("device_id") != did]
+        devices.append(device)
+        path.write_text(json.dumps(devices, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def append_operations(
+        self, owner: str, repo: str, device_id: str, operations: list[dict[str, Any]]
+    ) -> None:
+        if not operations:
+            return
+        d = self._changes_dir(owner, repo) / device_id
+        d.mkdir(parents=True, exist_ok=True)
+        file = d / "ops.jsonl"
+        with file.open("a", encoding="utf-8") as f:
+            for op in operations:
+                f.write(json.dumps(op, ensure_ascii=False) + "\n")
+
+    def list_remote_operations(
+        self, owner: str, repo: str, *, exclude_device: str | None = None
+    ) -> list[dict[str, Any]]:
+        root = self._changes_dir(owner, repo)
+        items: list[dict[str, Any]] = []
+        if not root.is_dir():
+            return items
+        for device_dir in sorted(root.iterdir()):
+            if not device_dir.is_dir():
+                continue
+            if exclude_device and device_dir.name == exclude_device:
+                continue
+            ops_file = device_dir / "ops.jsonl"
+            if not ops_file.is_file():
+                continue
+            for line in ops_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        items.sort(key=lambda o: str(o.get("timestamp") or ""))
+        return items
+
+    def write_tombstone(self, owner: str, repo: str, entity_id: str, payload: dict[str, Any]) -> None:
+        d = self._repo_dir(owner, repo) / "tombstones"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{entity_id}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )

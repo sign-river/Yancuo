@@ -30,7 +30,7 @@ def test_bootstrap_creates_layout(
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
 
     runtime = bootstrap_runtime()
-    assert runtime.schema_version == 2
+    assert runtime.schema_version == 3
     assert runtime.paths.database.is_file()
     assert runtime.paths.asset_objects_dir.is_dir()
     assert runtime.paths.identity_file.is_file()

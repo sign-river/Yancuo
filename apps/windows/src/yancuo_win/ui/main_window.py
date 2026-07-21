@@ -30,6 +30,7 @@ from yancuo_win.application.ai_service import AIService
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.worker import AIJobWorker
 from yancuo_win.application.cloud_service import CloudBackupService
+from yancuo_win.application.sync_service import SyncService
 from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.import_export.workspace import WorkspaceService
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
         self.workspace = WorkspaceService(runtime)
         self.ebpack = EbpackService(runtime)
         self.cloud = CloudBackupService(runtime)
+        self.sync = SyncService(runtime)
         self._nav_mode = "library"  # library / inbox / active / trashed / subject:<id>
         self._selected_problem_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
@@ -91,6 +93,8 @@ class MainWindow(QMainWindow):
             ("导入 ebpack", self._import_ebpack),
             ("云备份", self._cloud_backup),
             ("云恢复", self._cloud_restore),
+            ("推送增量", self._sync_push),
+            ("拉取合并", self._sync_pull),
             ("备份(zip)", self._backup),
             ("恢复备份", self._restore_backup),
             ("设置", self._open_settings),
@@ -525,6 +529,42 @@ class MainWindow(QMainWindow):
             )
         except DomainError as exc:
             QMessageBox.warning(self, "云恢复失败", str(exc))
+
+    def _sync_push(self) -> None:
+        try:
+            self.sync = SyncService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+            result = self.sync.push_operations()
+            QMessageBox.information(
+                self,
+                "推送增量",
+                f"已推送 {result['pushed']} 条 Operation（非实时同步；需 local_folder）。",
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "推送失败", str(exc))
+
+    def _sync_pull(self) -> None:
+        try:
+            self.sync = SyncService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+            result = self.sync.pull_and_merge()
+            msg = (
+                f"应用 {result['applied']} 条\n"
+                f"自动合并字段约 {result['auto_merged_fields']}\n"
+                f"冲突字段 {result['conflicts']}\n"
+            )
+            if result.get("snapshot"):
+                msg += f"合并前快照：{result['snapshot']}\n"
+            if result.get("review_session_id"):
+                msg += "请打开「审核」处理同步冲突。"
+            QMessageBox.information(self, "拉取合并", msg)
+            if result.get("review_session_id"):
+                ReviewDialog(self.runtime, self.ai, self).exec()
+            self.refresh_list()
+        except DomainError as exc:
+            QMessageBox.warning(self, "拉取失败", str(exc))
 
     def _restore_backup(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

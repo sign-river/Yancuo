@@ -1,0 +1,24 @@
+# 同步合并测试向量 sync-v1
+
+对照 `protocol/sync-protocol-v1.md` 与 `tests/unit/test_phase_j_sync.py`。
+
+## 向量 A：不同字段自动合并
+
+| | base | local | remote | 期望 |
+|--|------|-------|--------|------|
+| priority | 3 | **5** | 3 | 5 |
+| solution_markdown | "" | "" | **"解析R"** | 解析R |
+| 结果 | | | | 自动合并，无冲突 |
+
+## 向量 B：同一正文字段冲突
+
+| | base | local | remote | 期望 |
+|--|------|-------|--------|------|
+| solution_markdown | "旧" | **"本地解析"** | **"远端解析"** | **冲突** |
+| priority | 3 | 3 | 3 | 不变 |
+
+## 向量 C：tags 并集
+
+| | base | local | remote | 期望 |
+|--|------|-------|--------|------|
+| tags | ["a"] | ["a","b"] | ["a","c"] | ["a","b","c"]（顺序可排序） |

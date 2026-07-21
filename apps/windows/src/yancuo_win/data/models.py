@@ -289,3 +289,23 @@ class AuditLog(Base):
     detail_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     actor: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SyncOperation(Base):
+    """本地增量 Operation 日志（阶段 J）。"""
+
+    __tablename__ = "sync_operations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # = operation_id
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    base_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    new_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    origin: Mapped[str] = mapped_column(String(32), default="local", nullable=False)  # local|remote
+

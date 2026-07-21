@@ -343,10 +343,17 @@ class AppServices:
             return problem
 
     def update_problem(self, problem_id: str, fields: dict[str, Any], *, summary: str = "编辑题目") -> Problem:
+        from yancuo_win.application.sync_service import SyncService, sync_snapshot
+
         with self.session() as s:
-            problem = s.get(Problem, problem_id)
+            problem = s.scalar(
+                select(Problem)
+                .where(Problem.id == problem_id)
+                .options(selectinload(Problem.tags))
+            )
             if not problem:
                 raise DomainError("题目不存在")
+            before = sync_snapshot(problem)
             allowed = {
                 "title",
                 "question_markdown",
@@ -383,10 +390,15 @@ class AppServices:
             if changed:
                 problem.updated_at = utcnow()
                 self._add_version(s, problem, source="manual", summary=summary)
+            after = sync_snapshot(problem)
             s.commit()
             s.refresh(problem)
             s.expunge(problem)
-            return problem
+        if changed:
+            SyncService(self.runtime).record_problem_update(
+                problem, before=before, after=after, operation="update"
+            )
+        return problem
 
     def set_problem_status(self, problem_id: str, status: str) -> None:
         with self.session() as s:

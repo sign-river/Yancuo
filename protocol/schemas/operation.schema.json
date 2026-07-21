@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yancuo.local/protocol/schemas/operation.schema.json",
+  "title": "Yancuo Operation v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "format",
+    "format_version",
+    "operation_id",
+    "device_id",
+    "timestamp",
+    "entity_type",
+    "entity_id",
+    "operation",
+    "changed_fields"
+  ],
+  "properties": {
+    "format": { "const": "yancuo-operation" },
+    "format_version": { "const": 1 },
+    "operation_id": { "type": "string", "pattern": "^op_" },
+    "device_id": { "type": "string", "minLength": 1 },
+    "database_id": { "type": "string" },
+    "timestamp": { "type": "string", "minLength": 1 },
+    "entity_type": { "type": "string", "enum": ["problem", "tag", "asset", "review"] },
+    "entity_id": { "type": "string", "minLength": 1 },
+    "operation": { "type": "string", "enum": ["create", "update", "delete", "undelete"] },
+    "base_revision": { "type": "integer", "minimum": 0 },
+    "new_revision": { "type": "integer", "minimum": 0 },
+    "changed_fields": { "type": "object" },
+    "tombstone": { "type": "boolean" },
+    "asset_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "asset_id": { "type": "string" },
+          "sha256": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+# Schema 变更说明（阶段 J）
+
+## 变更原因
+
+阶段 J 需要持久化本地未推送/已应用的增量 Operation，并支持字段级合并与同步冲突审核。
+
+## 兼容性影响
+
+| 项 | 说明 |
+|----|------|
+| `schema_version` | **2 → 3**（加法迁移） |
+| 旧库 | 启动时自动迁移 |
+| 破坏性 | **无** |
+| `data_format_version` | 仍为 1 |
+| 跨端 | 安卓端应接受 `schema_version<=3` 的 `.ebpack` |
+
+## 新增表
+
+- `sync_operations`：本地 Operation 日志（含推送/应用状态）

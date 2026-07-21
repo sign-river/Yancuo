@@ -14,11 +14,10 @@
 
 ## 当前进度
 
-**阶段 I（已完成）**：安卓采集/复习端（Kotlin + Compose；导入 `.ebpack`；哈希与 Windows 对齐）。  
-下一阶段：**J 增量多端同步**。
+**阶段 J（已完成）**：增量 Operation 同步（协议 + Windows 合并/冲突审核；LocalFolder 推送拉取）。  
+下一阶段：**K 分享与生态**。
 
-安卓工程：`android/`（Android Studio 打开）。  
-哈希向量：`protocol/test-vectors/hash-v1/`。
+说明：`docs/06_schema_v3_变更说明.md`；协议：`protocol/sync-protocol-v1.md`。
 
 ## 快速开始（Windows）
 

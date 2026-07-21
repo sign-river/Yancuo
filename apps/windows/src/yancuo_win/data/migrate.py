@@ -96,9 +96,18 @@ def _migrate_to_v2(engine: Engine) -> None:
     logger.info("migrated database to schema_version=2")
 
 
+def _migrate_to_v3(engine: Engine) -> None:
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 3)
+        session.commit()
+    logger.info("migrated database to schema_version=3")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
+    3: _migrate_to_v3,
 }
 
 
@@ -139,6 +148,7 @@ def verify_core_tables(engine: Engine) -> list[str]:
         "review_sessions",
         "review_items",
         "audit_logs",
+        "sync_operations",
     }
     with engine.connect() as conn:
         rows = conn.execute(
