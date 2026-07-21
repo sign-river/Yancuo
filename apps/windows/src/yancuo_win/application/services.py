@@ -23,6 +23,14 @@ from yancuo_win.domain.rules import (
     validate_priority,
     validate_status,
 )
+from yancuo_win.domain.review_rules import (
+    REVIEW_GRADES,
+    compute_next_review_at,
+    is_due,
+    mastery_from_grade,
+    validate_grade,
+)
+from yancuo_win.domain.similarity import text_similarity
 
 
 @dataclass
@@ -34,6 +42,7 @@ class ProblemFilter:
     priority: int | None = None
     query: str | None = None
     include_trashed: bool = False
+    due_for_review: bool = False
 
 
 class AppServices:
@@ -270,12 +279,17 @@ class AppServices:
                     Problem.original_number.ilike(q),
                 )
             )
+        if filt.due_for_review:
+            # 正式题库中到期或从未安排复习的题
+            stmt = stmt.where(Problem.status == "active")
         return stmt.order_by(Problem.updated_at.desc())
 
     def list_problems(self, filt: ProblemFilter | None = None) -> list[Problem]:
         filt = filt or ProblemFilter(status="library")
         with self.session() as s:
-            rows = s.scalars(self._problem_query(filt)).all()
+            rows = list(s.scalars(self._problem_query(filt)).all())
+            if filt.due_for_review:
+                rows = [p for p in rows if is_due(p.next_review_at)]
             s.expunge_all()
             return list(rows)
 
@@ -416,6 +430,156 @@ class AppServices:
     def promote_to_active(self, problem_id: str) -> None:
         self.set_problem_status(problem_id, "active")
 
+    # ---- review ----
+
+    def list_due_reviews(self) -> list[Problem]:
+        return self.list_problems(ProblemFilter(status="active", due_for_review=True))
+
+    def record_review(self, problem_id: str, grade: int) -> dict[str, Any]:
+        """记录复习结果并安排下次日期。不自动删除任何题目。"""
+        grade = validate_grade(grade)
+        next_at = compute_next_review_at(grade)
+        with self.session() as s:
+            problem = s.get(Problem, problem_id)
+            if not problem:
+                raise DomainError("题目不存在")
+            if problem.status == "trashed":
+                raise DomainError("回收站题目不可复习")
+            problem.mastery = mastery_from_grade(grade)
+            problem.next_review_at = next_at
+            problem.review_count = int(problem.review_count or 0) + 1
+            problem.updated_at = utcnow()
+            if problem.status == "inbox":
+                # 复习过的题进入正式库更合理
+                problem.status = "active"
+            self._add_version(
+                s,
+                problem,
+                source="review",
+                summary=f"复习打分 {grade}（{REVIEW_GRADES[grade]}）",
+            )
+            s.commit()
+            return {
+                "problem_id": problem_id,
+                "grade": grade,
+                "label": REVIEW_GRADES[grade],
+                "next_review_at": next_at.isoformat(),
+                "interval_days": (next_at.date() - datetime.now(timezone.utc).date()).days,
+                "review_count": problem.review_count,
+            }
+
+    def schedule_initial_review(self, problem_id: str) -> None:
+        """将题目加入复习队列（下次=今天）。"""
+        with self.session() as s:
+            problem = s.get(Problem, problem_id)
+            if not problem:
+                raise DomainError("题目不存在")
+            problem.next_review_at = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            if problem.status == "inbox":
+                problem.status = "active"
+            problem.updated_at = utcnow()
+            s.commit()
+
+    # ---- duplicates ----
+
+    def find_hash_duplicates(self) -> list[dict[str, Any]]:
+        """按原图 sha256 分组，仅提示不删除。"""
+        with self.session() as s:
+            assets = s.scalars(
+                select(Asset).where(Asset.role == "original", Asset.problem_id.is_not(None))
+            ).all()
+            by_hash: dict[str, list[Asset]] = {}
+            for a in assets:
+                by_hash.setdefault(a.sha256, []).append(a)
+            groups = []
+            for sha, items in by_hash.items():
+                if len(items) < 2:
+                    continue
+                groups.append(
+                    {
+                        "sha256": sha,
+                        "problem_ids": [a.problem_id for a in items if a.problem_id],
+                        "count": len(items),
+                    }
+                )
+            return groups
+
+    def find_text_similar(
+        self, problem_id: str, *, threshold: float = 0.85, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """文本相似提示，不自动合并/删除。"""
+        with self.session() as s:
+            target = s.get(Problem, problem_id)
+            if not target:
+                raise DomainError("题目不存在")
+            others = s.scalars(
+                select(Problem).where(
+                    Problem.id != problem_id,
+                    Problem.status.in_(("inbox", "active", "archived")),
+                )
+            ).all()
+            scored = []
+            for p in others:
+                score = text_similarity(
+                    target.question_markdown or "", p.question_markdown or ""
+                )
+                if score >= threshold:
+                    scored.append(
+                        {
+                            "problem_id": p.id,
+                            "title": p.title,
+                            "score": round(score, 4),
+                        }
+                    )
+            scored.sort(key=lambda x: x["score"], reverse=True)
+            return scored[:limit]
+
+    def batch_update_problems(
+        self,
+        problem_ids: list[str],
+        *,
+        subject_id: str | None = None,
+        chapter_id: str | None = None,
+        priority: int | None = None,
+        add_tag_id: str | None = None,
+    ) -> int:
+        if not problem_ids:
+            return 0
+        if priority is not None:
+            validate_priority(priority)
+        updated = 0
+        with self.session() as s:
+            tag = s.get(Tag, add_tag_id) if add_tag_id else None
+            for pid in problem_ids:
+                problem = s.scalars(
+                    select(Problem)
+                    .where(Problem.id == pid)
+                    .options(selectinload(Problem.tags))
+                ).first()
+                if not problem or problem.status == "trashed":
+                    continue
+                changed = False
+                if subject_id is not None and problem.subject_id != subject_id:
+                    problem.subject_id = subject_id
+                    changed = True
+                if chapter_id is not None and problem.chapter_id != chapter_id:
+                    problem.chapter_id = chapter_id
+                    changed = True
+                if priority is not None and problem.priority != priority:
+                    problem.priority = priority
+                    changed = True
+                if tag is not None and tag not in problem.tags:
+                    problem.tags = list(problem.tags) + [tag]
+                    changed = True
+                if changed:
+                    problem.updated_at = utcnow()
+                    self._add_version(s, problem, source="manual", summary="批量更新")
+                    updated += 1
+            s.commit()
+        return updated
+
     def _add_version(
         self,
         session: Session,
@@ -467,6 +631,7 @@ class AppServices:
         )
         created: list[str] = []
         skipped: list[str] = []
+        skipped_existing: list[dict[str, str]] = []
         with self.session() as s:
             for path in paths:
                 path = Path(path)
@@ -479,6 +644,14 @@ class AppServices:
                     )
                     if exists:
                         skipped.append(str(path))
+                        skipped_existing.append(
+                            {
+                                "path": str(path),
+                                "sha256": stored.sha256,
+                                "existing_problem_id": exists.problem_id or "",
+                                "existing_asset_id": exists.id,
+                            }
+                        )
                         continue
                 problem = Problem(
                     id=new_id("problem"),
@@ -505,7 +678,16 @@ class AppServices:
                 )
                 created.append(problem.id)
             s.commit()
-        return {"created": created, "skipped": skipped}
+        return {
+            "created": created,
+            "skipped": skipped,
+            "skipped_existing": skipped_existing,
+            "duplicate_tip": (
+                f"检测到 {len(skipped)} 张重复原图，已跳过且未删除旧题"
+                if skipped
+                else ""
+            ),
+        }
 
     def import_folder(self, folder: Path, *, recursive: bool | None = None) -> dict[str, Any]:
         folder = Path(folder)

@@ -30,10 +30,12 @@ from yancuo_win.application.ai_service import AIService
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.worker import AIJobWorker
 from yancuo_win.import_export.workspace import WorkspaceService
+from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.settings_dialog import SettingsDialog
 from yancuo_win.ui.task_center import TaskCenterDialog
+from yancuo_win.ui.today_review import TodayReviewDialog
 
 
 class MainWindow(QMainWindow):
@@ -69,6 +71,10 @@ class MainWindow(QMainWindow):
             ("新建题目", self._new_problem),
             ("导入图片", self._import_images),
             ("导入文件夹", self._import_folder),
+            ("今日复习", self._today_review),
+            ("加入复习", self._schedule_review),
+            ("查重", self._find_duplicates),
+            ("批量优先级", self._batch_priority),
             ("AI 识别", self._ai_recognize),
             ("AI 任务", self._open_task_center),
             ("AI 审核", self._open_review),
@@ -164,6 +170,7 @@ class MainWindow(QMainWindow):
             ("全部（收件箱+正式）", "library"),
             ("收件箱", "inbox"),
             ("正式题库", "active"),
+            ("今日复习", "due"),
             ("归档", "archived"),
             ("回收站", "trashed"),
         ]
@@ -197,6 +204,8 @@ class MainWindow(QMainWindow):
             )
         if mode == "library":
             return ProblemFilter(status="library", query=q)
+        if mode == "due":
+            return ProblemFilter(status="active", due_for_review=True, query=q)
         return ProblemFilter(status=mode, query=q)
 
     def refresh_problems(self) -> None:
@@ -355,10 +364,12 @@ class MainWindow(QMainWindow):
             return
         try:
             result = self.services.import_images([Path(f) for f in files])
+            tip = result.get("duplicate_tip") or ""
             QMessageBox.information(
                 self,
                 "导入完成",
-                f"新建 {len(result['created'])} 题，跳过重复 {len(result['skipped'])} 个",
+                f"新建 {len(result['created'])} 题，跳过重复 {len(result['skipped'])} 个"
+                + (f"\n{tip}" if tip else ""),
             )
             self.refresh_all()
         except DomainError as exc:
@@ -514,6 +525,42 @@ class MainWindow(QMainWindow):
             self._open_review()
         except DomainError as exc:
             QMessageBox.warning(self, "导入失败", str(exc))
+
+    def _today_review(self) -> None:
+        TodayReviewDialog(self.services, self).exec()
+        self.refresh_all()
+
+    def _schedule_review(self) -> None:
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "提示", "请先选择题目")
+            return
+        try:
+            for pid in ids:
+                self.services.schedule_initial_review(pid)
+            QMessageBox.information(self, "完成", f"已将 {len(ids)} 题加入今日复习")
+            self.refresh_all()
+        except DomainError as exc:
+            QMessageBox.warning(self, "失败", str(exc))
+
+    def _find_duplicates(self) -> None:
+        pid = self._selected_ids()[0] if self._selected_ids() else None
+        DuplicateDialog(self.services, focus_problem_id=pid, parent=self).exec()
+
+    def _batch_priority(self) -> None:
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "提示", "请先选择题目")
+            return
+        value, ok = QInputDialog.getInt(self, "批量优先级", "优先级 1–5：", 3, 1, 5)
+        if not ok:
+            return
+        try:
+            n = self.services.batch_update_problems(ids, priority=value)
+            QMessageBox.information(self, "完成", f"已更新 {n} 题")
+            self.refresh_problems()
+        except DomainError as exc:
+            QMessageBox.warning(self, "失败", str(exc))
 
     def _new_subject(self) -> None:
         name, ok = QInputDialog.getText(self, "新建科目", "科目名称：")
