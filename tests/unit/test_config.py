@@ -15,7 +15,7 @@ def test_default_toml_exists() -> None:
 
 def test_load_default_settings() -> None:
     settings = load_settings(default_toml_path())
-    assert settings.application.schema_version == 3
+    assert settings.application.schema_version == 4
     assert settings.ai.enabled is True
     assert settings.cloud.enabled is True
     assert settings.cloud.default_provider == "local_folder"

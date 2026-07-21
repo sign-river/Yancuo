@@ -14,10 +14,12 @@
 
 ## 当前进度
 
-**阶段 J（已完成）**：增量 Operation 同步（协议 + Windows 合并/冲突审核；LocalFolder 推送拉取）。  
-下一阶段：**K 分享与生态**。
+**路线图 A–K 主线已完成。**  
+最近：`K` 朋友分享包 `.gmshare`（脱敏 + origin 去重）。  
 
-说明：`docs/06_schema_v3_变更说明.md`；协议：`protocol/sync-protocol-v1.md`。
+可选后续：安卓增量同步、GitLink/GitHub 增量通道、插件/本地模型等。
+
+协议：`protocol/gmshare-format-v1.md`；schema：`docs/07_schema_v4_变更说明.md`。
 
 ## 快速开始（Windows）
 

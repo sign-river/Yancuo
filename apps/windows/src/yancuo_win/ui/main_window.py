@@ -33,6 +33,7 @@ from yancuo_win.application.cloud_service import CloudBackupService
 from yancuo_win.application.sync_service import SyncService
 from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.import_export.ebpack import EbpackService
+from yancuo_win.import_export.gmshare import GmshareService
 from yancuo_win.import_export.workspace import WorkspaceService
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
         self.ai = AIService(runtime)
         self.workspace = WorkspaceService(runtime)
         self.ebpack = EbpackService(runtime)
+        self.gmshare = GmshareService(runtime)
         self.cloud = CloudBackupService(runtime)
         self.sync = SyncService(runtime)
         self._nav_mode = "library"  # library / inbox / active / trashed / subject:<id>
@@ -91,6 +93,8 @@ class MainWindow(QMainWindow):
             ("导出 Word", self._export_word),
             ("导出 ebpack", self._export_ebpack),
             ("导入 ebpack", self._import_ebpack),
+            ("导出分享包", self._export_gmshare),
+            ("导入分享包", self._import_gmshare),
             ("云备份", self._cloud_backup),
             ("云恢复", self._cloud_restore),
             ("推送增量", self._sync_push),
@@ -475,6 +479,56 @@ class MainWindow(QMainWindow):
             )
         except DomainError as exc:
             QMessageBox.warning(self, "恢复失败", str(exc))
+
+    def _export_gmshare(self) -> None:
+        ids: list[str] = []
+        for item in self.problem_list.selectedItems():
+            pid = item.data(Qt.ItemDataRole.UserRole)
+            if pid:
+                ids.append(str(pid))
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出分享包",
+            str(self.runtime.paths.backup_dir / "share.gmshare"),
+            "Yancuo Share (*.gmshare)",
+        )
+        if not path:
+            return
+        try:
+            result = self.gmshare.export_share(
+                ids or None,
+                dest=Path(path),
+                title="研错库分享",
+            )
+            QMessageBox.information(
+                self,
+                "分享包已导出",
+                f"{result.path}\n题目 {result.problem_count}，图片 {result.asset_count}\n"
+                "已默认排除手写作答、私人备注与复习史。",
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+
+    def _import_gmshare(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择分享包",
+            str(self.runtime.paths.backup_dir),
+            "Yancuo Share (*.gmshare)",
+        )
+        if not path:
+            return
+        try:
+            result = self.gmshare.import_share(Path(path))
+            QMessageBox.information(
+                self,
+                "导入完成",
+                f"新建 {result.created}，跳过重复 {result.skipped_duplicates}\n"
+                f"package={result.package_id}",
+            )
+            self.refresh_problems()
+        except DomainError as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
 
     def _cloud_backup(self) -> None:
         try:

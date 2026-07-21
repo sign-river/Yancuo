@@ -309,3 +309,26 @@ class SyncOperation(Base):
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     origin: Mapped[str] = mapped_column(String(32), default="local", nullable=False)  # local|remote
 
+
+class ProblemOrigin(Base):
+    """分享包导入溯源（阶段 K）：用于 origin 去重。"""
+
+    __tablename__ = "problem_origins"
+    __table_args__ = (
+        UniqueConstraint(
+            "origin_package_id",
+            "origin_problem_id",
+            name="uq_origin_package_problem",
+        ),
+    )
+
+    problem_id: Mapped[str] = mapped_column(
+        ForeignKey("problems.id"), primary_key=True
+    )
+    origin_package_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    origin_problem_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    imported_from: Mapped[str] = mapped_column(
+        String(64), default="shared-package", nullable=False
+    )
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+

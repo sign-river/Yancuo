@@ -103,12 +103,12 @@ releases/                  # 完整 .ebpack 快照（非增量通道）
 对每个字段 `f`：
 
 1. `lc = local[f] != base[f]`，`rc = remote[f] != base[f]`
-2. 若仅 `rc` → 取 remote  
-3. 若仅 `lc` → 取 local  
-4. 若皆变且值相等 → 取该值  
+2. 若仅 `rc` → 取 remote
+3. 若仅 `lc` → 取 local
+4. 若皆变且值相等 → 取该值
 5. 若皆变且值不等：
-   - `tags` → 并集  
-   - `is_favorite` → OR  
+   - `tags` → 并集
+   - `is_favorite` → OR
    - 否则若 `f` ∈ 冲突字段 **或** 任意标量分歧 → **冲突**
 6. 冲突项进入 `ReviewSession(source=sync)`，禁止静默覆盖
 
@@ -127,10 +127,10 @@ releases/                  # 完整 .ebpack 快照（非增量通道）
 
 ## 7. 与完整备份的关系
 
-| 通道 | 用途 |
-|------|------|
+| 通道                    | 用途                         |
+| ----------------------- | ---------------------------- |
 | Release + `latest.json` | 换机、灾难恢复、低频完整快照 |
-| `changes/**/*.jsonl` | 增量字段同步 |
+| `changes/**/*.jsonl`    | 增量字段同步                 |
 
 增量失败时仍可用完整备份恢复；**禁止**用每题 Release 代替 Operation。
 

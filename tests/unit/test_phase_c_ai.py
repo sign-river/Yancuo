@@ -33,7 +33,7 @@ def ai(runtime) -> AIService:
 
 
 def test_schema_v2_tables(runtime) -> None:
-    assert get_schema_version(runtime.engine) == 3
+    assert get_schema_version(runtime.engine) == 4
     assert verify_core_tables(runtime.engine) == []
 
 
