@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yancuo-win"
+version = "0.1.0a1"
+description = "研错库 Windows 桌面客户端（阶段 A 骨架）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "See repository LICENSE" }
+authors = [{ name = "Yancuo" }]
+dependencies = [
+  "PySide6>=6.6",
+  "SQLAlchemy>=2.0",
+  "pydantic>=2.0",
+  "pydantic-settings>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+yancuo = "yancuo_win.main:main"
+yancuo-migrate = "yancuo_win.data.migrate_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["../../tests"]
+pythonpath = ["src"]

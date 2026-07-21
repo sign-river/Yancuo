@@ -216,3 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Yancuo runtime / local data
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+apps/windows/.yancuo_data/
+.yancuo_data/
+data/
+inbox/
+cache/
+exports/
+backups/
+workspaces/
+logs/
+*.ebpack
+*.gmkey
+*.gmshare
+
+# IDE
+.idea/
+.vscode/

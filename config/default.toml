@@ -1,0 +1,101 @@
+# 研错库默认配置（无密钥明文）
+# 用户配置可覆盖本文件；敏感值仅通过环境变量或系统凭据引用。
+
+[application]
+language = "zh_CN"
+theme = "system"
+auto_save_seconds = 30
+confirm_before_delete = true
+schema_version = 1
+
+[paths]
+# 相对路径相对于数据根目录解析；也可用绝对路径覆盖。
+database = "error_book.db"
+asset_dir = "assets"
+inbox_dir = "inbox"
+cache_dir = "cache"
+export_dir = "exports"
+backup_dir = "backups"
+template_dir = "templates"
+workspace_dir = "workspaces"
+log_dir = "logs"
+
+[import]
+scan_subfolders = true
+copy_original_files = true
+skip_duplicates = true
+supported_extensions = [".jpg", ".jpeg", ".png", ".webp", ".pdf"]
+
+[ai]
+# 阶段 A/B 不启用；预留 schema，避免日后破坏配置兼容性。
+enabled = false
+default_provider = "provider_1"
+default_vision_model = ""
+default_text_model = ""
+request_timeout_seconds = 120
+max_concurrent_tasks = 2
+save_raw_responses = true
+require_review_before_apply = true
+
+[ai.providers.provider_1]
+base_url = ""
+api_key_env = "YANCUO_AI_API_KEY"
+
+[export]
+default_format = "docx"
+paper_size = "A4"
+orientation = "portrait"
+avoid_problem_page_break = true
+include_original_image = true
+
+[backup]
+enabled = true
+interval_hours = 24
+keep_count = 30
+
+[privacy]
+send_original_images_to_ai = true
+remove_image_metadata = true
+mask_personal_information = false
+
+[cloud]
+# 阶段 A/B 关闭；仅预留字段。
+enabled = false
+default_provider = "gitlink"
+sync_mode = "manual"
+auto_backup = true
+auto_backup_interval_hours = 24
+keep_release_count = 10
+chunk_size_mb = 250
+encrypt_uploads = true
+upload_on_exit = false
+download_on_start = false
+
+[cloud.repository]
+owner = ""
+name = "graduate-mistake-book-data"
+branch = "sync"
+require_private = true
+
+[cloud.gitlink]
+base_url = "https://www.gitlink.org.cn"
+auth_method = "token"
+credential_key = "yancuo_gitlink_token"
+
+[cloud.github]
+base_url = "https://api.github.com"
+auth_method = "github_app"
+credential_key = "yancuo_github_token"
+
+[sync]
+device_name = ""
+conflict_policy = "ask"
+allow_background_download = true
+allow_background_upload = false
+verify_hash_after_upload = true
+create_snapshot_before_merge = true
+
+[encryption]
+enabled = false
+algorithm_version = 1
+key_reference = "yancuo_data_key"
