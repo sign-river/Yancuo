@@ -91,7 +91,8 @@ credential_key = "yancuo_gitlink_token"
 
 [cloud.github]
 base_url = "https://api.github.com"
-auth_method = "github_app"
+# 开发期使用 PAT（classic 或 fine-grained，需 repo/contents:write + releases）；正式可再换 github_app
+auth_method = "token"
 credential_key = "yancuo_github_token"
 
 [sync]

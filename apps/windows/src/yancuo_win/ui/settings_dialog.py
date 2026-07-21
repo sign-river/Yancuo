@@ -38,7 +38,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.runtime = runtime
         self.setWindowTitle("设置")
-        self.resize(640, 520)
+        self.resize(640, 560)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -53,10 +53,12 @@ class SettingsDialog(QDialog):
         self.provider = QComboBox()
         self.provider.addItem("本地文件夹（推荐先测通）", "local_folder")
         self.provider.addItem("GitLink", "gitlink")
+        self.provider.addItem("GitHub", "github")
         idx = self.provider.findData(s.cloud.default_provider)
         if idx < 0:
             idx = self.provider.findData("local_folder")
         self.provider.setCurrentIndex(max(0, idx))
+        self.provider.currentIndexChanged.connect(self._on_provider_changed)
         cloud_form.addRow("默认提供商", self.provider)
 
         self.owner_edit = QLineEdit(s.cloud.repository.owner)
@@ -70,10 +72,9 @@ class SettingsDialog(QDialog):
         browse.clicked.connect(self._browse_local)
         cloud_form.addRow("", browse)
 
-        cred_key = s.cloud.gitlink.credential_key or "yancuo_gitlink_token"
-        self._cred_key = cred_key
-        self.token_status = QLabel(mask_secret(get_secret(cred_key)))
-        cloud_form.addRow("GitLink 令牌", self.token_status)
+        self.token_label = QLabel("令牌")
+        self.token_status = QLabel("")
+        cloud_form.addRow(self.token_label, self.token_status)
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.token_edit.setPlaceholderText("粘贴新令牌后点保存（不会写入仓库/TOML）")
@@ -97,8 +98,8 @@ class SettingsDialog(QDialog):
         tip = QLabel(
             "API 密钥/令牌只保存在操作系统凭据管理器，配置文件仅保存 credential_key 名称。\n"
             "云功能是完整备份与迁移，不是每题实时同步。\n"
-            "GitLink：请手动填写 owner/repo；认证为 Bearer；发布走「先上传附件再挂 Release」。\n"
-            "切换提供商后点「应用提供商到当前会话」，或重启使默认配置生效。"
+            "GitLink：Bearer + 先附件后 Release；GitHub：PAT + 先建 Release 再传 asset。\n"
+            "切换提供商后点「应用提供商到当前会话」。"
         )
         tip.setWordWrap(True)
         layout.addWidget(tip)
@@ -107,7 +108,6 @@ class SettingsDialog(QDialog):
         open_btn.clicked.connect(self._open_data_root)
         layout.addWidget(open_btn)
 
-        # 将会话级选择写入 runtime.settings（进程内）
         apply_btn = QPushButton("应用提供商到当前会话")
         apply_btn.clicked.connect(self._apply_session_provider)
         layout.addWidget(apply_btn)
@@ -116,36 +116,74 @@ class SettingsDialog(QDialog):
         buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
         layout.addWidget(buttons)
 
+        self._refresh_token_ui()
+
+    def _credential_key_for_provider(self) -> str | None:
+        name = self.provider.currentData()
+        s = self.runtime.settings
+        if name == "gitlink":
+            return s.cloud.gitlink.credential_key or "yancuo_gitlink_token"
+        if name == "github":
+            return s.cloud.github.credential_key or "yancuo_github_token"
+        return None
+
+    def _refresh_token_ui(self) -> None:
+        name = self.provider.currentData()
+        key = self._credential_key_for_provider()
+        if name == "gitlink":
+            self.token_label.setText("GitLink 令牌")
+            self.token_status.setText(mask_secret(get_secret(key) if key else None))
+            self.token_edit.setEnabled(True)
+        elif name == "github":
+            self.token_label.setText("GitHub PAT")
+            self.token_status.setText(mask_secret(get_secret(key) if key else None))
+            self.token_edit.setEnabled(True)
+        else:
+            self.token_label.setText("令牌（本地文件夹无需）")
+            self.token_status.setText("—")
+            self.token_edit.setEnabled(False)
+
+    def _on_provider_changed(self) -> None:
+        self._refresh_token_ui()
+
     def _browse_local(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择本地云同步目录")
         if path:
             self.local_root.setText(path)
 
     def _save_token(self) -> None:
+        key = self._credential_key_for_provider()
+        if not key:
+            QMessageBox.information(self, "提示", "当前提供商不需要令牌")
+            return
         token = self.token_edit.text().strip()
         if not token:
             QMessageBox.warning(self, "提示", "请先粘贴令牌")
             return
         try:
-            set_secret(self._cred_key, token)
+            set_secret(key, token)
             self.token_edit.clear()
-            self.token_status.setText(mask_secret(get_secret(self._cred_key)))
+            self.token_status.setText(mask_secret(get_secret(key)))
             QMessageBox.information(self, "已保存", "令牌已写入系统凭据，未写入配置文件。")
         except DomainError as exc:
             QMessageBox.warning(self, "失败", str(exc))
 
     def _clear_token(self) -> None:
-        delete_secret(self._cred_key)
+        key = self._credential_key_for_provider()
+        if not key:
+            return
+        delete_secret(key)
         self.token_status.setText(mask_secret(None))
-        QMessageBox.information(self, "已清除", "系统凭据中的 GitLink 令牌已删除。")
+        QMessageBox.information(self, "已清除", "系统凭据中的令牌已删除。")
 
     def _apply_session_provider(self) -> None:
         name = self.provider.currentData()
         self.runtime.settings.cloud.default_provider = name
         self.runtime.settings.cloud.repository.owner = self.owner_edit.text().strip()
-        self.runtime.settings.cloud.repository.name = self.repo_edit.text().strip() or "graduate-mistake-book-data"
+        self.runtime.settings.cloud.repository.name = (
+            self.repo_edit.text().strip() or "graduate-mistake-book-data"
+        )
         self.runtime.settings.cloud.enabled = True
-        # local root 存到环境，供 factory 使用
         if name == "local_folder":
             os.environ["YANCUO_CLOUD_LOCAL_ROOT"] = self.local_root.text().strip()
         QMessageBox.information(self, "已应用", f"当前会话提供商：{name}")

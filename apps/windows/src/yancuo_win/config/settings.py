@@ -124,7 +124,7 @@ class CloudConfig(BaseModel):
     github: CloudProviderEndpointConfig = Field(
         default_factory=lambda: CloudProviderEndpointConfig(
             base_url="https://api.github.com",
-            auth_method="github_app",
+            auth_method="token",
             credential_key="yancuo_github_token",
         )
     )

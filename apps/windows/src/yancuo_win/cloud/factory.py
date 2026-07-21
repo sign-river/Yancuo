@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from yancuo_win.cloud.base import CloudProvider
+from yancuo_win.cloud.github import GitHubProvider
 from yancuo_win.cloud.gitlink import GitLinkProvider
 from yancuo_win.cloud.local_folder import LocalFolderProvider
 from yancuo_win.config.settings import AppSettings
@@ -28,5 +29,9 @@ def get_cloud_provider(settings: AppSettings, *, local_root: Path | None = None)
             credential_key=cfg.credential_key or "yancuo_gitlink_token",
         )
     if name == "github":
-        raise DomainError("GitHub 提供商将在阶段 H 实现；请先使用 gitlink 或 local_folder")
+        cfg = settings.cloud.github
+        return GitHubProvider(
+            base_url=cfg.base_url or "https://api.github.com",
+            credential_key=cfg.credential_key or "yancuo_github_token",
+        )
     raise DomainError(f"未知云端提供商：{name}")

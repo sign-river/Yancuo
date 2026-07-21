@@ -49,14 +49,12 @@ class CloudBackupService:
     def upload_backup(self) -> dict[str, Any]:
         """手动云备份：上传完整包成功后才更新 latest。"""
         if not self.runtime.settings.cloud.enabled and self.provider.name != "local_folder":
-            # 允许 local_folder 在开发时始终可用；gitlink 需 enabled
-            if self.provider.name == "gitlink":
-                raise DomainError("请先在设置中启用云端备份（cloud.enabled）")
+            raise DomainError("请先在设置中启用云端备份（cloud.enabled）")
 
         caps = self.provider.get_capabilities()
         if not caps.release_assets and self.provider.name not in ("local_folder",):
             raise DomainError(
-                "当前提供商不支持 Release 附件。请改用 local_folder，或检查 GitLink 适配器。"
+                "当前提供商不支持 Release 附件。请改用 local_folder，或检查云端适配器。"
             )
 
         device_id = self.runtime.identity.device_id

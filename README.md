@@ -14,10 +14,8 @@
 
 ## 当前进度
 
-**阶段 G（已完成）**：云备份/恢复（LocalFolder + GitLink Release/附件成熟模式）；令牌仅存系统凭据。  
-下一阶段：**H GitHub 备用后端**。
-
-报告：`tools/gitlink_compat_report.md`。
+**阶段 H（已完成）**：GitHub Releases 备用后端（与 GitLink / 本地文件夹可切换）；令牌仅存系统凭据。  
+下一阶段：**I 安卓采集与复习端**。
 
 ## 快速开始（Windows）
 
