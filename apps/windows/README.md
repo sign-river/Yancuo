@@ -1,6 +1,6 @@
 # 研错库 Windows 客户端
 
-当前进度：**阶段 E（轻量复习与去重）**。
+当前进度：**阶段 F（`.ebpack`）**。
 
 ## 运行
 
@@ -10,12 +10,11 @@ pip install -e ".[dev]"
 python -m yancuo_win
 ```
 
-## 复习
+## ebpack
 
-1. 选中题目 → **加入复习**
-2. **今日复习** → 可隐藏答案 → 五档打分
-3. 下次日期按固定间隔：1/2/4/7/14 天
+- **导出 ebpack** / **导入 ebpack**
+- 权威数据：`database/snapshot.sqlite` + `assets/objects`
+- 恢复前校验 `checksums.sha256`；损坏或 schema 过高会拒绝
+- 协议：`protocol/ebpack-format-v1.md`
 
-## 查重
-
-**查重** 仅提示哈希重复与文本相似，**不会自动删除**。
+旧版 zip 备份（`备份(zip)`）仍可用，新迁移请优先 `.ebpack`。

@@ -29,6 +29,7 @@ from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.worker import AIJobWorker
+from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.import_export.workspace import WorkspaceService
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self.services = AppServices(runtime)
         self.ai = AIService(runtime)
         self.workspace = WorkspaceService(runtime)
+        self.ebpack = EbpackService(runtime)
         self._nav_mode = "library"  # library / inbox / active / trashed / subject:<id>
         self._selected_problem_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
@@ -82,7 +84,9 @@ class MainWindow(QMainWindow):
             ("导出工作区", self._export_workspace),
             ("导入工作区", self._import_workspace),
             ("导出 Word", self._export_word),
-            ("备份", self._backup),
+            ("导出 ebpack", self._export_ebpack),
+            ("导入 ebpack", self._import_ebpack),
+            ("备份(zip)", self._backup),
             ("恢复备份", self._restore_backup),
             ("设置", self._open_settings),
         ]
@@ -421,6 +425,47 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "备份完成", str(dest))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "备份失败", str(exc))
+
+    def _export_ebpack(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出 ebpack",
+            str(self.runtime.paths.backup_dir / "yancuo.ebpack"),
+            "Yancuo Pack (*.ebpack)",
+        )
+        if not path:
+            return
+        try:
+            dest = self.ebpack.export_ebpack(Path(path))
+            QMessageBox.information(self, "导出完成", str(dest))
+        except DomainError as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+
+    def _import_ebpack(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 ebpack",
+            str(self.runtime.paths.backup_dir),
+            "Yancuo Pack (*.ebpack)",
+        )
+        if not path:
+            return
+        target = QFileDialog.getExistingDirectory(
+            self, "选择恢复到的数据目录（建议空目录）"
+        )
+        if not target:
+            return
+        try:
+            result = self.ebpack.restore_ebpack(Path(path), Path(target))
+            QMessageBox.information(
+                self,
+                "恢复完成",
+                f"已恢复到：{result['target_root']}\n"
+                f"schema v{result['schema_version']}\n"
+                "请将 YANCUO_DATA_ROOT 指向该目录后重启。",
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "恢复失败", str(exc))
 
     def _restore_backup(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
