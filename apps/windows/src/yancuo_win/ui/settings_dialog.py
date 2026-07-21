@@ -1,22 +1,36 @@
-"""设置对话框（路径只读展示 + 打开数据目录）。"""
+"""设置对话框：路径、云端提供商与令牌（令牌进系统凭据）。"""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
 )
 
 from yancuo_win.application.bootstrap import RuntimeContext
+from yancuo_win.cloud.factory import get_cloud_provider
+from yancuo_win.domain.rules import DomainError
+from yancuo_win.infrastructure.credentials import (
+    delete_secret,
+    get_secret,
+    mask_secret,
+    set_secret,
+)
 
 
 class SettingsDialog(QDialog):
@@ -24,26 +38,66 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.runtime = runtime
         self.setWindowTitle("设置")
-        self.resize(560, 360)
+        self.resize(640, 520)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
         s = runtime.settings
         form.addRow("语言", QLabel(s.application.language))
-        form.addRow("主题", QLabel(s.application.theme))
-        form.addRow("自动保存(秒)", QLabel(str(s.application.auto_save_seconds)))
         form.addRow("数据根目录", QLabel(str(runtime.paths.root)))
         form.addRow("数据库", QLabel(str(runtime.paths.database)))
-        form.addRow("资源目录", QLabel(str(runtime.paths.asset_dir)))
-        form.addRow("备份目录", QLabel(str(runtime.paths.backup_dir)))
-        form.addRow("配置文件", QLabel(os.environ.get("YANCUO_CONFIG_FILE", "(默认 config/default.toml)")))
-        form.addRow("AI", QLabel("已关闭（阶段 B）" if not s.ai.enabled else "开启"))
-        form.addRow("云端", QLabel("已关闭（阶段 B）" if not s.cloud.enabled else "开启"))
+        form.addRow("AI", QLabel("开启" if s.ai.enabled else "关闭"))
+
+        layout.addWidget(QLabel("—— 云端备份（非实时同步）——"))
+        cloud_form = QFormLayout()
+        self.provider = QComboBox()
+        self.provider.addItem("本地文件夹（推荐先测通）", "local_folder")
+        self.provider.addItem("GitLink", "gitlink")
+        idx = self.provider.findData(s.cloud.default_provider)
+        if idx < 0:
+            idx = self.provider.findData("local_folder")
+        self.provider.setCurrentIndex(max(0, idx))
+        cloud_form.addRow("默认提供商", self.provider)
+
+        self.owner_edit = QLineEdit(s.cloud.repository.owner)
+        self.repo_edit = QLineEdit(s.cloud.repository.name)
+        cloud_form.addRow("仓库 owner", self.owner_edit)
+        cloud_form.addRow("仓库 name", self.repo_edit)
+
+        self.local_root = QLineEdit(_default_local_root(runtime))
+        cloud_form.addRow("本地云目录", self.local_root)
+        browse = QPushButton("浏览…")
+        browse.clicked.connect(self._browse_local)
+        cloud_form.addRow("", browse)
+
+        cred_key = s.cloud.gitlink.credential_key or "yancuo_gitlink_token"
+        self._cred_key = cred_key
+        self.token_status = QLabel(mask_secret(get_secret(cred_key)))
+        cloud_form.addRow("GitLink 令牌", self.token_status)
+        self.token_edit = QLineEdit()
+        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token_edit.setPlaceholderText("粘贴新令牌后点保存（不会写入仓库/TOML）")
+        cloud_form.addRow("新令牌", self.token_edit)
+
+        tok_row = QHBoxLayout()
+        save_tok = QPushButton("保存令牌到系统凭据")
+        save_tok.clicked.connect(self._save_token)
+        clear_tok = QPushButton("清除令牌")
+        clear_tok.clicked.connect(self._clear_token)
+        test_btn = QPushButton("测试连接")
+        test_btn.clicked.connect(self._test_cloud)
+        tok_row.addWidget(save_tok)
+        tok_row.addWidget(clear_tok)
+        tok_row.addWidget(test_btn)
+        cloud_form.addRow(tok_row)
+
         layout.addLayout(form)
+        layout.addLayout(cloud_form)
 
         tip = QLabel(
-            "修改路径请设置环境变量 YANCUO_DATA_ROOT / YANCUO_CONFIG_FILE 后重启。\n"
-            "API 密钥不得写入配置文件，仅使用环境变量名引用。"
+            "API 密钥/令牌只保存在操作系统凭据管理器，配置文件仅保存 credential_key 名称。\n"
+            "云功能用于完整备份与迁移，不是每题实时同步。切换提供商后，请重启应用使默认提供商生效"
+            "（或通过环境变量覆盖）。当前会话可用「测试连接」验证。"
         )
         tip.setWordWrap(True)
         layout.addWidget(tip)
@@ -52,11 +106,66 @@ class SettingsDialog(QDialog):
         open_btn.clicked.connect(self._open_data_root)
         layout.addWidget(open_btn)
 
+        # 将会话级选择写入 runtime.settings（进程内）
+        apply_btn = QPushButton("应用提供商到当前会话")
+        apply_btn.clicked.connect(self._apply_session_provider)
+        layout.addWidget(apply_btn)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
         buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
         layout.addWidget(buttons)
+
+    def _browse_local(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "选择本地云同步目录")
+        if path:
+            self.local_root.setText(path)
+
+    def _save_token(self) -> None:
+        token = self.token_edit.text().strip()
+        if not token:
+            QMessageBox.warning(self, "提示", "请先粘贴令牌")
+            return
+        try:
+            set_secret(self._cred_key, token)
+            self.token_edit.clear()
+            self.token_status.setText(mask_secret(get_secret(self._cred_key)))
+            QMessageBox.information(self, "已保存", "令牌已写入系统凭据，未写入配置文件。")
+        except DomainError as exc:
+            QMessageBox.warning(self, "失败", str(exc))
+
+    def _clear_token(self) -> None:
+        delete_secret(self._cred_key)
+        self.token_status.setText(mask_secret(None))
+        QMessageBox.information(self, "已清除", "系统凭据中的 GitLink 令牌已删除。")
+
+    def _apply_session_provider(self) -> None:
+        name = self.provider.currentData()
+        self.runtime.settings.cloud.default_provider = name
+        self.runtime.settings.cloud.repository.owner = self.owner_edit.text().strip()
+        self.runtime.settings.cloud.repository.name = self.repo_edit.text().strip() or "graduate-mistake-book-data"
+        self.runtime.settings.cloud.enabled = True
+        # local root 存到环境，供 factory 使用
+        if name == "local_folder":
+            os.environ["YANCUO_CLOUD_LOCAL_ROOT"] = self.local_root.text().strip()
+        QMessageBox.information(self, "已应用", f"当前会话提供商：{name}")
+
+    def _test_cloud(self) -> None:
+        self._apply_session_provider()
+        try:
+            root = (
+                Path(self.local_root.text().strip())
+                if self.provider.currentData() == "local_folder"
+                else None
+            )
+            provider = get_cloud_provider(self.runtime.settings, local_root=root)
+            result = provider.test_connection()
+            QMessageBox.information(
+                self,
+                "连接成功",
+                json.dumps(result, ensure_ascii=False, indent=2),
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "连接失败", str(exc))
 
     def _open_data_root(self) -> None:
         path = self.runtime.paths.root
@@ -69,3 +178,10 @@ class SettingsDialog(QDialog):
                 subprocess.run(["xdg-open", str(path)], check=False)
         except OSError as exc:
             QMessageBox.warning(self, "无法打开", str(exc))
+
+
+def _default_local_root(runtime: RuntimeContext) -> str:
+    env = os.environ.get("YANCUO_CLOUD_LOCAL_ROOT")
+    if env:
+        return env
+    return str(runtime.paths.backup_dir / "cloud_local")

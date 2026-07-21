@@ -66,15 +66,15 @@ remove_image_metadata = true
 mask_personal_information = false
 
 [cloud]
-# 阶段 A/B 关闭；仅预留字段。
-enabled = false
-default_provider = "gitlink"
+# 阶段 G：可启用；令牌不进本文件。
+enabled = true
+default_provider = "local_folder"
 sync_mode = "manual"
-auto_backup = true
+auto_backup = false
 auto_backup_interval_hours = 24
 keep_release_count = 10
 chunk_size_mb = 250
-encrypt_uploads = true
+encrypt_uploads = false
 upload_on_exit = false
 download_on_start = false
 

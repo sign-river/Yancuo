@@ -14,8 +14,10 @@
 
 ## 当前进度
 
-**阶段 F（已完成）**：`.ebpack` 可移植包（snapshot.sqlite 权威路径、checksums 校验）。  
-下一阶段：**G 云备份（GitLink 优先）**。
+**阶段 G（已完成）**：云备份/恢复（LocalFolder 全流程 + GitLink 连通与凭据设置）；令牌仅存系统凭据。  
+下一阶段：**H GitHub 备用后端**。
+
+报告：`tools/gitlink_compat_report.md`。
 
 ## 快速开始（Windows）
 

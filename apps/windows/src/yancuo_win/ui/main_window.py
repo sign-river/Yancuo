@@ -29,6 +29,8 @@ from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.worker import AIJobWorker
+from yancuo_win.application.cloud_service import CloudBackupService
+from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.import_export.workspace import WorkspaceService
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
@@ -47,6 +49,7 @@ class MainWindow(QMainWindow):
         self.ai = AIService(runtime)
         self.workspace = WorkspaceService(runtime)
         self.ebpack = EbpackService(runtime)
+        self.cloud = CloudBackupService(runtime)
         self._nav_mode = "library"  # library / inbox / active / trashed / subject:<id>
         self._selected_problem_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
@@ -86,6 +89,8 @@ class MainWindow(QMainWindow):
             ("导出 Word", self._export_word),
             ("导出 ebpack", self._export_ebpack),
             ("导入 ebpack", self._import_ebpack),
+            ("云备份", self._cloud_backup),
+            ("云恢复", self._cloud_restore),
             ("备份(zip)", self._backup),
             ("恢复备份", self._restore_backup),
             ("设置", self._open_settings),
@@ -466,6 +471,60 @@ class MainWindow(QMainWindow):
             )
         except DomainError as exc:
             QMessageBox.warning(self, "恢复失败", str(exc))
+
+    def _cloud_backup(self) -> None:
+        try:
+            # 按当前设置重建 provider（设置里可能已切换）
+            self.cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+            self.cloud.ensure_repository()
+            result = self.cloud.upload_backup()
+            QMessageBox.information(
+                self,
+                "云备份完成",
+                f"tag={result['tag']}\nsha256={result['sha256'][:16]}…\n"
+                "已先上传完整包，再更新 latest 指针（非实时同步）。",
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "云备份失败", str(exc))
+
+    def _cloud_restore(self) -> None:
+        target = QFileDialog.getExistingDirectory(
+            self, "选择恢复到的数据目录（建议空目录）"
+        )
+        if not target:
+            return
+        try:
+            self.cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+            backups = self.cloud.list_backups()
+            latest = next((b for b in backups if b.get("is_latest")), None)
+            summary = "云端备份列表：\n" + "\n".join(
+                f"- {b['tag']}{' (latest)' if b.get('is_latest') else ''}" for b in backups[:20]
+            )
+            if not backups:
+                QMessageBox.information(self, "云恢复", "没有可恢复的备份")
+                return
+            if (
+                QMessageBox.question(
+                    self,
+                    "确认恢复",
+                    summary + "\n\n将下载 latest（若无则需手动指定）并恢复到所选目录。继续？",
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+            result = self.cloud.restore_latest_to(Path(target))
+            QMessageBox.information(
+                self,
+                "云恢复完成",
+                f"{result['target_root']}\n请设置 YANCUO_DATA_ROOT 后重启。\n"
+                f"（当前 latest={latest['tag'] if latest else '未知'}）",
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "云恢复失败", str(exc))
 
     def _restore_backup(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

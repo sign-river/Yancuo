@@ -17,7 +17,8 @@ def test_load_default_settings() -> None:
     settings = load_settings(default_toml_path())
     assert settings.application.schema_version == 2
     assert settings.ai.enabled is True
-    assert settings.cloud.enabled is False
+    assert settings.cloud.enabled is True
+    assert settings.cloud.default_provider == "local_folder"
     provider = settings.ai.providers.get("mock")
     assert provider is not None
     openai = settings.ai.providers.get("openai_compatible")
