@@ -217,21 +217,15 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Yancuo runtime / local data
+# Yancuo runtime / local data (do not ignore Python package .../data/)
 .env
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 apps/windows/.yancuo_data/
+apps/windows/.yancuo_data_smoke/
 .yancuo_data/
-data/
-inbox/
-cache/
-exports/
-backups/
-workspaces/
-logs/
 *.ebpack
 *.gmkey
 *.gmshare
