@@ -22,6 +22,10 @@ def main() -> int:
     app.setApplicationName("研错库")
     app.setOrganizationName("Yancuo")
 
+    from yancuo_win.ui.theme import apply_app_theme
+
+    apply_app_theme(app)
+
     window = MainWindow(runtime)
     window.show()
     return app.exec()

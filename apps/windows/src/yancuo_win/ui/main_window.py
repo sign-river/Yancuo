@@ -1,11 +1,10 @@
-"""主窗口：列表、筛选、导入、导出、备份（阶段 B）。"""
+"""主窗口：侧栏分页 + 题库三栏（现代化壳，业务槽复用）。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -17,30 +16,51 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
-from yancuo_win.application.bootstrap import RuntimeContext
-from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.application.ai_service import AIService
-from yancuo_win.domain.rules import DomainError
-from yancuo_win.tasks.worker import AIJobWorker
+from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.cloud_service import CloudBackupService
+from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.application.sync_service import SyncService
 from yancuo_win.cloud.factory import get_cloud_provider
+from yancuo_win.domain.rules import DomainError
 from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.import_export.gmshare import GmshareService
 from yancuo_win.import_export.workspace import WorkspaceService
+from yancuo_win.tasks.worker import AIJobWorker
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.settings_dialog import SettingsDialog
 from yancuo_win.ui.task_center import TaskCenterDialog
 from yancuo_win.ui.today_review import TodayReviewDialog
+from yancuo_win.ui.widgets import (
+    CardFrame,
+    button_row,
+    danger_button,
+    ghost_button,
+    primary_button,
+)
+
+_PAGE_LIBRARY = 0
+_PAGE_REVIEW = 1
+_PAGE_AI = 2
+_PAGE_DATA = 3
+_PAGE_SETTINGS = 4
+
+_STATUS_LABELS = {
+    "inbox": "收件箱",
+    "active": "正式",
+    "archived": "归档",
+    "trashed": "回收站",
+}
 
 
 class MainWindow(QMainWindow):
@@ -54,130 +74,447 @@ class MainWindow(QMainWindow):
         self.gmshare = GmshareService(runtime)
         self.cloud = CloudBackupService(runtime)
         self.sync = SyncService(runtime)
-        self._nav_mode = "library"  # library / inbox / active / trashed / subject:<id>
+        self._nav_mode = "library"
         self._selected_problem_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
+        self._ctx_buttons: list[QPushButton] = []
 
         self.setWindowTitle("研错库")
-        self.resize(1280, 800)
-        self._build_toolbar()
+        self.resize(1320, 840)
         self._build_central()
         self._build_status()
         self.refresh_all()
+        self._update_context_bar(False)
+        self._refresh_focus_pages()
 
-    def _build_toolbar(self) -> None:
-        toolbar = QToolBar("主工具栏")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("搜索题目 / 答案 / 备注 / 书名…")
-        self.search_edit.setFixedWidth(260)
-        self.search_edit.returnPressed.connect(self.refresh_problems)
-        toolbar.addWidget(self.search_edit)
-
-        actions = [
-            ("新建题目", self._new_problem),
-            ("导入图片", self._import_images),
-            ("导入文件夹", self._import_folder),
-            ("今日复习", self._today_review),
-            ("加入复习", self._schedule_review),
-            ("查重", self._find_duplicates),
-            ("批量优先级", self._batch_priority),
-            ("AI 识别", self._ai_recognize),
-            ("AI 任务", self._open_task_center),
-            ("AI 审核", self._open_review),
-            ("撤销 AI", self._undo_ai),
-            ("导出工作区", self._export_workspace),
-            ("导入工作区", self._import_workspace),
-            ("导出 Word", self._export_word),
-            ("导出 ebpack", self._export_ebpack),
-            ("导入 ebpack", self._import_ebpack),
-            ("导出分享包", self._export_gmshare),
-            ("导入分享包", self._import_gmshare),
-            ("云备份", self._cloud_backup),
-            ("云恢复", self._cloud_restore),
-            ("推送增量", self._sync_push),
-            ("拉取合并", self._sync_pull),
-            ("备份(zip)", self._backup),
-            ("恢复备份", self._restore_backup),
-            ("设置", self._open_settings),
-        ]
-        for label, slot in actions:
-            act = QAction(label, self)
-            act.triggered.connect(slot)
-            toolbar.addAction(act)
+    # —— 壳布局 ——
 
     def _build_central(self) -> None:
         root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(8, 8, 8, 8)
+        root.setObjectName("PageRoot")
+        layout = QHBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(self._build_sidebar())
 
-        left = QFrame()
-        left_layout = QVBoxLayout(left)
-        left_layout.addWidget(QLabel("导航"))
-        self.nav_list = QListWidget()
-        self.nav_list.currentItemChanged.connect(self._on_nav_changed)
-        left_layout.addWidget(self.nav_list)
-        from PySide6.QtWidgets import QPushButton
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_library_page())
+        self.stack.addWidget(self._build_review_page())
+        self.stack.addWidget(self._build_ai_page())
+        self.stack.addWidget(self._build_data_page())
+        self.stack.addWidget(self._build_settings_page())
+        layout.addWidget(self.stack, stretch=1)
 
-        btn_row = QHBoxLayout()
-        b1 = QPushButton("新建科目")
-        b1.clicked.connect(self._new_subject)
-        b2 = QPushButton("新建标签")
-        b2.clicked.connect(self._new_tag)
-        btn_row.addWidget(b1)
-        btn_row.addWidget(b2)
-        left_layout.addLayout(btn_row)
-
-        center = QFrame()
-        center_layout = QVBoxLayout(center)
-        center_layout.addWidget(QLabel("错题列表（双击编辑）"))
-        self.problem_list = QListWidget()
-        self.problem_list.itemSelectionChanged.connect(self._on_problem_selected)
-        self.problem_list.itemDoubleClicked.connect(self._edit_selected)
-        center_layout.addWidget(self.problem_list)
-
-        action_row = QHBoxLayout()
-        for text, slot in (
-            ("编辑", self._edit_selected),
-            ("入正式库", self._promote_selected),
-            ("删除", self._trash_selected),
-            ("恢复", self._restore_selected),
-            ("清空回收站", self._purge_trash),
-        ):
-            btn = QPushButton(text)
-            btn.clicked.connect(slot)
-            action_row.addWidget(btn)
-        center_layout.addLayout(action_row)
-
-        right = QFrame()
-        right_layout = QVBoxLayout(right)
-        right_layout.addWidget(QLabel("属性"))
-        self.detail = QLabel("未选中题目")
-        self.detail.setWordWrap(True)
-        self.detail.setAlignment(Qt.AlignmentFlag.AlignTop)
-        right_layout.addWidget(self.detail, stretch=1)
-
-        splitter.addWidget(left)
-        splitter.addWidget(center)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
-        splitter.setStretchFactor(2, 1)
-        layout.addWidget(splitter)
         self.setCentralWidget(root)
+        self.main_nav.setCurrentRow(0)
+
+    def _build_sidebar(self) -> QFrame:
+        side = QFrame()
+        side.setObjectName("AppSidebar")
+        side.setFixedWidth(200)
+        lay = QVBoxLayout(side)
+        lay.setContentsMargins(14, 18, 14, 14)
+        lay.setSpacing(4)
+
+        brand = QLabel("研错库")
+        brand.setObjectName("BrandTitle")
+        sub = QLabel("本地优先错题本")
+        sub.setObjectName("BrandSubtitle")
+        lay.addWidget(brand)
+        lay.addWidget(sub)
+
+        self.main_nav = QListWidget()
+        self.main_nav.setObjectName("MainNav")
+        self.main_nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for label, page in (
+            ("题库", _PAGE_LIBRARY),
+            ("复习", _PAGE_REVIEW),
+            ("AI", _PAGE_AI),
+            ("数据", _PAGE_DATA),
+            ("设置", _PAGE_SETTINGS),
+        ):
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, page)
+            self.main_nav.addItem(item)
+        self.main_nav.currentRowChanged.connect(self._on_main_nav)
+        lay.addWidget(self.main_nav, stretch=1)
+
+        stats = QLabel()
+        stats.setObjectName("MutedLabel")
+        stats.setWordWrap(True)
+        self.sidebar_stats = stats
+        lay.addWidget(stats)
+        return side
+
+    def _on_main_nav(self, row: int) -> None:
+        if row < 0:
+            return
+        item = self.main_nav.item(row)
+        page = item.data(Qt.ItemDataRole.UserRole) if item else _PAGE_LIBRARY
+        self.stack.setCurrentIndex(int(page))
+        if page == _PAGE_LIBRARY:
+            self.refresh_problems()
+        elif page in (_PAGE_REVIEW, _PAGE_AI, _PAGE_SETTINGS):
+            self._refresh_focus_pages()
 
     def _build_status(self) -> None:
         self.status = QStatusBar()
         self.setStatusBar(self.status)
 
+    # —— 题库页 ——
+
+    def _build_library_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("PageRoot")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(16, 16, 16, 12)
+        outer.setSpacing(12)
+
+        header = QHBoxLayout()
+        title = QLabel("题库")
+        title.setObjectName("PageTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setObjectName("SearchEdit")
+        self.search_edit.setPlaceholderText("搜索题目 / 答案 / 备注 / 书名…")
+        self.search_edit.setFixedWidth(280)
+        self.search_edit.returnPressed.connect(self.refresh_problems)
+        header.addWidget(self.search_edit)
+
+        btn_new = primary_button("新建题目")
+        btn_new.clicked.connect(self._new_problem)
+        btn_import = QPushButton("导入图片")
+        btn_import.clicked.connect(self._import_images)
+        btn_more = QPushButton("更多 ▾")
+        btn_more.clicked.connect(self._library_more_menu)
+        header.addWidget(btn_new)
+        header.addWidget(btn_import)
+        header.addWidget(btn_more)
+        outer.addLayout(header)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        filter_wrap = CardFrame()
+        filter_wrap.body.setContentsMargins(10, 12, 10, 10)
+        filter_wrap.add_title("筛选")
+        self.nav_list = QListWidget()
+        self.nav_list.setObjectName("FilterNav")
+        self.nav_list.currentItemChanged.connect(self._on_nav_changed)
+        filter_wrap.body.addWidget(self.nav_list, stretch=1)
+        filter_btns = QHBoxLayout()
+        b_sub = ghost_button("新建科目")
+        b_sub.clicked.connect(self._new_subject)
+        b_tag = ghost_button("新建标签")
+        b_tag.clicked.connect(self._new_tag)
+        filter_btns.addWidget(b_sub)
+        filter_btns.addWidget(b_tag)
+        filter_wrap.body.addLayout(filter_btns)
+        filter_wrap.setMinimumWidth(180)
+        filter_wrap.setMaximumWidth(240)
+        splitter.addWidget(filter_wrap)
+
+        center = QWidget()
+        center_lay = QVBoxLayout(center)
+        center_lay.setContentsMargins(0, 0, 0, 0)
+        center_lay.setSpacing(8)
+        list_hint = QLabel("错题列表 · 双击编辑")
+        list_hint.setObjectName("MutedLabel")
+        center_lay.addWidget(list_hint)
+        self.problem_list = QListWidget()
+        self.problem_list.setObjectName("ProblemList")
+        self.problem_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.problem_list.itemSelectionChanged.connect(self._on_problem_selected)
+        self.problem_list.itemDoubleClicked.connect(self._edit_selected)
+        center_lay.addWidget(self.problem_list, stretch=1)
+
+        self.context_bar = QFrame()
+        self.context_bar.setObjectName("ContextBar")
+        ctx = QHBoxLayout(self.context_bar)
+        ctx.setContentsMargins(10, 8, 10, 8)
+        ctx.setSpacing(8)
+        self._ctx_buttons = []
+        for text, slot, kind in (
+            ("编辑", self._edit_selected, "primary"),
+            ("入正式库", self._promote_selected, "normal"),
+            ("加入复习", self._schedule_review, "normal"),
+            ("AI 识别", self._ai_recognize, "normal"),
+            ("删除", self._trash_selected, "danger"),
+            ("恢复", self._restore_selected, "normal"),
+            ("清空回收站", self._purge_trash, "danger"),
+        ):
+            if kind == "primary":
+                btn = primary_button(text)
+            elif kind == "danger":
+                btn = danger_button(text)
+            else:
+                btn = QPushButton(text)
+            btn.clicked.connect(slot)
+            ctx.addWidget(btn)
+            self._ctx_buttons.append(btn)
+        ctx.addStretch(1)
+        center_lay.addWidget(self.context_bar)
+        splitter.addWidget(center)
+
+        detail_card = CardFrame()
+        detail_card.add_title("属性")
+        self.detail = QLabel("选中一道题查看详情")
+        self.detail.setObjectName("MutedLabel")
+        self.detail.setWordWrap(True)
+        self.detail.setAlignment(Qt.AlignmentFlag.AlignTop)
+        detail_card.body.addWidget(self.detail, stretch=1)
+        detail_card.setMinimumWidth(240)
+        splitter.addWidget(detail_card)
+
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([200, 640, 280])
+        outer.addWidget(splitter, stretch=1)
+        return page
+
+    def _library_more_menu(self) -> None:
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        menu.addAction("导入文件夹", self._import_folder)
+        menu.addAction("查重", self._find_duplicates)
+        menu.addAction("批量优先级", self._batch_priority)
+        menu.addSeparator()
+        menu.addAction("导出 Word", self._export_word)
+        menu.addAction("导出工作区", self._export_workspace)
+        menu.addAction("导入工作区", self._import_workspace)
+        sender = self.sender()
+        if isinstance(sender, QPushButton):
+            menu.exec(sender.mapToGlobal(sender.rect().bottomLeft()))
+        else:
+            menu.exec(self.cursor().pos())
+
+    def _update_context_bar(self, has_selection: bool) -> None:
+        self.context_bar.setVisible(has_selection or self._nav_mode == "trashed")
+        for btn in self._ctx_buttons:
+            label = btn.text()
+            if label == "清空回收站":
+                btn.setVisible(self._nav_mode == "trashed")
+                btn.setEnabled(True)
+            elif label == "恢复":
+                btn.setEnabled(has_selection and self._nav_mode == "trashed")
+            elif label in ("入正式库", "加入复习", "AI 识别"):
+                btn.setEnabled(has_selection and self._nav_mode != "trashed")
+            else:
+                btn.setEnabled(has_selection)
+
+    # —— 复习 / AI / 数据 / 设置页 ——
+
+    def _build_review_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("PageRoot")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(16)
+
+        title = QLabel("复习")
+        title.setObjectName("PageTitle")
+        lay.addWidget(title)
+
+        self.review_hero = QLabel("今日待复习")
+        self.review_hero.setObjectName("HeroBanner")
+        lay.addWidget(self.review_hero)
+
+        card = CardFrame()
+        card.add_title("今日复习")
+        card.add_hint("按计划复习错题，巩固薄弱点。可从题库多选后「加入复习」。")
+        btn_start = primary_button("开始今日复习")
+        btn_start.clicked.connect(self._today_review)
+        btn_due = QPushButton("查看题库中的待复习")
+        btn_due.clicked.connect(self._goto_due_in_library)
+        card.body.addLayout(button_row(btn_start, btn_due))
+        lay.addWidget(card)
+        lay.addStretch(1)
+        return page
+
+    def _build_ai_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("PageRoot")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(16)
+
+        title = QLabel("AI")
+        title.setObjectName("PageTitle")
+        lay.addWidget(title)
+
+        self.ai_summary = QLabel()
+        self.ai_summary.setObjectName("MutedLabel")
+        self.ai_summary.setWordWrap(True)
+        lay.addWidget(self.ai_summary)
+
+        card = CardFrame()
+        card.add_title("识图与审核")
+        card.add_hint(
+            "先在题库选中带原图的题目，再回来点「AI 识别」；"
+            "或直接打开任务中心 / 审核。密钥在「设置」中保存。"
+        )
+        b1 = primary_button("AI 识别（需先选题）")
+        b1.clicked.connect(self._ai_recognize_from_page)
+        b2 = QPushButton("任务中心")
+        b2.clicked.connect(self._open_task_center)
+        b3 = QPushButton("AI 审核")
+        b3.clicked.connect(self._open_review)
+        b4 = QPushButton("撤销最近一次 AI 接受")
+        b4.clicked.connect(self._undo_ai)
+        card.body.addLayout(button_row(b1, b2, b3))
+        card.body.addWidget(b4)
+        lay.addWidget(card)
+
+        tip = CardFrame()
+        tip.add_title("提示")
+        tip.add_hint("识别结果不会直接覆盖正式字段，需在审核中接受或拒绝。")
+        lay.addWidget(tip)
+        lay.addStretch(1)
+        return page
+
+    def _build_data_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("PageRoot")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(16)
+
+        title = QLabel("数据")
+        title.setObjectName("PageTitle")
+        hint = QLabel("备份与迁移 · 不是每题实时同步")
+        hint.setObjectName("PageHint")
+        lay.addWidget(title)
+        lay.addWidget(hint)
+
+        pack = CardFrame()
+        pack.add_title("完整备份包")
+        pack.add_hint("推荐使用 ebpack；zip 为旧版兼容。")
+        p1 = primary_button("导出 ebpack")
+        p1.clicked.connect(self._export_ebpack)
+        p2 = QPushButton("导入 ebpack")
+        p2.clicked.connect(self._import_ebpack)
+        p3 = QPushButton("备份 (zip)")
+        p3.clicked.connect(self._backup)
+        p4 = QPushButton("恢复 zip")
+        p4.clicked.connect(self._restore_backup)
+        pack.body.addLayout(button_row(p1, p2, p3, p4))
+        lay.addWidget(pack)
+
+        share = CardFrame()
+        share.add_title("分享与工作区")
+        share.add_hint("分享包会脱敏；工作区用于外部编辑 Markdown。")
+        s1 = QPushButton("导出分享包")
+        s1.clicked.connect(self._export_gmshare)
+        s2 = QPushButton("导入分享包")
+        s2.clicked.connect(self._import_gmshare)
+        s3 = QPushButton("导出工作区")
+        s3.clicked.connect(self._export_workspace)
+        s4 = QPushButton("导入工作区")
+        s4.clicked.connect(self._import_workspace)
+        share.body.addLayout(button_row(s1, s2, s3, s4))
+        lay.addWidget(share)
+
+        cloud = CardFrame()
+        cloud.add_title("云备份")
+        cloud.add_hint("完整包上传 / 恢复；增量推拉目前主要支持本地文件夹提供商。")
+        c1 = primary_button("云备份")
+        c1.clicked.connect(self._cloud_backup)
+        c2 = QPushButton("云恢复")
+        c2.clicked.connect(self._cloud_restore)
+        c3 = QPushButton("推送增量")
+        c3.clicked.connect(self._sync_push)
+        c4 = QPushButton("拉取合并")
+        c4.clicked.connect(self._sync_pull)
+        cloud.body.addLayout(button_row(c1, c2, c3, c4))
+        lay.addWidget(cloud)
+        lay.addStretch(1)
+        return page
+
+    def _build_settings_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("PageRoot")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(16)
+
+        title = QLabel("设置")
+        title.setObjectName("PageTitle")
+        lay.addWidget(title)
+
+        card = CardFrame()
+        card.add_title("应用与密钥")
+        self.settings_summary = QLabel()
+        self.settings_summary.setObjectName("MutedLabel")
+        self.settings_summary.setWordWrap(True)
+        card.body.addWidget(self.settings_summary)
+        btn = primary_button("打开设置…")
+        btn.clicked.connect(self._open_settings)
+        card.body.addLayout(button_row(btn))
+        lay.addWidget(card)
+
+        path_card = CardFrame()
+        path_card.add_title("数据目录")
+        self.data_path_label = QLabel(str(self.runtime.paths.root))
+        self.data_path_label.setWordWrap(True)
+        path_card.body.addWidget(self.data_path_label)
+        lay.addWidget(path_card)
+        lay.addStretch(1)
+        return page
+
+    def _goto_due_in_library(self) -> None:
+        self.main_nav.setCurrentRow(_PAGE_LIBRARY)
+        for i in range(self.nav_list.count()):
+            it = self.nav_list.item(i)
+            if it and it.data(Qt.ItemDataRole.UserRole) == "due":
+                self.nav_list.setCurrentRow(i)
+                break
+
+    def _ai_recognize_from_page(self) -> None:
+        if not self._selected_ids():
+            QMessageBox.information(
+                self,
+                "提示",
+                "请先到「题库」选中带原图的题目，再执行 AI 识别。",
+            )
+            self.main_nav.setCurrentRow(_PAGE_LIBRARY)
+            return
+        self._ai_recognize()
+
+    def _refresh_focus_pages(self) -> None:
+        due = 0
+        try:
+            due = len(
+                self.services.list_problems(
+                    ProblemFilter(status="active", due_for_review=True)
+                )
+            )
+        except DomainError:
+            due = 0
+        self.review_hero.setText(f"今日待复习  ·  {due} 题")
+
+        ai = self.runtime.settings.ai
+        self.ai_summary.setText(
+            f"提供商：{ai.default_provider}　模型：{ai.default_vision_model or '（未设）'}　"
+            f"{'已启用' if ai.enabled else '未启用'}"
+        )
+        cloud = self.runtime.settings.cloud
+        self.settings_summary.setText(
+            f"语言 {self.runtime.settings.application.language} · "
+            f"云提供商 {cloud.default_provider} · schema v{self.runtime.schema_version}"
+        )
+        self.data_path_label.setText(str(self.runtime.paths.root))
+
+    # —— 刷新 ——
+
     def refresh_all(self) -> None:
         self.refresh_nav()
         self.refresh_problems()
         self._update_status()
+        self._refresh_focus_pages()
 
     def refresh_nav(self) -> None:
         current_mode = self._nav_mode
@@ -201,7 +538,6 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, f"subject:{sub.id}")
             self.nav_list.addItem(item)
 
-        # 恢复选中
         for i in range(self.nav_list.count()):
             it = self.nav_list.item(i)
             if it.data(Qt.ItemDataRole.UserRole) == current_mode:
@@ -234,26 +570,32 @@ class MainWindow(QMainWindow):
             return
         for p in problems:
             title = p.title or "(无标题)"
-            tags = ",".join(t.name for t in (p.tags or []))
-            text = f"[{p.status}] P{p.priority}  {title}"
+            status = _STATUS_LABELS.get(p.status, p.status)
+            tags = " · ".join(t.name for t in (p.tags or []))
+            line1 = f"{title}"
+            line2 = f"{status}  ·  P{p.priority}"
             if tags:
-                text += f"  #{tags}"
-            item = QListWidgetItem(text)
+                line2 += f"  ·  {tags}"
+            item = QListWidgetItem(f"{line1}\n{line2}")
             item.setData(Qt.ItemDataRole.UserRole, p.id)
             self.problem_list.addItem(item)
         self._update_status()
+        self._update_context_bar(bool(self.problem_list.selectedItems()))
 
     def _update_status(self) -> None:
         total = self.services.count_problems()
         inbox = self.services.count_problems("inbox")
         active = self.services.count_problems("active")
         trash = self.services.count_problems("trashed")
+        summary = f"共 {total} · 收件箱 {inbox} · 正式 {active} · 回收站 {trash}"
         self.status.showMessage(
-            f"共 {total} · 收件箱 {inbox} · 正式 {active} · 回收站 {trash} · "
-            f"schema v{self.runtime.schema_version} · {self.runtime.paths.root}"
+            f"{summary} · schema v{self.runtime.schema_version} · {self.runtime.paths.root}"
         )
+        self.sidebar_stats.setText(summary)
 
-    def _on_nav_changed(self, current: QListWidgetItem | None, _prev: QListWidgetItem | None) -> None:
+    def _on_nav_changed(
+        self, current: QListWidgetItem | None, _prev: QListWidgetItem | None
+    ) -> None:
         if current is None:
             return
         self._nav_mode = current.data(Qt.ItemDataRole.UserRole) or "library"
@@ -261,9 +603,14 @@ class MainWindow(QMainWindow):
 
     def _on_problem_selected(self) -> None:
         items = self.problem_list.selectedItems()
+        has = bool(items)
+        self._update_context_bar(has)
         if not items:
             self._selected_problem_id = None
-            self.detail.setText("未选中题目")
+            self.detail.setText("选中一道题查看详情")
+            self.detail.setObjectName("MutedLabel")
+            self.detail.style().unpolish(self.detail)
+            self.detail.style().polish(self.detail)
             return
         pid = items[0].data(Qt.ItemDataRole.UserRole)
         self._selected_problem_id = pid
@@ -272,20 +619,24 @@ class MainWindow(QMainWindow):
             self.detail.setText("题目不存在")
             return
         assets = "\n".join(
-            f"- {a.role}: {a.relative_path}{' (不可变)' if a.is_immutable else ''}"
+            f"· {a.role}: {a.relative_path}{' (不可变)' if a.is_immutable else ''}"
             for a in (p.assets or [])
         ) or "（无）"
         tags = ", ".join(t.name for t in (p.tags or [])) or "（无）"
+        status = _STATUS_LABELS.get(p.status, p.status)
+        self.detail.setObjectName("")
         self.detail.setText(
-            f"ID: {p.id}\n"
-            f"标题: {p.title or '（无）'}\n"
-            f"状态: {p.status}\n"
-            f"优先级: {p.priority}\n"
-            f"修订: r{p.revision}\n"
-            f"标签: {tags}\n"
-            f"原题预览:\n{(p.question_markdown or '')[:300]}\n\n"
-            f"附件:\n{assets}"
+            f"<b>{p.title or '（无标题）'}</b><br>"
+            f"<span style='color:#8F959E'>{status} · P{p.priority} · r{p.revision}</span><br><br>"
+            f"<b>标签</b><br>{tags}<br><br>"
+            f"<b>原题预览</b><br>"
+            f"{(p.question_markdown or '（空）')[:300]}<br><br>"
+            f"<b>附件</b><br>{assets.replace(chr(10), '<br>')}<br><br>"
+            f"<span style='color:#8F959E;font-size:11px'>ID {p.id}</span>"
         )
+        self.detail.setTextFormat(Qt.TextFormat.RichText)
+        self.detail.style().unpolish(self.detail)
+        self.detail.style().polish(self.detail)
 
     def _selected_ids(self) -> list[str]:
         return [
@@ -299,6 +650,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先选择一道题")
             return None
         return ids[0]
+
+    # —— 业务槽（保持行为） ——
 
     def _new_problem(self) -> None:
         try:
@@ -410,7 +763,6 @@ class MainWindow(QMainWindow):
     def _export_word(self) -> None:
         ids = self._selected_ids()
         if not ids:
-            # 导出当前列表全部
             ids = [
                 self.problem_list.item(i).data(Qt.ItemDataRole.UserRole)
                 for i in range(self.problem_list.count())
@@ -532,7 +884,6 @@ class MainWindow(QMainWindow):
 
     def _cloud_backup(self) -> None:
         try:
-            # 按当前设置重建 provider（设置里可能已切换）
             self.cloud = CloudBackupService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
             )
@@ -560,7 +911,8 @@ class MainWindow(QMainWindow):
             backups = self.cloud.list_backups()
             latest = next((b for b in backups if b.get("is_latest")), None)
             summary = "云端备份列表：\n" + "\n".join(
-                f"- {b['tag']}{' (latest)' if b.get('is_latest') else ''}" for b in backups[:20]
+                f"- {b['tag']}{' (latest)' if b.get('is_latest') else ''}"
+                for b in backups[:20]
             )
             if not backups:
                 QMessageBox.information(self, "云恢复", "没有可恢复的备份")
@@ -569,7 +921,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.question(
                     self,
                     "确认恢复",
-                    summary + "\n\n将下载 latest（若无则需手动指定）并恢复到所选目录。继续？",
+                    summary
+                    + "\n\n将下载 latest（若无则需手动指定）并恢复到所选目录。继续？",
                 )
                 != QMessageBox.StandardButton.Yes
             ):
@@ -615,8 +968,8 @@ class MainWindow(QMainWindow):
                 msg += "请打开「审核」处理同步冲突。"
             QMessageBox.information(self, "拉取合并", msg)
             if result.get("review_session_id"):
-                ReviewDialog(self.runtime, self.ai, self).exec()
-            self.refresh_list()
+                ReviewDialog(self.ai, self.services, self).exec()
+            self.refresh_all()
         except DomainError as exc:
             QMessageBox.warning(self, "拉取失败", str(exc))
 
@@ -643,6 +996,7 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self) -> None:
         SettingsDialog(self.runtime, self).exec()
+        self._refresh_focus_pages()
 
     def _ai_recognize(self) -> None:
         ids = self._selected_ids()
@@ -706,7 +1060,9 @@ class MainWindow(QMainWindow):
 
     def _import_workspace(self) -> None:
         folder = QFileDialog.getExistingDirectory(
-            self, "选择工作区目录（含 manifest.json）", str(self.runtime.paths.workspace_dir)
+            self,
+            "选择工作区目录（含 manifest.json）",
+            str(self.runtime.paths.workspace_dir),
         )
         if not folder:
             return

@@ -14,12 +14,13 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
+    QWidget,
 )
 
 from yancuo_win.ai.factory import get_provider
@@ -32,6 +33,7 @@ from yancuo_win.infrastructure.credentials import (
     mask_secret,
     set_secret,
 )
+from yancuo_win.ui.widgets import CardFrame, button_row, primary_button
 
 
 class SettingsDialog(QDialog):
@@ -39,18 +41,44 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.runtime = runtime
         self.setWindowTitle("设置")
-        self.resize(660, 640)
+        self.resize(680, 720)
 
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(12)
+
+        title = QLabel("设置")
+        title.setObjectName("PageTitle")
+        outer.addWidget(title)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 4, 0)
+
         s = runtime.settings
-        form.addRow("语言", QLabel(s.application.language))
-        form.addRow("数据根目录", QLabel(str(runtime.paths.root)))
-        form.addRow("数据库", QLabel(str(runtime.paths.database)))
-        layout.addLayout(form)
+
+        info = CardFrame()
+        info.add_title("本机")
+        info_form = QFormLayout()
+        info_form.addRow("语言", QLabel(s.application.language))
+        path_lbl = QLabel(str(runtime.paths.root))
+        path_lbl.setWordWrap(True)
+        info_form.addRow("数据根目录", path_lbl)
+        info_form.addRow("数据库", QLabel(str(runtime.paths.database)))
+        info.body.addLayout(info_form)
+        open_btn = QPushButton("打开数据目录")
+        open_btn.clicked.connect(self._open_data_root)
+        info.body.addLayout(button_row(open_btn))
+        layout.addWidget(info)
 
         # —— AI ——
-        layout.addWidget(QLabel("—— AI（Faro / OpenAI 兼容）——"))
+        ai_card = CardFrame()
+        ai_card.add_title("AI（Faro / OpenAI 兼容）")
+        ai_card.add_hint("密钥只进系统凭据；选 OpenAI 兼容并保存 Key 后点「应用 AI」。")
         ai_form = QFormLayout()
         self.ai_provider = QComboBox()
         self.ai_provider.addItem("Mock（本地假数据）", "mock")
@@ -63,31 +91,34 @@ class SettingsDialog(QDialog):
         ai_form.addRow("视觉模型 ID", self.ai_model)
 
         self._ai_cred_key = (
-            (s.ai.providers.get("openai_compatible").credential_key if s.ai.providers.get("openai_compatible") else None)
+            (
+                s.ai.providers.get("openai_compatible").credential_key
+                if s.ai.providers.get("openai_compatible")
+                else None
+            )
             or "yancuo_ai_api_key"
         )
         self.ai_token_status = QLabel(mask_secret(get_secret(self._ai_cred_key)))
         ai_form.addRow("AI 密钥状态", self.ai_token_status)
         self.ai_token_edit = QLineEdit()
         self.ai_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ai_token_edit.setPlaceholderText("粘贴 Faro sk-faro-… 后点保存（不进 TOML/仓库）")
+        self.ai_token_edit.setPlaceholderText("粘贴 Faro sk-faro-… 后点保存")
         ai_form.addRow("新 AI 密钥", self.ai_token_edit)
+        ai_card.body.addLayout(ai_form)
 
-        ai_tok_row = QHBoxLayout()
-        save_ai = QPushButton("保存 AI 密钥到系统凭据")
+        save_ai = primary_button("保存 AI 密钥")
         save_ai.clicked.connect(self._save_ai_token)
         clear_ai = QPushButton("清除 AI 密钥")
         clear_ai.clicked.connect(self._clear_ai_token)
         apply_ai = QPushButton("应用 AI 到当前会话")
         apply_ai.clicked.connect(self._apply_ai_session)
-        ai_tok_row.addWidget(save_ai)
-        ai_tok_row.addWidget(clear_ai)
-        ai_tok_row.addWidget(apply_ai)
-        ai_form.addRow(ai_tok_row)
-        layout.addLayout(ai_form)
+        ai_card.body.addLayout(button_row(save_ai, clear_ai, apply_ai))
+        layout.addWidget(ai_card)
 
         # —— 云端 ——
-        layout.addWidget(QLabel("—— 云端备份（非实时同步）——"))
+        cloud_card = CardFrame()
+        cloud_card.add_title("云端备份（非实时同步）")
+        cloud_card.add_hint("完整备份/迁移；令牌不写入 TOML。")
         cloud_form = QFormLayout()
         self.provider = QComboBox()
         self.provider.addItem("本地文件夹（推荐先测通）", "local_folder")
@@ -116,41 +147,36 @@ class SettingsDialog(QDialog):
         cloud_form.addRow(self.token_label, self.token_status)
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.token_edit.setPlaceholderText("粘贴新令牌后点保存（不会写入仓库/TOML）")
+        self.token_edit.setPlaceholderText("粘贴新令牌后点保存")
         cloud_form.addRow("新令牌", self.token_edit)
+        cloud_card.body.addLayout(cloud_form)
 
-        tok_row = QHBoxLayout()
-        save_tok = QPushButton("保存云令牌到系统凭据")
+        save_tok = primary_button("保存云令牌")
         save_tok.clicked.connect(self._save_token)
         clear_tok = QPushButton("清除云令牌")
         clear_tok.clicked.connect(self._clear_token)
         test_btn = QPushButton("测试云连接")
         test_btn.clicked.connect(self._test_cloud)
-        tok_row.addWidget(save_tok)
-        tok_row.addWidget(clear_tok)
-        tok_row.addWidget(test_btn)
-        cloud_form.addRow(tok_row)
-        layout.addLayout(cloud_form)
+        apply_btn = QPushButton("应用云端到当前会话")
+        apply_btn.clicked.connect(self._apply_session_provider)
+        cloud_card.body.addLayout(button_row(save_tok, clear_tok, test_btn))
+        cloud_card.body.addLayout(button_row(apply_btn))
+        layout.addWidget(cloud_card)
 
         tip = QLabel(
-            "密钥只进操作系统凭据管理器；TOML 仅保存 credential_key / api_key_env 名称。\n"
-            "AI：选「OpenAI 兼容」并保存 Faro Key 后点「应用 AI」。\n"
-            "云：完整备份/迁移，不是每题实时同步。"
+            "密钥只进操作系统凭据管理器；TOML 仅保存 credential_key / api_key_env 名称。"
         )
+        tip.setObjectName("MutedLabel")
         tip.setWordWrap(True)
         layout.addWidget(tip)
+        layout.addStretch(1)
 
-        open_btn = QPushButton("打开数据目录")
-        open_btn.clicked.connect(self._open_data_root)
-        layout.addWidget(open_btn)
-
-        apply_btn = QPushButton("应用云端提供商到当前会话")
-        apply_btn.clicked.connect(self._apply_session_provider)
-        layout.addWidget(apply_btn)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, stretch=1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
-        layout.addWidget(buttons)
+        outer.addWidget(buttons)
 
         self._refresh_token_ui()
 
