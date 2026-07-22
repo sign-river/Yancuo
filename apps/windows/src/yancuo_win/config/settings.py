@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -175,11 +176,51 @@ class ConfigError(Exception):
 
 def repo_root() -> Path:
     # apps/windows/src/yancuo_win/config/settings.py → 仓库根
-    return Path(__file__).resolve().parents[5]
+    location = Path(__file__).resolve()
+    for parent in (location.parent, *location.parents):
+        if (parent / "config" / "default.toml").is_file() and (
+            parent / "protocol" / "schemas"
+        ).is_dir():
+            return parent
+    # ``.../site-packages/yancuo_win/config/settings.py`` -> package root.
+    return location.parents[1]
+
+
+def resource_path(*parts: str) -> Path | None:
+    """Resolve a resource from a checkout or an installed wheel.
+
+    Source checkouts intentionally use the canonical top-level files so edits
+    are picked up immediately. Wheels contain a copy below
+    ``yancuo_win/resources``; this lookup is independent of the working
+    directory and install prefix. ``None`` means no copy is available.
+    """
+
+    relative = Path(*parts)
+    root_candidate = repo_root() / relative
+    if root_candidate.is_file():
+        return root_candidate
+
+    try:
+        bundled = resources.files("yancuo_win").joinpath(
+            "resources", *relative.parts
+        )
+        if bundled.is_file():
+            try:
+                return Path(bundled)
+            except TypeError:
+                return None
+    except (FileNotFoundError, ModuleNotFoundError, TypeError):
+        return None
+    return None
 
 
 def default_toml_path() -> Path:
-    return repo_root() / "config" / "default.toml"
+    path = resource_path("config", "default.toml")
+    if path is None:
+        # Preserve the historical Path return type and provide a useful path
+        # for callers that want to report the missing resource.
+        return repo_root() / "config" / "default.toml"
+    return path
 
 
 def resolve_config_path() -> Path:

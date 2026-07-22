@@ -23,18 +23,18 @@ Kotlin + Jetpack Compose 客户端，定位：**移动采集与复习**。
 
 ## 阶段 I 范围
 
-| 已实现 | 不做（留给 Windows / 后续） |
-|--------|-----------------------------|
+| 已实现（Android） | 未实现 / 留给 Windows 或后续 |
+|-------------------|--------------------------------|
 | 拍照 / 相册导入收件箱 | Word / PDF 导出 |
 | 题库浏览、搜索、优先级与状态 | 外部工作区 |
 | 今日复习（五档间隔） | AI 识别与审核 |
 | 导入 Windows `.ebpack`（未加密） | 云端自动下载 / 增量同步 |
-| Token 本地加密存储（占位） | 插件、复杂模板 |
+| Token 本地加密存储（Android Keystore + `EncryptedSharedPreferences`） | 插件、复杂模板 |
 
 数据根：`filesDir/yancuo_data/`（`error_book.db`、`assets/objects/`、`identity.json`）。
 
-与 Windows 共享：`schema_version=2`、`data_format_version=1`、内容寻址对象库、`.ebpack` v1。
+与 Windows 共享：`schema_version=4`、`data_format_version=1`、内容寻址对象库、`.ebpack` v1。Android 当前只导入未加密包；包中的 Windows 专用表不会在 Android UI 中提供对应功能。
 
-## 云下载 TODO
+## 云端能力边界
 
-阶段 I **不**实现从 GitLink/GitHub 下载 `.ebpack`；设置里可保存 Token，供后续阶段使用。
+阶段 I **不**实现从 GitLink/GitHub 下载 `.ebpack`，也不实现云端增量同步。设置页保存的 Token 仅用于凭据留存（本地加密），不会触发网络同步；后续实现需另行补齐下载、校验、恢复和冲突处理流程。

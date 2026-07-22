@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import tomllib
 from pathlib import Path
 
 import pytest
+import yancuo_win
 
 from yancuo_win.config.settings import ConfigError, default_toml_path, load_settings
 
@@ -47,3 +50,22 @@ def test_default_toml_has_no_plaintext_secrets() -> None:
     assert "sk-" not in lowered
     assert "api_key_env" in text
     assert "credential_key" in text
+
+
+def test_bundled_resources_match_canonical_sources() -> None:
+    package_root = Path(yancuo_win.__file__).resolve().parent
+    bundled_root = package_root / "resources"
+    canonical_config = default_toml_path()
+    assert tomllib.loads(
+        (bundled_root / "config" / "default.toml").read_text(encoding="utf-8")
+    ) == tomllib.loads(canonical_config.read_text(encoding="utf-8"))
+
+    repo = canonical_config.parents[1]
+    for name in ("problem.schema.json", "operation.schema.json"):
+        canonical = json.loads(
+            (repo / "protocol" / "schemas" / name).read_text(encoding="utf-8")
+        )
+        bundled = json.loads(
+            (bundled_root / "protocol" / "schemas" / name).read_text(encoding="utf-8")
+        )
+        assert bundled == canonical

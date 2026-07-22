@@ -7,10 +7,12 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
+from yancuo_win.data.models import SyncOperation
 from yancuo_win.import_export.gmshare import HARD_DENY_FIELDS, GmshareService
 
 
@@ -67,6 +69,14 @@ def test_gmshare_import_dedup(runtime, tmp_path: Path, monkeypatch: pytest.Monke
     first = share.import_share(pack)
     assert first.created == 1
     assert first.skipped_duplicates == 0
+    with runtime.session_factory() as s:
+        imported_create = s.scalar(
+            select(SyncOperation).where(
+                SyncOperation.entity_id == first.created_ids[0],
+                SyncOperation.operation == "create",
+            )
+        )
+        assert imported_create is not None
     second = share.import_share(pack)
     assert second.created == 0
     assert second.skipped_duplicates == 1

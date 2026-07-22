@@ -11,8 +11,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from yancuo_win import __version__
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.assets.object_store import ObjectStore
+from yancuo_win.config.settings import resource_path
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
     AuditLog,
@@ -76,10 +78,13 @@ class WorkspaceService:
         schemas_dir.mkdir()
 
         # 复制协议 schema
-        repo_schema = (
-            Path(__file__).resolve().parents[5] / "protocol" / "schemas" / "problem.schema.json"
+        # Resolve from the checkout during development and from bundled
+        # package resources after a wheel install.  A fixed ``parents[5]``
+        # path breaks the latter case.
+        repo_schema = resource_path(
+            "protocol", "schemas", "problem.schema.json"
         )
-        if repo_schema.is_file():
+        if repo_schema is not None and repo_schema.is_file():
             shutil.copy2(repo_schema, schemas_dir / "problem.schema.json")
         else:
             (schemas_dir / "problem.schema.json").write_text(
@@ -186,7 +191,7 @@ class WorkspaceService:
             "format_version": FORMAT_VERSION,
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "database_id": self.runtime.identity.database_id,
-            "app_version": "0.1.0c1",
+            "app_version": __version__,
             "problem_ids": exported_ids,
             "warning": "Do not edit the SQLite database. Import changes via the app.",
         }

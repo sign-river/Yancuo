@@ -31,6 +31,12 @@ from yancuo_win.domain.review_rules import (
     validate_grade,
 )
 from yancuo_win.domain.similarity import text_similarity
+from yancuo_win.infrastructure.archive import (
+    ArchiveSecurityError,
+    iter_regular_files,
+    safe_extract_zip,
+    validate_zip_members,
+)
 
 
 @dataclass
@@ -52,6 +58,24 @@ class AppServices:
 
     def session(self) -> Session:
         return self.runtime.session_factory()
+
+    def _record_sync_change(
+        self,
+        problem: Problem | str,
+        *,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        operation: str = "update",
+    ) -> None:
+        """将所有正式题目写操作统一登记到增量 Operation 日志。
+
+        同步日志单独开事务，避免把 UI 用例的数据库事务和云端实现耦合在一起。
+        """
+        from yancuo_win.application.sync_service import SyncService
+
+        SyncService(self.runtime).record_problem_update(
+            problem, before=before, after=after, operation=operation
+        )
 
     # ---- catalog ----
 
@@ -233,15 +257,26 @@ class AppServices:
             s.commit()
 
     def set_problem_tags(self, problem_id: str, tag_ids: list[str]) -> None:
+        from yancuo_win.application.sync_service import sync_snapshot
+
         with self.session() as s:
-            problem = s.get(Problem, problem_id)
+            problem = s.scalars(
+                select(Problem)
+                .where(Problem.id == problem_id)
+                .options(selectinload(Problem.tags))
+            ).first()
             if not problem:
                 raise DomainError("题目不存在")
+            before = sync_snapshot(problem)
             tags = list(s.scalars(select(Tag).where(Tag.id.in_(tag_ids))).all()) if tag_ids else []
             problem.tags = tags
             problem.updated_at = utcnow()
             self._add_version(s, problem, source="manual", summary="更新标签")
+            after = sync_snapshot(problem, [t.name for t in tags])
             s.commit()
+            s.refresh(problem)
+            s.expunge(problem)
+        self._record_sync_change(problem, before=before, after=after)
 
     # ---- problems ----
 
@@ -321,6 +356,8 @@ class AppServices:
         chapter_id: str | None = None,
         priority: int = 3,
     ) -> Problem:
+        from yancuo_win.application.sync_service import sync_snapshot
+
         validate_status(status)
         validate_priority(priority)
         with self.session() as s:
@@ -337,13 +374,16 @@ class AppServices:
             s.add(problem)
             s.flush()
             self._add_version(s, problem, source="manual", summary="创建题目", bump=False)
+            # 创建操作需要完整快照，供另一台设备首次拉取时建立同一实体。
+            after = sync_snapshot(problem, [])
             s.commit()
             s.refresh(problem)
             s.expunge(problem)
-            return problem
+        self._record_sync_change(problem, before={}, after=after, operation="create")
+        return problem
 
     def update_problem(self, problem_id: str, fields: dict[str, Any], *, summary: str = "编辑题目") -> Problem:
-        from yancuo_win.application.sync_service import SyncService, sync_snapshot
+        from yancuo_win.application.sync_service import sync_snapshot
 
         with self.session() as s:
             problem = s.scalar(
@@ -395,16 +435,22 @@ class AppServices:
             s.refresh(problem)
             s.expunge(problem)
         if changed:
-            SyncService(self.runtime).record_problem_update(
-                problem, before=before, after=after, operation="update"
-            )
+            self._record_sync_change(problem, before=before, after=after)
         return problem
 
     def set_problem_status(self, problem_id: str, status: str) -> None:
+        from yancuo_win.application.sync_service import sync_snapshot
+
         with self.session() as s:
-            problem = s.get(Problem, problem_id)
+            problem = s.scalars(
+                select(Problem)
+                .where(Problem.id == problem_id)
+                .options(selectinload(Problem.tags))
+            ).first()
             if not problem:
                 raise DomainError("题目不存在")
+            before_status = problem.status
+            before = sync_snapshot(problem)
             assert_transition(problem.status, status)
             problem.status = status
             problem.updated_at = utcnow()
@@ -413,7 +459,18 @@ class AppServices:
             elif problem.deleted_at is not None:
                 problem.deleted_at = None
             self._add_version(s, problem, source="manual", summary=f"状态 → {status}")
+            after = sync_snapshot(problem)
             s.commit()
+            s.refresh(problem)
+            s.expunge(problem)
+        operation = "update"
+        if status == "trashed":
+            operation = "delete"
+        elif before_status == "trashed":
+            operation = "undelete"
+        self._record_sync_change(
+            problem, before=before, after=after, operation=operation
+        )
 
     def trash_problem(self, problem_id: str) -> None:
         self.set_problem_status(problem_id, "trashed")
@@ -449,14 +506,21 @@ class AppServices:
 
     def record_review(self, problem_id: str, grade: int) -> dict[str, Any]:
         """记录复习结果并安排下次日期。不自动删除任何题目。"""
+        from yancuo_win.application.sync_service import sync_snapshot
+
         grade = validate_grade(grade)
         next_at = compute_next_review_at(grade)
         with self.session() as s:
-            problem = s.get(Problem, problem_id)
+            problem = s.scalars(
+                select(Problem)
+                .where(Problem.id == problem_id)
+                .options(selectinload(Problem.tags))
+            ).first()
             if not problem:
                 raise DomainError("题目不存在")
             if problem.status == "trashed":
                 raise DomainError("回收站题目不可复习")
+            before = sync_snapshot(problem)
             problem.mastery = mastery_from_grade(grade)
             problem.next_review_at = next_at
             problem.review_count = int(problem.review_count or 0) + 1
@@ -470,29 +534,50 @@ class AppServices:
                 source="review",
                 summary=f"复习打分 {grade}（{REVIEW_GRADES[grade]}）",
             )
+            after = sync_snapshot(problem)
             s.commit()
-            return {
-                "problem_id": problem_id,
-                "grade": grade,
-                "label": REVIEW_GRADES[grade],
-                "next_review_at": next_at.isoformat(),
-                "interval_days": (next_at.date() - datetime.now(timezone.utc).date()).days,
-                "review_count": problem.review_count,
-            }
+            s.refresh(problem)
+            s.expunge(problem)
+        self._record_sync_change(problem, before=before, after=after)
+        return {
+            "problem_id": problem_id,
+            "grade": grade,
+            "label": REVIEW_GRADES[grade],
+            "next_review_at": next_at.isoformat(),
+            "interval_days": (next_at.date() - datetime.now(timezone.utc).date()).days,
+            "review_count": problem.review_count,
+        }
 
     def schedule_initial_review(self, problem_id: str) -> None:
         """将题目加入复习队列（下次=今天）。"""
+        from yancuo_win.application.sync_service import sync_snapshot
+
         with self.session() as s:
-            problem = s.get(Problem, problem_id)
+            problem = s.scalars(
+                select(Problem)
+                .where(Problem.id == problem_id)
+                .options(selectinload(Problem.tags))
+            ).first()
             if not problem:
                 raise DomainError("题目不存在")
+            before = sync_snapshot(problem)
             problem.next_review_at = datetime.now(timezone.utc).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
             if problem.status == "inbox":
                 problem.status = "active"
             problem.updated_at = utcnow()
+            self._add_version(
+                s,
+                problem,
+                source="review",
+                summary="加入复习队列",
+            )
+            after = sync_snapshot(problem)
             s.commit()
+            s.refresh(problem)
+            s.expunge(problem)
+        self._record_sync_change(problem, before=before, after=after)
 
     # ---- duplicates ----
 
@@ -557,11 +642,14 @@ class AppServices:
         priority: int | None = None,
         add_tag_id: str | None = None,
     ) -> int:
+        from yancuo_win.application.sync_service import sync_snapshot
+
         if not problem_ids:
             return 0
         if priority is not None:
             validate_priority(priority)
         updated = 0
+        sync_changes: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         with self.session() as s:
             tag = s.get(Tag, add_tag_id) if add_tag_id else None
             for pid in problem_ids:
@@ -572,6 +660,7 @@ class AppServices:
                 ).first()
                 if not problem or problem.status == "trashed":
                     continue
+                before = sync_snapshot(problem)
                 changed = False
                 if subject_id is not None and problem.subject_id != subject_id:
                     problem.subject_id = subject_id
@@ -588,8 +677,12 @@ class AppServices:
                 if changed:
                     problem.updated_at = utcnow()
                     self._add_version(s, problem, source="manual", summary="批量更新")
+                    after = sync_snapshot(problem)
+                    sync_changes.append((problem.id, before, after))
                     updated += 1
             s.commit()
+        for problem_id, before, after in sync_changes:
+            self._record_sync_change(problem_id, before=before, after=after)
         return updated
 
     def _add_version(
@@ -603,17 +696,9 @@ class AppServices:
     ) -> None:
         if bump:
             problem.revision += 1
-        snap = {
-            "title": problem.title,
-            "status": problem.status,
-            "priority": problem.priority,
-            "question_markdown": problem.question_markdown,
-            "correct_answer": problem.correct_answer,
-            "solution_markdown": problem.solution_markdown,
-            "subject_id": problem.subject_id,
-            "chapter_id": problem.chapter_id,
-            "revision": problem.revision,
-        }
+        from yancuo_win.application.sync_service import sync_snapshot
+
+        snap = sync_snapshot(problem)
         session.add(
             Version(
                 id=new_id("ver"),
@@ -635,6 +720,8 @@ class AppServices:
         into_status: str = "inbox",
         skip_duplicates: bool | None = None,
     ) -> dict[str, Any]:
+        from yancuo_win.application.sync_service import sync_snapshot
+
         validate_status(into_status)
         skip = (
             self.runtime.settings.import_cfg.skip_duplicates
@@ -644,6 +731,7 @@ class AppServices:
         created: list[str] = []
         skipped: list[str] = []
         skipped_existing: list[dict[str, str]] = []
+        sync_changes: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         with self.session() as s:
             for path in paths:
                 path = Path(path)
@@ -688,8 +776,13 @@ class AppServices:
                 self._add_version(
                     s, problem, source="import", summary=f"导入图片 {path.name}", bump=False
                 )
+                sync_changes.append((problem.id, {}, sync_snapshot(problem, [])))
                 created.append(problem.id)
             s.commit()
+        for problem_id, before, after in sync_changes:
+            self._record_sync_change(
+                problem_id, before=before, after=after, operation="create"
+            )
         return {
             "created": created,
             "skipped": skipped,
@@ -781,9 +874,12 @@ class AppServices:
             if identity.is_file():
                 zf.write(identity, arcname="identity.json")
             if asset_dir.is_dir():
-                for file in asset_dir.rglob("*"):
-                    if file.is_file():
+                try:
+                    files = iter_regular_files(asset_dir)
+                    for file in files:
                         zf.write(file, arcname=f"assets/{file.relative_to(asset_dir).as_posix()}")
+                except ArchiveSecurityError as exc:
+                    raise DomainError(f"备份失败，资源目录不安全：{exc}") from exc
         return dest
 
     def restore_backup(self, zip_path: Path, target_root: Path) -> Path:
@@ -792,37 +888,129 @@ class AppServices:
         if not zip_path.is_file():
             raise DomainError("备份文件不存在")
         target_root.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            names = zf.namelist()
-            if "manifest.json" not in names or "database/error_book.db" not in names:
-                raise DomainError("无效的备份包")
-            manifest = json.loads(zf.read("manifest.json"))
-            if manifest.get("format") != "yancuo-local-backup":
-                raise DomainError("备份格式不匹配")
-            tmp = target_root / ".restore_tmp"
-            if tmp.exists():
-                shutil.rmtree(tmp)
-            zf.extractall(tmp)
+        tmp = target_root / ".restore_tmp"
+        final_staging = target_root / ".restore_final_staging"
+        previous = target_root / ".restore_previous"
+        for path in (tmp, final_staging, previous):
+            if path.exists():
+                shutil.rmtree(path)
 
-        db_src = tmp / "database" / "error_book.db"
-        assets_src = tmp / "assets"
-        identity_src = tmp / "identity.json"
-        db_dest = target_root / "error_book.db"
-        assets_dest = target_root / "assets"
-        if db_dest.exists():
-            db_dest.unlink()
-        shutil.copy2(db_src, db_dest)
-        if assets_dest.exists():
-            shutil.rmtree(assets_dest)
-        if assets_src.exists():
-            shutil.copytree(assets_src, assets_dest)
-        else:
-            assets_dest.mkdir(parents=True, exist_ok=True)
-            (assets_dest / "objects").mkdir(parents=True, exist_ok=True)
-        if identity_src.is_file():
-            shutil.copy2(identity_src, target_root / "identity.json")
-        shutil.rmtree(tmp, ignore_errors=True)
-        return target_root
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                try:
+                    infos = validate_zip_members(zf)
+                except ArchiveSecurityError as exc:
+                    raise DomainError(f"备份 ZIP 安全校验失败：{exc}") from exc
+                names = {info.filename for info in infos}
+                if "manifest.json" not in names or "database/error_book.db" not in names:
+                    raise DomainError("无效的备份包")
+                try:
+                    manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise DomainError("备份 manifest.json 无效") from exc
+                if not isinstance(manifest, dict) or manifest.get("format") != "yancuo-local-backup":
+                    raise DomainError("备份格式不匹配")
+                try:
+                    backup_version = int(manifest.get("version") or 0)
+                    package_schema = int(manifest.get("schema_version") or 0)
+                except (TypeError, ValueError) as exc:
+                    raise DomainError("备份 manifest 版本字段无效") from exc
+                if backup_version != 1:
+                    raise DomainError("备份版本不受支持")
+                from yancuo_win.domain.identity import SCHEMA_VERSION
+
+                if package_schema > SCHEMA_VERSION:
+                    raise DomainError(
+                        f"备份 schema_version={package_schema} 高于程序支持的 {SCHEMA_VERSION}，请升级软件"
+                    )
+                try:
+                    safe_extract_zip(zf, tmp)
+                except ArchiveSecurityError as exc:
+                    raise DomainError(f"备份 ZIP 解压被拒绝：{exc}") from exc
+
+            db_src = tmp / "database" / "error_book.db"
+            assets_src = tmp / "assets"
+            identity_src = tmp / "identity.json"
+            if not db_src.is_file():
+                raise DomainError("备份缺少数据库文件")
+
+            final_staging.mkdir(parents=True)
+            shutil.copy2(db_src, final_staging / "error_book.db")
+            if assets_src.is_dir():
+                try:
+                    from yancuo_win.infrastructure.archive import copy_tree_no_symlinks
+
+                    copy_tree_no_symlinks(assets_src, final_staging / "assets")
+                except ArchiveSecurityError as exc:
+                    raise DomainError(f"备份资源目录不安全：{exc}") from exc
+            else:
+                (final_staging / "assets" / "objects").mkdir(parents=True)
+            if identity_src.is_file():
+                shutil.copy2(identity_src, final_staging / "identity.json")
+
+            # 在替换目标目录前打开 staging 数据库并执行迁移/核心表校验，
+            # 这样损坏或过旧的普通 zip 也不会覆盖一个可用的数据根。
+            from yancuo_win.data.db import make_engine
+            from yancuo_win.data.migrate import migrate, verify_core_tables
+
+            try:
+                staged_engine = make_engine(final_staging / "error_book.db")
+                try:
+                    migrate(staged_engine)
+                    missing = verify_core_tables(staged_engine)
+                finally:
+                    staged_engine.dispose()
+            except DomainError:
+                raise
+            except Exception as exc:
+                raise DomainError(f"备份数据库校验失败：{exc}") from exc
+            if missing:
+                raise DomainError(f"备份数据库缺少核心表：{', '.join(missing)}")
+
+            db_dest = target_root / "error_book.db"
+            assets_dest = target_root / "assets"
+            identity_dest = target_root / "identity.json"
+            destinations = [db_dest, assets_dest]
+            if identity_src.is_file():
+                destinations.append(identity_dest)
+            previous.mkdir(parents=True)
+            moved_old: list[tuple[Path, Path]] = []
+            moved_new: list[Path] = []
+            try:
+                for destination in destinations:
+                    if destination.exists() or destination.is_symlink():
+                        old = previous / destination.name
+                        shutil.move(str(destination), str(old))
+                        moved_old.append((destination, old))
+                for name in ("error_book.db", "assets"):
+                    source = final_staging / name
+                    destination = target_root / name
+                    shutil.move(str(source), str(destination))
+                    moved_new.append(destination)
+                identity_final = final_staging / "identity.json"
+                if identity_final.is_file():
+                    shutil.move(str(identity_final), str(identity_dest))
+                    moved_new.append(identity_dest)
+            except Exception:
+                for destination in reversed(moved_new):
+                    try:
+                        if destination.is_dir() and not destination.is_symlink():
+                            shutil.rmtree(destination)
+                        else:
+                            destination.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                for destination, old in reversed(moved_old):
+                    if old.exists() or old.is_symlink():
+                        shutil.move(str(old), str(destination))
+                raise
+            else:
+                shutil.rmtree(previous, ignore_errors=True)
+            return target_root
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(final_staging, ignore_errors=True)
+            shutil.rmtree(previous, ignore_errors=True)
 
     # ---- word export ----
 

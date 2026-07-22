@@ -1,7 +1,8 @@
 # `.ebpack` 可移植包格式 v1
 
-> 状态：阶段 F 定稿。变更前须说明原因与兼容性影响。  
-> 实现：`yancuo_win.import_export.ebpack`  
+> 状态：阶段 F 定稿；Windows 支持导出/导入，Android 支持导入 v1 包。变更前须说明原因与兼容性影响。
+> 当前包版本：`schema_version=4`、`data_format_version=1`。
+> 实现：Windows `yancuo_win.import_export.ebpack`；Android `EbpackImporter`。
 > 测试向量：`protocol/test-vectors/ebpack-v1/`
 
 ---
@@ -13,7 +14,7 @@
 | `snapshot.sqlite` vs `records/*.jsonl` | **采用 `database/snapshot.sqlite` 为唯一权威恢复路径** |
 | 原因 | 与本地工作库同构，迁移后直接 `migrate()`；避免双轨漂移 |
 | jsonl | **v1 不写入、不读取**；若未来需要增量交换另开 format_version |
-| 加密 | v1 **不实现**；`manifest.encrypted=false`，接口预留至阶段 G |
+| 加密 | v1 **不实现**；`manifest.encrypted` 必须为 `false`，加密规范仍待定 |
 
 阶段 B 的 `yancuo-local-backup` zip **仍可恢复**，但新备份应优先生成 `.ebpack`。
 
@@ -41,7 +42,7 @@ assets/
 identity.json                 # 可选
 settings/
   portable-settings.toml      # 可选；不得含密钥明文
-package-signature.json        # 可选占位；v1 可省略
+package-signature.json        # 可选；v1 实现不要求
 ```
 
 ---
@@ -54,9 +55,9 @@ package-signature.json        # 可选占位；v1 可省略
   "format_version": 1,
   "created_at": "2026-07-21T14:00:00+00:00",
   "application": "Yancuo",
-  "app_version": "0.1.0",
+  "app_version": "0.1.0c1",
   "database_id": "db_…",
-  "schema_version": 2,
+  "schema_version": 4,
   "data_format_version": 1,
   "problem_count": 12,
   "asset_count": 20,
@@ -71,7 +72,7 @@ package-signature.json        # 可选占位；v1 可省略
 
 - `format` 必须等于 `graduate-mistake-book-ebpack`
 - `format_version` 必须为 `1`
-- `encrypted=true` 在 v1 实现中应 **拒绝**（未实现解密）
+- `encrypted=true` 在 v1 实现中应 **拒绝**（未实现解密；见 `encryption-v1.md`）
 - 若 `schema_version` **大于** 当前程序 `SCHEMA_VERSION` → **拒绝恢复**（提示升级软件）
 - 若 `schema_version` **小于等于** 程序版本 → 恢复后执行 `migrate()` 升到当前
 
@@ -97,7 +98,7 @@ package-signature.json        # 可选占位；v1 可省略
 
 ```json
 {
-  "schema_version_at_export": 2,
+  "schema_version_at_export": 4,
   "data_format_version": 1,
   "note": "Restore uses snapshot.sqlite then app migrate()."
 }
@@ -144,7 +145,7 @@ package-signature.json        # 可选占位；v1 可省略
 6. 删除临时目录  
 7. 调用方对目标库执行 `migrate()`（若由应用打开）
 
-**v1 恢复策略**：写入指定空/新数据根；不在同一进程内静默覆盖正在使用的库（UI 提示设置 `YANCUO_DATA_ROOT` 后重启）。
+**v1 恢复策略**：写入指定空/新数据根；不在同一进程内静默覆盖正在使用的库（UI 提示设置 `YANCUO_DATA_ROOT` 后重启）。当前实现只承诺未加密包；加密包会在校验阶段拒绝。
 
 ---
 
@@ -152,4 +153,5 @@ package-signature.json        # 可选占位；v1 可省略
 
 - 加法字段可出现在 manifest；未知字段忽略  
 - 破坏性变更：升高 `format_version`，旧读取器拒绝新包  
+- 当前 Windows/Android 读取器支持 `format_version=1` 且 `schema_version<=4` 的未加密包；`data_format_version` 当前固定为 `1`。
 - 协议变更流程：**先改本文件与 test-vectors，再改代码**

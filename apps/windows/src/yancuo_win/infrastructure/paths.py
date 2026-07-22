@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,15 +42,40 @@ class DataPaths:
 
 
 def resolve_data_root(explicit: Path | None = None) -> Path:
-    import os
-
     if explicit is not None:
         return explicit.expanduser().resolve()
     env = os.environ.get("YANCUO_DATA_ROOT")
     if env:
         return Path(env).expanduser().resolve()
     # 默认：apps/windows/.yancuo_data
-    return Path(__file__).resolve().parents[3] / ".yancuo_data"
+    # Keep the convenient in-repository location for development checkouts,
+    # but do not derive it from a fixed ``parents[n]`` offset: that offset
+    # points outside the project after a wheel is installed.
+    location = Path(__file__).resolve()
+    for parent in (location.parent, *location.parents):
+        checkout = parent / "config" / "default.toml"
+        windows_app = parent / "apps" / "windows"
+        if checkout.is_file() and windows_app.is_dir():
+            return (windows_app / ".yancuo_data").resolve()
+
+    # Installed applications should keep user data outside site-packages so
+    # upgrades/uninstalls cannot remove the database. Follow native Windows
+    # conventions and provide the XDG equivalent for CI/non-Windows runs.
+    if os.name == "nt":
+        base_value = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        base = (
+            Path(base_value).expanduser()
+            if base_value
+            else Path.home() / "AppData" / "Local"
+        )
+    else:
+        base_value = os.environ.get("XDG_DATA_HOME")
+        base = (
+            Path(base_value).expanduser()
+            if base_value
+            else Path.home() / ".local" / "share"
+        )
+    return (base / "Yancuo").resolve()
 
 
 def _resolve_member(root: Path, value: str) -> Path:

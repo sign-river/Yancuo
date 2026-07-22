@@ -28,13 +28,139 @@ from yancuo_win.data.models import (
     Version,
     utcnow,
 )
-from yancuo_win.domain.rules import DomainError
+from yancuo_win.domain.rules import DomainError, validate_priority, validate_status
 from yancuo_win.review.changeset import (
     DEFAULT_ALLOWED_FIELDS,
     field_diffs,
-    snapshot_problem_fields,
     validate_and_filter_proposal,
 )
+
+
+# Fields that may be materialized from a human-reviewed proposal.  In
+# particular, never accept identity, revision, or audit timestamps from a
+# package/remote operation: the service owns those values and advances the
+# revision exactly once when the proposal is accepted.
+_REVIEW_MUTABLE_FIELDS = frozenset(
+    {
+        "status",
+        "subject_id",
+        "chapter_id",
+        "problem_type",
+        "title",
+        "question_markdown",
+        "question_latex",
+        "user_answer",
+        "correct_answer",
+        "solution_markdown",
+        "error_analysis",
+        "notes",
+        "source_book",
+        "source_year",
+        "page_number",
+        "original_number",
+        "priority",
+        "difficulty",
+        "is_favorite",
+        "needs_redo",
+        "allow_print",
+        "human_confirmed",
+        "mastery",
+        "next_review_at",
+        "review_count",
+        "deleted_at",
+    }
+)
+_REVIEW_INT_FIELDS = frozenset(
+    {"priority", "difficulty", "mastery", "review_count"}
+)
+_REVIEW_BOOL_FIELDS = frozenset(
+    {"is_favorite", "needs_redo", "allow_print", "human_confirmed"}
+)
+_REVIEW_REQUIRED_TEXT_FIELDS = frozenset(
+    {
+        "question_markdown",
+        "question_latex",
+        "user_answer",
+        "correct_answer",
+        "solution_markdown",
+        "error_analysis",
+        "notes",
+    }
+)
+_REVIEW_OPTIONAL_TEXT_FIELDS = frozenset(
+    {
+        "subject_id",
+        "chapter_id",
+        "problem_type",
+        "title",
+        "source_book",
+        "source_year",
+        "page_number",
+        "original_number",
+    }
+)
+
+
+def _review_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None
+            else value.astimezone(timezone.utc)
+        )
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return (
+            parsed.replace(tzinfo=timezone.utc)
+            if parsed.tzinfo is None
+            else parsed.astimezone(timezone.utc)
+        )
+    except (TypeError, ValueError) as exc:
+        raise DomainError(f"review datetime is invalid: {value!r}") from exc
+
+
+def _review_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in {"true", "1"}:
+        return True
+    if isinstance(value, str) and value.strip().lower() in {"false", "0"}:
+        return False
+    raise DomainError(f"review boolean is invalid: {value!r}")
+
+
+def _coerce_review_value(key: str, value: Any) -> Any:
+    if key not in _REVIEW_MUTABLE_FIELDS:
+        raise DomainError(f"review proposal cannot change field: {key}")
+    if key == "status":
+        return validate_status(str(value))
+    if key in {"next_review_at", "deleted_at"}:
+        return _review_datetime(value)
+    if key in _REVIEW_INT_FIELDS:
+        if value is None and key in {"difficulty", "mastery"}:
+            return None
+        try:
+            number = int(value)
+        except (TypeError, ValueError) as exc:
+            raise DomainError(f"review integer is invalid: {value!r}") from exc
+        if key == "priority":
+            return validate_priority(number)
+        return number
+    if key in _REVIEW_BOOL_FIELDS:
+        return _review_bool(value)
+    if key in _REVIEW_REQUIRED_TEXT_FIELDS:
+        if not isinstance(value, str):
+            raise DomainError(f"review text is invalid: {key}={value!r}")
+        return value
+    if key in _REVIEW_OPTIONAL_TEXT_FIELDS:
+        if value is not None and not isinstance(value, str):
+            raise DomainError(f"review text is invalid: {key}={value!r}")
+        return value
+    return value
 
 
 class AIService:
@@ -253,7 +379,11 @@ class AIService:
             if not job or not item or not item.problem_id or not item.asset_id:
                 return
             asset = s.get(Asset, item.asset_id)
-            problem = s.get(Problem, item.problem_id)
+            problem = s.scalars(
+                select(Problem)
+                .where(Problem.id == item.problem_id)
+                .options(selectinload(Problem.tags))
+            ).first()
             if not asset or not problem:
                 item.status = "failed"
                 item.error_message = "题目或资源缺失"
@@ -320,7 +450,9 @@ class AIService:
                 if not session_holder:
                     session_holder.append(review_session.id)
 
-                before = snapshot_problem_fields(problem)
+                from yancuo_win.application.sync_service import sync_snapshot
+
+                before = sync_snapshot(problem)
                 s.add(
                     ReviewItem(
                         id=new_id("ritem"),
@@ -358,11 +490,17 @@ class AIService:
                 s.commit()
 
     def accept_review_item(self, review_item_id: str, *, force: bool = False) -> None:
+        from yancuo_win.application.sync_service import SyncService, sync_snapshot
+
         with self.session() as s:
             item = s.get(ReviewItem, review_item_id)
             if not item or item.status not in {"pending", "conflict"}:
                 raise DomainError("审核项不可接受")
-            problem = s.get(Problem, item.problem_id)
+            problem = s.scalars(
+                select(Problem)
+                .where(Problem.id == item.problem_id)
+                .options(selectinload(Problem.tags))
+            ).first()
             if not problem:
                 raise DomainError("题目不存在")
             if problem.revision != item.base_revision and not force:
@@ -373,32 +511,51 @@ class AIService:
                 raise DomainError(
                     f"题目已变更（当前 r{problem.revision}，审核基于 r{item.base_revision}），请拒绝后重跑"
                 )
-            proposed = json.loads(item.proposed_json)
+            before_sync = sync_snapshot(problem)
+            try:
+                proposed = json.loads(item.proposed_json)
+            except json.JSONDecodeError as exc:
+                raise DomainError("审查提案 JSON 无效") from exc
+            if not isinstance(proposed, dict):
+                raise DomainError("审查提案必须是对象")
+            tags_present = "tags" in proposed
             tags = proposed.pop("tags", None)
+            if tags_present and not isinstance(tags, list):
+                raise DomainError("审查提案 tags 必须是列表")
             for key, value in proposed.items():
-                if hasattr(problem, key):
-                    setattr(problem, key, value)
+                if key not in _REVIEW_MUTABLE_FIELDS:
+                    # Keep identity/revision/audit columns owned by the
+                    # service even when a malformed review item is present.
+                    continue
+                setattr(problem, key, _coerce_review_value(key, value))
+            # Keep the soft-delete timestamp consistent when a sync conflict
+            # proposes a status change without carrying both fields.
+            if "status" in proposed or "deleted_at" in proposed:
+                if problem.status == "trashed" and problem.deleted_at is None:
+                    problem.deleted_at = utcnow()
+                elif problem.status != "trashed":
+                    problem.deleted_at = None
             if isinstance(tags, list):
                 tag_objs = []
-                for name in tags:
+                seen_tags: set[str] = set()
+                for name in tags[:20]:
                     name = str(name).strip()
-                    if not name:
+                    if not name or name in seen_tags or len(name) > 128:
                         continue
+                    seen_tags.add(name)
                     tag = s.scalar(select(Tag).where(Tag.name == name))
                     if not tag:
                         tag = Tag(id=new_id("tag"), name=name, is_system=False)
                         s.add(tag)
                         s.flush()
                     tag_objs.append(tag)
-                if tag_objs:
-                    existing = {t.id: t for t in problem.tags}
-                    for t in tag_objs:
-                        existing[t.id] = t
-                    problem.tags = list(existing.values())
+                # 列表语义是权威结果：空列表也应清空旧标签，不能只在
+                # 有新增标签时才写入。
+                problem.tags = tag_objs
 
             problem.updated_at = utcnow()
             problem.revision += 1
-            snap = snapshot_problem_fields(problem)
+            after_sync = sync_snapshot(problem, [t.name for t in problem.tags])
             # 根据 session source 标注版本来源
             session = s.get(ReviewSession, item.session_id)
             source = "ai"
@@ -406,13 +563,16 @@ class AIService:
             if session and session.source == "workspace":
                 source = "workspace"
                 summary = "接受外部工作区修改" + ("（强制）" if force else "")
+            elif session and session.source == "sync":
+                source = "sync"
+                summary = "接受同步冲突的远端值" + ("（强制）" if force else "")
             ver = Version(
                 id=new_id("ver"),
                 problem_id=problem.id,
                 revision=problem.revision,
                 source=source,
                 summary=summary,
-                snapshot_json=json.dumps(snap, ensure_ascii=False),
+                snapshot_json=json.dumps(after_sync, ensure_ascii=False),
                 created_by=self.runtime.identity.user_id,
             )
             s.add(ver)
@@ -427,7 +587,16 @@ class AIService:
                 item.id,
                 {"problem_id": problem.id, "version_id": ver.id, "force": force},
             )
+            problem_id = problem.id
             s.commit()
+        operation = "update"
+        if before_sync.get("status") != "trashed" and after_sync.get("status") == "trashed":
+            operation = "delete"
+        elif before_sync.get("status") == "trashed" and after_sync.get("status") != "trashed":
+            operation = "undelete"
+        SyncService(self.runtime).record_problem_update(
+            problem_id, before=before_sync, after=after_sync, operation=operation
+        )
 
     def reject_review_item(self, review_item_id: str) -> None:
         with self.session() as s:
@@ -447,6 +616,8 @@ class AIService:
 
     def undo_last_ai_accept(self, problem_id: str) -> None:
         """撤销最近一次已接受的 AI 变更，恢复到接受前快照。"""
+        from yancuo_win.application.sync_service import SyncService, sync_snapshot
+
         with self.session() as s:
             item = s.scalars(
                 select(ReviewItem)
@@ -458,11 +629,22 @@ class AIService:
             ).first()
             if not item:
                 raise DomainError("没有可撤销的 AI 接受记录")
-            problem = s.get(Problem, problem_id)
+            problem = s.scalars(
+                select(Problem)
+                .where(Problem.id == problem_id)
+                .options(selectinload(Problem.tags))
+            ).first()
             if not problem:
                 raise DomainError("题目不存在")
-            before = json.loads(item.before_json)
-            for key in (
+            before_sync = sync_snapshot(problem)
+            try:
+                before = json.loads(item.before_json)
+            except json.JSONDecodeError as exc:
+                raise DomainError("撤销快照 JSON 无效") from exc
+            if not isinstance(before, dict):
+                raise DomainError("撤销快照必须是对象")
+            restore_fields = {
+                "status",
                 "title",
                 "question_markdown",
                 "question_latex",
@@ -471,11 +653,50 @@ class AIService:
                 "solution_markdown",
                 "error_analysis",
                 "notes",
-            ):
+                "priority",
+                "subject_id",
+                "chapter_id",
+                "problem_type",
+                "source_book",
+                "source_year",
+                "page_number",
+                "original_number",
+                "difficulty",
+                "mastery",
+                "is_favorite",
+                "needs_redo",
+                "allow_print",
+                "human_confirmed",
+                "next_review_at",
+                "review_count",
+                "deleted_at",
+            }
+            for key in restore_fields:
                 if key in before:
-                    setattr(problem, key, before[key])
+                    setattr(problem, key, _coerce_review_value(key, before[key]))
+            if "status" in before or "deleted_at" in before:
+                if problem.status == "trashed" and problem.deleted_at is None:
+                    problem.deleted_at = utcnow()
+                elif problem.status != "trashed":
+                    problem.deleted_at = None
+            if isinstance(before.get("tags"), list):
+                restored_tags = []
+                seen_tags: set[str] = set()
+                for name in before["tags"][:20]:
+                    name = str(name).strip()
+                    if not name or name in seen_tags or len(name) > 128:
+                        continue
+                    seen_tags.add(name)
+                    tag = s.scalar(select(Tag).where(Tag.name == name))
+                    if not tag:
+                        tag = Tag(id=new_id("tag"), name=name, is_system=False)
+                        s.add(tag)
+                        s.flush()
+                    restored_tags.append(tag)
+                problem.tags = restored_tags
             problem.updated_at = utcnow()
             problem.revision += 1
+            after_sync = sync_snapshot(problem, [t.name for t in problem.tags])
             s.add(
                 Version(
                     id=new_id("ver"),
@@ -483,7 +704,7 @@ class AIService:
                     revision=problem.revision,
                     source="ai_undo",
                     summary="撤销 AI 接受",
-                    snapshot_json=json.dumps(snapshot_problem_fields(problem), ensure_ascii=False),
+                    snapshot_json=json.dumps(after_sync, ensure_ascii=False),
                     created_by=self.runtime.identity.user_id,
                 )
             )
@@ -496,6 +717,14 @@ class AIService:
                 {"problem_id": problem_id},
             )
             s.commit()
+        operation = "update"
+        if before_sync.get("status") != "trashed" and after_sync.get("status") == "trashed":
+            operation = "delete"
+        elif before_sync.get("status") == "trashed" and after_sync.get("status") != "trashed":
+            operation = "undelete"
+        SyncService(self.runtime).record_problem_update(
+            problem_id, before=before_sync, after=after_sync, operation=operation
+        )
 
     def review_diffs(self, review_item_id: str) -> list[dict[str, Any]]:
         item = self.get_review_item(review_item_id)

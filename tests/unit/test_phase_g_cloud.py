@@ -82,6 +82,7 @@ def test_failed_upload_does_not_update_latest(runtime, tmp_path: Path) -> None:
 
     latest = provider.read_sync_manifest("local", "fail-repo")
     assert latest is None
+    assert not (cloud_root / "local" / "fail-repo" / "locks" / "primary.json").exists()
 
 
 def test_mask_secret_never_full() -> None:

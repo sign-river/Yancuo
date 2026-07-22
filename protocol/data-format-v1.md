@@ -1,8 +1,8 @@
-# 研错库数据格式 v1（初稿）
+# 研错库数据格式 v1
 
-> 状态：阶段 A 冻结 MVP 核心字段。变更前须说明原因与兼容性影响。  
-> 权威实现：Windows `yancuo_win.data.models`；安卓端后续按本规范对齐。  
-> `schema_version` / `data_format_version` 当前均为 **1**。
+> 状态：跨端字段语义 v1 稳定基线。变更前须说明原因与兼容性影响。
+> 权威实现：Windows `yancuo_win.data.models` 与 Android `cn.yancuo.android.data.db`。
+> 当前版本：数据库 `schema_version=4`；跨端字段语义 `data_format_version=1`。两者含义不同，不能互换。
 
 ---
 
@@ -144,16 +144,16 @@
 
 | key | 示例 value |
 |-----|------------|
-| schema_version | `1` |
+| schema_version | `4`（当前迁移目标；历史版本依次为 1、2、3） |
 | data_format_version | `1` |
 
-程序打开库时：若 `schema_version` 高于软件支持版本，应拒绝并提示升级。
+程序打开库时：若 `schema_version` 高于软件支持版本（当前为 4），应拒绝并提示升级。各次加法迁移见 [`docs/05_schema_v2_变更说明.md`](../docs/05_schema_v2_变更说明.md)、[`docs/06_schema_v3_变更说明.md`](../docs/06_schema_v3_变更说明.md)、[`docs/07_schema_v4_变更说明.md`](../docs/07_schema_v4_变更说明.md)。
 
 ---
 
 ## 6. JSON 表示（跨端 / 工作区预览）
 
-题目对外交换时建议字段名使用 snake_case，与上表一致。完整 JSON Schema 将置于 `protocol/schemas/problem.schema.json`（阶段 B/D 补齐）。
+题目对外交换时建议字段名使用 snake_case，与上表一致。工作区题目元数据的 JSON Schema 已置于 `protocol/schemas/problem.schema.json`；实现可以携带额外字段，但不得改变本规范字段的语义。
 
 不确定字段（AI）预留结构（阶段 C）：
 
@@ -179,9 +179,9 @@
 
 ---
 
-## 8. 非目标（本版本明确不做）
+## 8. 范围边界与扩展
 
-- 增量同步 Operation 事件模型  
-- 端到端加密载荷格式  
-- 朋友分享包 `.gmshare`  
-- 将 Word/PDF 作为主存储  
+- `sync_operations` 表自 `schema_version=3` 起由 Windows 库持久化；Operation 的交换与合并语义由 [`sync-protocol-v1.md`](sync-protocol-v1.md) 单独定义，本文件不重复规定线协议。
+- 朋友分享包 `.gmshare` 已有独立 v1 规范（[`gmshare-format-v1.md`](gmshare-format-v1.md)），不属于本核心数据格式。
+- 端到端加密载荷仍未实现；[`encryption-v1.md`](encryption-v1.md) 目前只是设计占位，当前 `.ebpack` 必须为 `encrypted=false`。
+- Word/PDF 仍只是导出目标，不得作为主存储；当前可用导出路径以 Word 为主，PDF 不在本协议承诺范围内。

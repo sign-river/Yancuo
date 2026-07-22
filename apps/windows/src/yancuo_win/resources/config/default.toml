@@ -1,0 +1,109 @@
+# Bundled fallback configuration for non-editable installs.
+#
+# The source checkout keeps the canonical copy at config/default.toml.  Keep
+# this file in sync when changing defaults; source runs prefer the checkout
+# copy and wheels use this packaged copy.
+
+[application]
+language = "zh_CN"
+theme = "system"
+auto_save_seconds = 30
+confirm_before_delete = true
+schema_version = 4
+
+[paths]
+database = "error_book.db"
+asset_dir = "assets"
+inbox_dir = "inbox"
+cache_dir = "cache"
+export_dir = "exports"
+backup_dir = "backups"
+template_dir = "templates"
+workspace_dir = "workspaces"
+log_dir = "logs"
+
+[import]
+scan_subfolders = true
+copy_original_files = true
+skip_duplicates = true
+supported_extensions = [".jpg", ".jpeg", ".png", ".webp", ".pdf"]
+
+[ai]
+enabled = true
+default_provider = "mock"
+default_vision_model = "gpt-5.6-sol"
+default_text_model = "gpt-5.6-sol"
+request_timeout_seconds = 120
+max_concurrent_tasks = 2
+save_raw_responses = true
+require_review_before_apply = true
+max_images_per_job = 50
+max_daily_cost_yuan = 20.0
+allow_delete = false
+
+[ai.providers.mock]
+base_url = ""
+api_key_env = ""
+
+[ai.providers.openai_compatible]
+base_url = "https://faroapi.com/v1"
+api_key_env = "YANCUO_AI_API_KEY"
+credential_key = "yancuo_ai_api_key"
+
+[export]
+default_format = "docx"
+paper_size = "A4"
+orientation = "portrait"
+avoid_problem_page_break = true
+include_original_image = true
+
+[backup]
+enabled = true
+interval_hours = 24
+keep_count = 30
+
+[privacy]
+send_original_images_to_ai = true
+remove_image_metadata = true
+mask_personal_information = false
+
+[cloud]
+enabled = true
+default_provider = "local_folder"
+sync_mode = "manual"
+auto_backup = false
+auto_backup_interval_hours = 24
+keep_release_count = 10
+chunk_size_mb = 250
+encrypt_uploads = false
+upload_on_exit = false
+download_on_start = false
+
+[cloud.repository]
+owner = ""
+name = "graduate-mistake-book-data"
+branch = "sync"
+require_private = true
+
+[cloud.gitlink]
+base_url = "https://www.gitlink.org.cn"
+auth_method = "token"
+credential_key = "yancuo_gitlink_token"
+
+[cloud.github]
+base_url = "https://api.github.com"
+auth_method = "token"
+credential_key = "yancuo_github_token"
+
+[sync]
+device_name = ""
+conflict_policy = "ask"
+allow_background_download = true
+allow_background_upload = false
+verify_hash_after_upload = true
+create_snapshot_before_merge = true
+
+[encryption]
+enabled = false
+algorithm_version = 1
+key_reference = "yancuo_data_key"

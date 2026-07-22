@@ -60,76 +60,80 @@ class CloudBackupService:
         device_id = self.runtime.identity.device_id
         if not self.provider.acquire_lock(self.owner, self.repo, device_id):
             raise DomainError("无法获取主写入锁：另一台设备可能是主编辑设备")
+        try:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            tag = f"data-v1-snapshot-{stamp}"
+            pack = self.ebpack.export_ebpack(
+                self.runtime.paths.cache_dir / f"{tag}.ebpack"
+            )
+            sha = _sha256(pack)
+            asset_name = "snapshot.ebpack"
+            release_name = f"研错库数据备份 · {stamp}"
+            release_body = json.dumps(
+                {
+                    "sha256": sha,
+                    "database_id": self.runtime.identity.database_id,
+                    "schema_version": self.runtime.schema_version,
+                },
+                ensure_ascii=False,
+            )
 
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        tag = f"data-v1-snapshot-{stamp}"
-        pack = self.ebpack.export_ebpack(
-            self.runtime.paths.cache_dir / f"{tag}.ebpack"
-        )
-        sha = _sha256(pack)
-        asset_name = "snapshot.ebpack"
-        release_name = f"研错库数据备份 · {stamp}"
-        release_body = json.dumps(
-            {
+            # GitLink：先附件后 Release；LocalFolder：先建目录再拷文件
+            if caps.assets_first:
+                asset_info = self.provider.upload_release_asset(
+                    self.owner,
+                    self.repo,
+                    tag=tag,
+                    file_path=pack,
+                    asset_name=asset_name,
+                )
+                release = self.provider.create_release(
+                    self.owner,
+                    self.repo,
+                    tag=tag,
+                    name=release_name,
+                    body=release_body,
+                )
+            else:
+                release = self.provider.create_release(
+                    self.owner,
+                    self.repo,
+                    tag=tag,
+                    name=release_name,
+                    body=release_body,
+                )
+                asset_info = self.provider.upload_release_asset(
+                    self.owner,
+                    self.repo,
+                    tag=tag,
+                    file_path=pack,
+                    asset_name=asset_name,
+                )
+
+            if _sha256(pack) != sha:
+                raise DomainError("上传前后哈希不一致，已中止更新 latest")
+
+            latest = {
+                "format": "graduate-mistake-book-latest",
+                "format_version": 1,
+                "tag": tag,
+                "asset_name": asset_name,
                 "sha256": sha,
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "device_id": device_id,
                 "database_id": self.runtime.identity.database_id,
                 "schema_version": self.runtime.schema_version,
-            },
-            ensure_ascii=False,
-        )
-
-        # GitLink：先附件后 Release；LocalFolder：先建目录再拷文件
-        if caps.assets_first:
-            asset_info = self.provider.upload_release_asset(
-                self.owner,
-                self.repo,
-                tag=tag,
-                file_path=pack,
-                asset_name=asset_name,
-            )
-            release = self.provider.create_release(
-                self.owner,
-                self.repo,
-                tag=tag,
-                name=release_name,
-                body=release_body,
-            )
-        else:
-            release = self.provider.create_release(
-                self.owner,
-                self.repo,
-                tag=tag,
-                name=release_name,
-                body=release_body,
-            )
-            asset_info = self.provider.upload_release_asset(
-                self.owner,
-                self.repo,
-                tag=tag,
-                file_path=pack,
-                asset_name=asset_name,
-            )
-
-        if _sha256(pack) != sha:
-            raise DomainError("上传前后哈希不一致，已中止更新 latest")
-
-        latest = {
-            "format": "graduate-mistake-book-latest",
-            "format_version": 1,
-            "tag": tag,
-            "asset_name": asset_name,
-            "sha256": sha,
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
-            "device_id": device_id,
-            "database_id": self.runtime.identity.database_id,
-            "schema_version": self.runtime.schema_version,
-            "primary_device": device_id,
-            "size": pack.stat().st_size,
-            "asset": asset_info,
-        }
-        # 完整包就绪后再写指针
-        self.provider.write_sync_manifest(self.owner, self.repo, latest)
-        return {"tag": tag, "sha256": sha, "latest": latest, "release": release.tag}
+                "primary_device": device_id,
+                "size": pack.stat().st_size,
+                "asset": asset_info,
+            }
+            # 完整包就绪后再写指针
+            self.provider.write_sync_manifest(self.owner, self.repo, latest)
+            return {"tag": tag, "sha256": sha, "latest": latest, "release": release.tag}
+        finally:
+            # 无论导出、上传或写 latest 哪一步失败，都释放主写入锁；
+            # LocalFolder 的 TTL 只是最后一道兜底，不替代显式释放。
+            self.provider.release_lock(self.owner, self.repo, device_id)
 
     def list_backups(self) -> list[dict[str, Any]]:
         releases = self.provider.list_releases(self.owner, self.repo)

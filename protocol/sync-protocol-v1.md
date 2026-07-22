@@ -68,9 +68,11 @@ releases/                  # 完整 .ebpack 快照（非增量通道）
 规则：
 
 - `operation_id` 全局唯一；接收方按 id **幂等去重**
+- `device_id`、`database_id`、`timestamp`、`entity_id` 必须是非空字符串；revision 必须是非负整数
 - `operation` ∈ `create` | `update` | `delete` | `undelete`
 - `changed_fields` 仅含实际变更键；`tags` 可为字符串数组（并集合并）
 - `delete` 时 `tombstone=true`，并设置 `changed_fields.status="trashed"`（或等价）
+- Windows v1 当前只落地 `entity_type=problem`；其他预留实体不会被误套用到题目模型
 
 ---
 

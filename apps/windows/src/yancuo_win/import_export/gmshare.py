@@ -14,12 +14,19 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from yancuo_win import __version__
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import Asset, Problem, ProblemOrigin, Tag
 from yancuo_win.domain.identity import DATA_FORMAT_VERSION
-from yancuo_win.domain.rules import DomainError
+from yancuo_win.domain.rules import DomainError, validate_priority
+from yancuo_win.infrastructure.archive import (
+    ArchiveSecurityError,
+    safe_extract_zip,
+    safe_relative_path,
+    validate_relative_checksum_path,
+)
 
 FORMAT_NAME = "graduate-mistake-book-gmshare"
 FORMAT_VERSION = 1
@@ -187,7 +194,7 @@ class GmshareService:
                 "package_id": package_id,
                 "created_at": _utcnow_iso(),
                 "title": title,
-                "app_version": "0.1.0",
+                "app_version": __version__,
                 "data_format_version": DATA_FORMAT_VERSION,
                 "problem_count": len(rows),
                 "asset_count": len(asset_index),
@@ -254,13 +261,19 @@ class GmshareService:
         staging.mkdir(parents=True)
         try:
             with zipfile.ZipFile(pack, "r") as zf:
-                zf.extractall(staging)
+                try:
+                    safe_extract_zip(zf, staging)
+                except ArchiveSecurityError as exc:
+                    raise DomainError(f"gmshare ZIP 解压被拒绝：{exc}") from exc
             manifest = self._validate(staging)
             package_id = str(manifest["package_id"])
             lines = (staging / "problems.jsonl").read_text(encoding="utf-8").splitlines()
             created = 0
             skipped = 0
             created_ids: list[str] = []
+            sync_changes: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+            from yancuo_win.application.sync_service import sync_snapshot
+
             with self.runtime.session_factory() as s:
                 for line in lines:
                     line = line.strip()
@@ -285,6 +298,11 @@ class GmshareService:
                     raw.pop("user_answer", None)
                     raw.pop("notes", None)
 
+                    try:
+                        priority = validate_priority(int(raw.get("priority") or 3))
+                    except (TypeError, ValueError) as exc:
+                        raise DomainError("分享包 priority 字段无效") from exc
+
                     problem = Problem(
                         id=new_id("problem"),
                         status="inbox",
@@ -300,15 +318,20 @@ class GmshareService:
                         source_year=raw.get("source_year"),
                         page_number=raw.get("page_number"),
                         original_number=raw.get("original_number"),
-                        priority=int(raw.get("priority") or 3),
+                        priority=priority,
                         revision=1,
                     )
                     s.add(problem)
                     s.flush()
-                    for name in raw.get("tags") or []:
+                    raw_tags = raw.get("tags") or []
+                    if not isinstance(raw_tags, list):
+                        raise DomainError("分享包 tags 字段必须是数组")
+                    seen_tags: set[str] = set()
+                    for name in raw_tags[:20]:
                         name = str(name).strip()
-                        if not name:
+                        if not name or name in seen_tags or len(name) > 128:
                             continue
+                        seen_tags.add(name)
                         tag = s.scalar(select(Tag).where(Tag.name == name))
                         if not tag:
                             tag = Tag(id=new_id("tag"), name=name)
@@ -319,7 +342,10 @@ class GmshareService:
                         if not isinstance(ref, dict) or ref.get("role") != "original":
                             continue
                         rel = str(ref.get("relative_path") or "").replace("\\", "/")
-                        src = staging / "assets" / rel
+                        try:
+                            src = safe_relative_path(staging / "assets", rel)
+                        except ArchiveSecurityError as exc:
+                            raise DomainError(f"分享包资源路径非法：{rel}") from exc
                         if not src.is_file():
                             continue
                         stored = self.store.store_copy(src, role="original")
@@ -343,9 +369,23 @@ class GmshareService:
                             imported_from="shared-package",
                         )
                     )
+                    sync_changes.append(
+                        (problem.id, {}, sync_snapshot(problem, [t.name for t in problem.tags]))
+                    )
                     created += 1
                     created_ids.append(problem.id)
                 s.commit()
+            if sync_changes:
+                from yancuo_win.application.sync_service import SyncService
+
+                sync = SyncService(self.runtime)
+                for problem_id, before, after in sync_changes:
+                    sync.record_problem_update(
+                        problem_id,
+                        before=before,
+                        after=after,
+                        operation="create",
+                    )
             return GmshareImportResult(
                 created=created,
                 skipped_duplicates=skipped,
@@ -371,9 +411,12 @@ class GmshareService:
                 continue
             parts = line.split("  ", 1)
             if len(parts) != 2:
-                continue
-            digest, rel = parts
-            path = root / rel
+                raise DomainError(f"checksum 行格式错误：{line[:80]}")
+            digest, rel = (part.strip() for part in parts)
+            try:
+                path = validate_relative_checksum_path(root, rel)
+            except ArchiveSecurityError as exc:
+                raise DomainError(f"checksum 路径非法：{rel}") from exc
             if not path.is_file():
                 raise DomainError(f"checksum 指向缺失文件：{rel}")
             if _sha256_file(path) != digest:

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from yancuo_win.application.bootstrap import bootstrap_runtime
-from yancuo_win.application.services import AppServices, ProblemFilter
+from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.review_rules import (
     compute_next_review_at,

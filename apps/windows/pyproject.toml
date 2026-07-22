@@ -1,27 +1,28 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68,<81", "wheel>=0.42,<1"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "yancuo-win"
 version = "0.1.0c1"
-description = "研错库 Windows 桌面客户端（阶段 C AI 审核）"
+description = "研错库本地优先 Windows 桌面客户端"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "See repository LICENSE" }
 authors = [{ name = "Yancuo" }]
 dependencies = [
-  "PySide6>=6.6",
-  "SQLAlchemy>=2.0",
-  "pydantic>=2.0",
-  "pydantic-settings>=2.0",
-  "python-docx>=1.1",
-  "keyring>=25.0",
+  "PySide6>=6.6,<7",
+  "SQLAlchemy>=2.0,<3",
+  "pydantic>=2.0,<3",
+  "pydantic-settings>=2.0,<3",
+  "python-docx>=1.1,<2",
+  "keyring>=25.0,<26",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.0",
+  "pytest>=8.0,<9",
+  "ruff>=0.6,<1",
 ]
 
 [project.scripts]
@@ -31,6 +32,23 @@ yancuo-migrate = "yancuo_win.data.migrate_cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+yancuo_win = [
+  "resources/config/*.toml",
+  "resources/protocol/schemas/*.json",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["../../tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/yancuo_win/domain/sync_merge.py" = ["E741"]
+"src/yancuo_win/import_export/workspace.py" = ["F401"]

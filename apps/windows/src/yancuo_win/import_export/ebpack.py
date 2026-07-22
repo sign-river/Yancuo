@@ -12,10 +12,19 @@ from typing import Any
 
 from sqlalchemy import func, select
 
+from yancuo_win import __version__
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.data.models import Asset, Problem
 from yancuo_win.domain.identity import DATA_FORMAT_VERSION, SCHEMA_VERSION
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.infrastructure.archive import (
+    ArchiveSecurityError,
+    copy_tree_no_symlinks,
+    iter_regular_files,
+    safe_extract_zip,
+    validate_relative_checksum_path,
+    validate_zip_members,
+)
 
 FORMAT_NAME = "graduate-mistake-book-ebpack"
 FORMAT_VERSION = 1
@@ -78,24 +87,28 @@ class EbpackService:
                 # 复制整个 asset_dir 内容（含 objects）
                 for item in self.runtime.paths.asset_dir.iterdir():
                     target = assets_dst / item.name
+                    if item.is_symlink():
+                        raise DomainError(f"导出失败，资源目录包含符号链接：{item}")
                     if item.is_dir():
-                        shutil.copytree(item, target)
+                        try:
+                            copy_tree_no_symlinks(item, target)
+                        except ArchiveSecurityError as exc:
+                            raise DomainError(f"导出失败，资源目录不安全：{exc}") from exc
                     elif item.is_file():
                         shutil.copy2(item, target)
             objects_dst.mkdir(parents=True, exist_ok=True)
 
             object_entries = []
             if objects_dst.is_dir():
-                for file in sorted(objects_dst.rglob("*")):
-                    if file.is_file():
-                        rel = file.relative_to(assets_dst).as_posix()
-                        object_entries.append(
-                            {
-                                "sha256": _sha256_file(file),
-                                "relative_path": rel,
-                                "size": file.stat().st_size,
-                            }
-                        )
+                for file in iter_regular_files(objects_dst):
+                    rel = file.relative_to(assets_dst).as_posix()
+                    object_entries.append(
+                        {
+                            "sha256": _sha256_file(file),
+                            "relative_path": rel,
+                            "size": file.stat().st_size,
+                        }
+                    )
             (assets_dst / "index.json").write_text(
                 json.dumps({"objects": object_entries}, ensure_ascii=False, indent=2)
                 + "\n",
@@ -112,7 +125,7 @@ class EbpackService:
                 "format_version": FORMAT_VERSION,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "application": "Yancuo",
-                "app_version": "0.1.0e1",
+                "app_version": __version__,
                 "database_id": self.runtime.identity.database_id,
                 "schema_version": self.runtime.schema_version,
                 "data_format_version": DATA_FORMAT_VERSION,
@@ -136,9 +149,8 @@ class EbpackService:
             if dest.exists():
                 dest.unlink()
             with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for file in staging.rglob("*"):
-                    if file.is_file():
-                        zf.write(file, arcname=file.relative_to(staging).as_posix())
+                for file in iter_regular_files(staging):
+                    zf.write(file, arcname=file.relative_to(staging).as_posix())
             return dest
         finally:
             shutil.rmtree(staging, ignore_errors=True)
@@ -162,10 +174,9 @@ class EbpackService:
                 lines.append(f"{_sha256_file(path)}  {rel}")
         objects = staging / "assets" / "objects"
         if objects.is_dir():
-            for file in sorted(objects.rglob("*")):
-                if file.is_file():
-                    rel = file.relative_to(staging).as_posix()
-                    lines.append(f"{_sha256_file(file)}  {rel}")
+            for file in iter_regular_files(objects):
+                rel = file.relative_to(staging).as_posix()
+                lines.append(f"{_sha256_file(file)}  {rel}")
         identity = staging / "identity.json"
         if identity.is_file():
             lines.append(f"{_sha256_file(identity)}  identity.json")
@@ -178,6 +189,10 @@ class EbpackService:
             raise DomainError("ebpack 文件不存在")
         try:
             with zipfile.ZipFile(pack, "r") as zf:
+                try:
+                    validate_zip_members(zf)
+                except ArchiveSecurityError as exc:
+                    raise DomainError(f"ebpack ZIP 安全校验失败：{exc}") from exc
                 names = set(zf.namelist())
                 required = {
                     "manifest.json",
@@ -198,7 +213,10 @@ class EbpackService:
                     shutil.rmtree(tmp)
                 tmp.mkdir(parents=True)
                 try:
-                    zf.extractall(tmp)
+                    try:
+                        safe_extract_zip(zf, tmp)
+                    except ArchiveSecurityError as exc:
+                        raise DomainError(f"ebpack ZIP 解压被拒绝：{exc}") from exc
                     self._verify_checksums(tmp)
                 finally:
                     shutil.rmtree(tmp, ignore_errors=True)
@@ -207,15 +225,21 @@ class EbpackService:
             raise DomainError("ebpack 不是有效的 ZIP 包") from exc
 
     def _validate_manifest(self, manifest: dict[str, Any]) -> None:
+        if not isinstance(manifest, dict):
+            raise DomainError("ebpack manifest 必须是对象")
         if manifest.get("format") != FORMAT_NAME:
             raise DomainError("不是研错库 ebpack（format 不匹配）")
-        if int(manifest.get("format_version") or 0) != FORMAT_VERSION:
+        try:
+            format_version = int(manifest.get("format_version") or 0)
+            pkg_schema = int(manifest.get("schema_version") or 0)
+        except (TypeError, ValueError) as exc:
+            raise DomainError("ebpack manifest 版本字段无效") from exc
+        if format_version != FORMAT_VERSION:
             raise DomainError(
                 f"ebpack format_version={manifest.get('format_version')} 不受支持"
             )
         if manifest.get("encrypted"):
             raise DomainError("v1 尚未实现加密包解密，拒绝导入")
-        pkg_schema = int(manifest.get("schema_version") or 0)
         if pkg_schema > SCHEMA_VERSION:
             raise DomainError(
                 f"包 schema_version={pkg_schema} 高于程序支持的 {SCHEMA_VERSION}，请升级软件"
@@ -233,7 +257,10 @@ class EbpackService:
             if len(parts) != 2:
                 raise DomainError(f"checksums 行格式错误：{line[:80]}")
             expected, rel = parts[0].strip(), parts[1].strip()
-            path = root / rel
+            try:
+                path = validate_relative_checksum_path(root, rel)
+            except ArchiveSecurityError as exc:
+                raise DomainError(f"checksums 路径非法：{rel}") from exc
             if not path.is_file():
                 raise DomainError(f"checksums 引用缺失：{rel}")
             actual = _sha256_file(path)
@@ -254,7 +281,10 @@ class EbpackService:
 
         try:
             with zipfile.ZipFile(pack, "r") as zf:
-                zf.extractall(tmp)
+                try:
+                    safe_extract_zip(zf, tmp)
+                except ArchiveSecurityError as exc:
+                    raise DomainError(f"ebpack ZIP 解压被拒绝：{exc}") from exc
             self._verify_checksums(tmp)
 
             db_src = tmp / "database" / "snapshot.sqlite"
@@ -263,41 +293,80 @@ class EbpackService:
 
             db_dest = target_root / "error_book.db"
             assets_dest = target_root / "assets"
+            identity_dest = target_root / "identity.json"
 
             # 写入临时最终位置，成功后再替换，避免半导入
             final_staging = target_root / ".ebpack_final_staging"
+            previous = target_root / ".ebpack_previous"
             if final_staging.exists():
                 shutil.rmtree(final_staging)
+            if previous.exists():
+                shutil.rmtree(previous)
             final_staging.mkdir()
+            previous.mkdir()
             shutil.copy2(db_src, final_staging / "error_book.db")
             if assets_src.is_dir():
-                shutil.copytree(assets_src, final_staging / "assets")
+                try:
+                    copy_tree_no_symlinks(assets_src, final_staging / "assets")
+                except ArchiveSecurityError as exc:
+                    raise DomainError(f"恢复资源目录不安全：{exc}") from exc
             else:
                 (final_staging / "assets" / "objects").mkdir(parents=True)
             if identity_src.is_file():
                 shutil.copy2(identity_src, final_staging / "identity.json")
 
-            if db_dest.exists():
-                db_dest.unlink()
-            if assets_dest.exists():
-                shutil.rmtree(assets_dest)
-            shutil.move(str(final_staging / "error_book.db"), str(db_dest))
-            shutil.move(str(final_staging / "assets"), str(assets_dest))
-            id_final = final_staging / "identity.json"
-            if id_final.is_file():
-                shutil.move(str(id_final), str(target_root / "identity.json"))
-            shutil.rmtree(final_staging, ignore_errors=True)
+            destinations = [db_dest, assets_dest]
+            if identity_src.is_file():
+                destinations.append(identity_dest)
+            moved_old: list[tuple[Path, Path]] = []
+            moved_new: list[Path] = []
+            try:
+                for destination in destinations:
+                    if destination.exists() or destination.is_symlink():
+                        old = previous / destination.name
+                        shutil.move(str(destination), str(old))
+                        moved_old.append((destination, old))
+                for name in ("error_book.db", "assets"):
+                    source = final_staging / name
+                    destination = target_root / name
+                    shutil.move(str(source), str(destination))
+                    moved_new.append(destination)
+                id_final = final_staging / "identity.json"
+                if id_final.is_file():
+                    shutil.move(str(id_final), str(identity_dest))
+                    moved_new.append(identity_dest)
 
-            # 打开目标库并迁移到当前程序版本
-            from yancuo_win.data.db import make_engine
-            from yancuo_win.data.migrate import migrate, verify_core_tables
+                from yancuo_win.data.db import make_engine
+                from yancuo_win.data.migrate import migrate, verify_core_tables
 
-            engine = make_engine(db_dest)
-            version = migrate(engine)
-            missing = verify_core_tables(engine)
-            engine.dispose()
-            if missing:
-                raise DomainError(f"恢复后缺少表：{', '.join(missing)}")
+                try:
+                    engine = make_engine(db_dest)
+                    try:
+                        version = migrate(engine)
+                        missing = verify_core_tables(engine)
+                    finally:
+                        engine.dispose()
+                except DomainError:
+                    raise
+                except Exception as exc:
+                    raise DomainError(f"恢复后的数据库校验失败：{exc}") from exc
+                if missing:
+                    raise DomainError(f"恢复后缺少表：{', '.join(missing)}")
+            except Exception:
+                for destination in reversed(moved_new):
+                    try:
+                        if destination.is_dir() and not destination.is_symlink():
+                            shutil.rmtree(destination)
+                        else:
+                            destination.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                for destination, old in reversed(moved_old):
+                    if old.exists() or old.is_symlink():
+                        shutil.move(str(old), str(destination))
+                raise
+            else:
+                shutil.rmtree(previous, ignore_errors=True)
 
             return {
                 "target_root": str(target_root),
@@ -310,3 +379,4 @@ class EbpackService:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
             shutil.rmtree(target_root / ".ebpack_final_staging", ignore_errors=True)
+            shutil.rmtree(target_root / ".ebpack_previous", ignore_errors=True)

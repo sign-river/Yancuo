@@ -6,6 +6,7 @@ from yancuo_win.config.settings import (
     default_toml_path,
     load_settings,
     repo_root,
+    resource_path,
     resolve_config_path,
     settings_to_public_dict,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "default_toml_path",
     "load_settings",
     "repo_root",
+    "resource_path",
     "resolve_config_path",
     "settings_to_public_dict",
 ]

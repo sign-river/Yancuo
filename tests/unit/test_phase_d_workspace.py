@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
-from yancuo_win.data.models import Version
+from yancuo_win.data.models import ReviewItem, Version
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.import_export.markdown_problem import parse_problem_md
 from yancuo_win.import_export.workspace import WorkspaceService
@@ -60,6 +61,74 @@ def test_export_edit_import_diff_accept(bundle, tmp_path: Path) -> None:
             s.scalars(select(Version).where(Version.problem_id == pid)).all()
         )
         assert any(v.source == "workspace" for v in versions)
+
+
+def test_review_accept_filters_identity_and_coerces_sync_fields(
+    bundle, tmp_path: Path
+) -> None:
+    services, ai, workspace = bundle
+    image = tmp_path / "typed.jpg"
+    image.write_bytes(b"typed-review")
+    pid = services.import_images([image])["created"][0]
+
+    root = workspace.export_workspace([pid], dest_dir=tmp_path / "typed-ws")
+    rid = workspace.import_workspace(root)["items"][0]
+    with services.session() as s:
+        item = s.get(ReviewItem, rid)
+        assert item is not None
+        item.proposed_json = "{"
+        s.commit()
+    with pytest.raises(DomainError):
+        ai.accept_review_item(rid)
+
+    with services.session() as s:
+        item = s.get(ReviewItem, rid)
+        assert item is not None
+        item.proposed_json = json.dumps({"tags": "not-a-list"})
+        s.commit()
+    with pytest.raises(DomainError):
+        ai.accept_review_item(rid)
+
+    with services.session() as s:
+        item = s.get(ReviewItem, rid)
+        assert item is not None
+        item.proposed_json = json.dumps({"next_review_at": "not-a-datetime"})
+        s.commit()
+    with pytest.raises(DomainError):
+        ai.accept_review_item(rid)
+
+    with services.session() as s:
+        item = s.get(ReviewItem, rid)
+        assert item is not None
+        item.proposed_json = "[]"
+        s.commit()
+    with pytest.raises(DomainError):
+        ai.accept_review_item(rid)
+
+    with services.session() as s:
+        item = s.get(ReviewItem, rid)
+        assert item is not None
+        item.proposed_json = json.dumps(
+            {
+                "status": "trashed",
+                "deleted_at": "2026-01-02T03:04:05+00:00",
+                "priority": "5",
+                "id": "problem_hijack",
+                "revision": 9999,
+                "updated_at": "not-a-datetime",
+            },
+            ensure_ascii=False,
+        )
+        s.commit()
+
+    ai.accept_review_item(rid)
+    got = services.get_problem(pid)
+    assert got is not None
+    assert got.id == pid
+    assert got.status == "trashed"
+    assert got.priority == 5
+    assert got.revision == 2
+    assert isinstance(got.deleted_at, datetime)
 
 
 def test_conflict_when_internal_changed(bundle, tmp_path: Path) -> None:
