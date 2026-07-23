@@ -62,11 +62,33 @@ class ProblemFilter:
     status: str | None = None  # None=非回收站日常；"all"=全部；具体状态；"library"=inbox+active
     subject_id: str | None = None
     chapter_id: str | None = None
+    include_descendant_chapters: bool = False
     tag_id: str | None = None
     priority: int | None = None
     query: str | None = None
     include_trashed: bool = False
     due_for_review: bool = False
+
+
+@dataclass(frozen=True)
+class ChapterTreeNode:
+    """Stable application-layer projection used by the library knowledge tree."""
+
+    chapter_id: str
+    subject_id: str
+    parent_id: str | None
+    name: str
+    sort_order: int
+    depth: int
+    path_ids: tuple[str, ...]
+    path_names: tuple[str, ...]
+    direct_problem_count: int
+    total_problem_count: int
+    children: tuple[ChapterTreeNode, ...]
+
+    @property
+    def path_label(self) -> str:
+        return " / ".join(self.path_names)
 
 
 class AppServices:
@@ -153,10 +175,62 @@ class AppServices:
             rows = s.scalars(
                 select(Chapter)
                 .where(Chapter.subject_id == subject_id)
-                .order_by(Chapter.sort_order, Chapter.name)
+                .order_by(Chapter.sort_order, Chapter.name, Chapter.id)
             ).all()
             s.expunge_all()
             return list(rows)
+
+    @staticmethod
+    def _chapter_sort_key(chapter: Chapter) -> tuple[int, str, str]:
+        return (chapter.sort_order, chapter.name.casefold(), chapter.id)
+
+    def _validate_chapter_parent(
+        self,
+        session: Session,
+        *,
+        subject_id: str,
+        parent_id: str | None,
+        moving_chapter_id: str | None = None,
+    ) -> Chapter | None:
+        if parent_id is None:
+            return None
+        parent = session.get(Chapter, parent_id)
+        if parent is None:
+            raise DomainError("上级章节不存在")
+        if parent.subject_id != subject_id:
+            raise DomainError("上级章节必须属于同一科目")
+        if moving_chapter_id is None:
+            return parent
+        if parent.id == moving_chapter_id:
+            raise DomainError("章节不能成为自己的上级")
+
+        visited: set[str] = set()
+        cursor: Chapter | None = parent
+        while cursor is not None:
+            if cursor.id in visited:
+                raise DomainError("现有章节目录包含循环引用，请先修复数据")
+            visited.add(cursor.id)
+            if cursor.id == moving_chapter_id:
+                raise DomainError("不能把章节移动到自己的下级")
+            cursor = session.get(Chapter, cursor.parent_id) if cursor.parent_id else None
+        return parent
+
+    @staticmethod
+    def _ensure_unique_chapter_name(
+        session: Session,
+        *,
+        subject_id: str,
+        parent_id: str | None,
+        name: str,
+        exclude_id: str | None = None,
+    ) -> None:
+        stmt = select(Chapter).where(
+            Chapter.subject_id == subject_id,
+            Chapter.parent_id == parent_id,
+        )
+        for sibling in session.scalars(stmt):
+            if sibling.id != exclude_id and sibling.name.casefold() == name.casefold():
+                raise DomainError(f"同一层级已存在章节：{name}")
 
     def create_chapter(
         self, subject_id: str, name: str, parent_id: str | None = None, sort_order: int = 0
@@ -167,6 +241,17 @@ class AppServices:
         with self.session() as s:
             if not s.get(Subject, subject_id):
                 raise DomainError("科目不存在")
+            self._validate_chapter_parent(
+                s,
+                subject_id=subject_id,
+                parent_id=parent_id,
+            )
+            self._ensure_unique_chapter_name(
+                s,
+                subject_id=subject_id,
+                parent_id=parent_id,
+                name=name,
+            )
             ch = Chapter(
                 id=new_id("ch"),
                 subject_id=subject_id,
@@ -180,29 +265,224 @@ class AppServices:
             s.expunge(ch)
             return ch
 
+    def rename_chapter(self, chapter_id: str, name: str) -> Chapter:
+        name = name.strip()
+        if not name:
+            raise DomainError("章节名称不能为空")
+        with self.session() as s:
+            chapter = s.get(Chapter, chapter_id)
+            if chapter is None:
+                raise DomainError("章节不存在")
+            self._ensure_unique_chapter_name(
+                s,
+                subject_id=chapter.subject_id,
+                parent_id=chapter.parent_id,
+                name=name,
+                exclude_id=chapter.id,
+            )
+            chapter.name = name
+            chapter.updated_at = utcnow()
+            s.commit()
+            s.refresh(chapter)
+            s.expunge(chapter)
+            return chapter
+
+    def move_chapter(
+        self,
+        chapter_id: str,
+        parent_id: str | None,
+        *,
+        sort_order: int | None = None,
+    ) -> Chapter:
+        with self.session() as s:
+            chapter = s.get(Chapter, chapter_id)
+            if chapter is None:
+                raise DomainError("章节不存在")
+            self._validate_chapter_parent(
+                s,
+                subject_id=chapter.subject_id,
+                parent_id=parent_id,
+                moving_chapter_id=chapter.id,
+            )
+            self._ensure_unique_chapter_name(
+                s,
+                subject_id=chapter.subject_id,
+                parent_id=parent_id,
+                name=chapter.name,
+                exclude_id=chapter.id,
+            )
+            chapter.parent_id = parent_id
+            if sort_order is not None:
+                chapter.sort_order = int(sort_order)
+            chapter.updated_at = utcnow()
+            s.commit()
+            s.refresh(chapter)
+            s.expunge(chapter)
+            return chapter
+
+    def delete_chapter(self, chapter_id: str) -> None:
+        with self.session() as s:
+            chapter = s.get(Chapter, chapter_id)
+            if chapter is None:
+                return
+            has_children = s.scalar(
+                select(func.count())
+                .select_from(Chapter)
+                .where(Chapter.parent_id == chapter_id)
+            )
+            has_problems = s.scalar(
+                select(func.count())
+                .select_from(Problem)
+                .where(Problem.chapter_id == chapter_id)
+            )
+            if has_children:
+                raise DomainError("章节下仍有子章节，无法删除")
+            if has_problems:
+                raise DomainError("章节下仍有题目，无法删除")
+            s.delete(chapter)
+            s.commit()
+
+    def _chapter_subtree_ids(self, session: Session, chapter_id: str) -> tuple[str, ...]:
+        chapter = session.get(Chapter, chapter_id)
+        if chapter is None:
+            raise DomainError("章节不存在")
+        chapters = list(
+            session.scalars(
+                select(Chapter).where(Chapter.subject_id == chapter.subject_id)
+            ).all()
+        )
+        children_by_parent: dict[str | None, list[Chapter]] = {}
+        for item in chapters:
+            children_by_parent.setdefault(item.parent_id, []).append(item)
+
+        result: list[str] = []
+        pending = [chapter.id]
+        visited: set[str] = set()
+        while pending:
+            current_id = pending.pop()
+            if current_id in visited:
+                raise DomainError("章节目录包含循环引用")
+            visited.add(current_id)
+            result.append(current_id)
+            pending.extend(child.id for child in children_by_parent.get(current_id, []))
+        return tuple(result)
+
+    def list_chapter_tree(
+        self,
+        subject_id: str,
+        *,
+        problem_status: str | None = "active",
+    ) -> tuple[ChapterTreeNode, ...]:
+        """Return a validated recursive chapter projection with aggregate counts."""
+
+        with self.session() as s:
+            if s.get(Subject, subject_id) is None:
+                raise DomainError("科目不存在")
+            chapters = list(
+                s.scalars(
+                    select(Chapter).where(Chapter.subject_id == subject_id)
+                ).all()
+            )
+            chapter_by_id = {chapter.id: chapter for chapter in chapters}
+            children_by_parent: dict[str | None, list[Chapter]] = {}
+            for chapter in chapters:
+                if chapter.parent_id is not None:
+                    parent = chapter_by_id.get(chapter.parent_id)
+                    if parent is None or parent.subject_id != subject_id:
+                        raise DomainError("章节目录包含无效的上级引用")
+                children_by_parent.setdefault(chapter.parent_id, []).append(chapter)
+            for children in children_by_parent.values():
+                children.sort(key=self._chapter_sort_key)
+
+            count_stmt = (
+                select(Problem.chapter_id, func.count())
+                .where(
+                    Problem.chapter_id.in_(tuple(chapter_by_id)),
+                )
+                .group_by(Problem.chapter_id)
+            )
+            if problem_status is not None:
+                count_stmt = count_stmt.where(
+                    Problem.status == validate_status(problem_status)
+                )
+            direct_counts = {
+                str(chapter_id): int(count)
+                for chapter_id, count in s.execute(count_stmt)
+                if chapter_id is not None
+            }
+
+            visited: set[str] = set()
+            active_path: set[str] = set()
+
+            def build(
+                chapter: Chapter,
+                path_ids: tuple[str, ...],
+                path_names: tuple[str, ...],
+            ) -> ChapterTreeNode:
+                if chapter.id in active_path:
+                    raise DomainError("章节目录包含循环引用")
+                if chapter.id in visited:
+                    raise DomainError("章节目录包含重复引用")
+                active_path.add(chapter.id)
+                current_ids = (*path_ids, chapter.id)
+                current_names = (*path_names, chapter.name)
+                children = tuple(
+                    build(child, current_ids, current_names)
+                    for child in children_by_parent.get(chapter.id, [])
+                )
+                active_path.remove(chapter.id)
+                visited.add(chapter.id)
+                direct_count = direct_counts.get(chapter.id, 0)
+                return ChapterTreeNode(
+                    chapter_id=chapter.id,
+                    subject_id=chapter.subject_id,
+                    parent_id=chapter.parent_id,
+                    name=chapter.name,
+                    sort_order=chapter.sort_order,
+                    depth=len(path_ids),
+                    path_ids=current_ids,
+                    path_names=current_names,
+                    direct_problem_count=direct_count,
+                    total_problem_count=direct_count
+                    + sum(child.total_problem_count for child in children),
+                    children=children,
+                )
+
+            roots = tuple(
+                build(root, (), ())
+                for root in children_by_parent.get(None, [])
+            )
+            if len(visited) != len(chapters):
+                raise DomainError("章节目录包含无法从根节点访问的循环引用")
+            return roots
+
     def export_chapter_template(self, subject_id: str, dest: Path) -> Path:
         with self.session() as s:
             sub = s.get(Subject, subject_id)
             if not sub:
                 raise DomainError("科目不存在")
-            chapters = s.scalars(
-                select(Chapter).where(Chapter.subject_id == subject_id)
-            ).all()
-            payload = {
-                "format": "yancuo-chapter-template",
-                "version": 1,
-                "subject": {"name": sub.name},
-                "chapters": [
+            subject_name = sub.name
+
+        chapters_payload: list[dict[str, Any]] = []
+
+        def append_nodes(nodes: tuple[ChapterTreeNode, ...]) -> None:
+            for node in nodes:
+                chapters_payload.append(
                     {
-                        "name": c.name,
-                        "parent_name": next(
-                            (p.name for p in chapters if p.id == c.parent_id), None
-                        ),
-                        "sort_order": c.sort_order,
+                        "name": node.name,
+                        "parent_path": list(node.path_names[:-1]),
+                        "sort_order": node.sort_order,
                     }
-                    for c in chapters
-                ],
-            }
+                )
+                append_nodes(node.children)
+
+        append_nodes(self.list_chapter_tree(subject_id, problem_status=None))
+        payload = {
+            "format": "yancuo-chapter-template",
+            "version": 2,
+            "subject": {"name": subject_name},
+            "chapters": chapters_payload,
+        }
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return dest
@@ -211,6 +491,9 @@ class AppServices:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if raw.get("format") != "yancuo-chapter-template":
             raise DomainError("不是有效的章节模板")
+        version = int(raw.get("version") or 1)
+        if version not in {1, 2}:
+            raise DomainError(f"不支持的章节模板版本：{version}")
         subject_name = str(raw["subject"]["name"])
         with self.session() as s:
             sub = s.scalar(select(Subject).where(Subject.name == subject_name))
@@ -218,26 +501,95 @@ class AppServices:
                 sub = Subject(id=new_id("sub"), name=subject_name)
                 s.add(sub)
                 s.flush()
-            name_to_id: dict[str, str] = {
-                c.name: c.id
-                for c in s.scalars(select(Chapter).where(Chapter.subject_id == sub.id))
-            }
-            for item in raw.get("chapters", []):
-                name = str(item["name"])
-                if name in name_to_id:
-                    continue
-                parent_name = item.get("parent_name")
-                parent_id = name_to_id.get(parent_name) if parent_name else None
-                ch = Chapter(
-                    id=new_id("ch"),
-                    subject_id=sub.id,
-                    parent_id=parent_id,
-                    name=name,
-                    sort_order=int(item.get("sort_order") or 0),
+            existing = list(
+                s.scalars(select(Chapter).where(Chapter.subject_id == sub.id)).all()
+            )
+            if version == 1:
+                name_to_id = {chapter.name: chapter.id for chapter in existing}
+                for item in raw.get("chapters", []):
+                    name = str(item["name"]).strip()
+                    if not name or name in name_to_id:
+                        continue
+                    parent_name = item.get("parent_name")
+                    parent_id = name_to_id.get(parent_name) if parent_name else None
+                    ch = Chapter(
+                        id=new_id("ch"),
+                        subject_id=sub.id,
+                        parent_id=parent_id,
+                        name=name,
+                        sort_order=int(item.get("sort_order") or 0),
+                    )
+                    s.add(ch)
+                    s.flush()
+                    name_to_id[name] = ch.id
+            else:
+                chapter_by_id = {chapter.id: chapter for chapter in existing}
+                path_cache: dict[str, tuple[str, ...]] = {}
+                active: set[str] = set()
+
+                def resolve_path(chapter: Chapter) -> tuple[str, ...]:
+                    cached = path_cache.get(chapter.id)
+                    if cached is not None:
+                        return cached
+                    if chapter.id in active:
+                        raise DomainError("现有章节目录包含循环引用")
+                    active.add(chapter.id)
+                    if chapter.parent_id is None:
+                        result = (chapter.name,)
+                    else:
+                        parent = chapter_by_id.get(chapter.parent_id)
+                        if parent is None:
+                            raise DomainError("现有章节目录包含无效的上级引用")
+                        result = (*resolve_path(parent), chapter.name)
+                    active.remove(chapter.id)
+                    path_cache[chapter.id] = result
+                    return result
+
+                path_to_id: dict[tuple[str, ...], str] = {}
+                for chapter in existing:
+                    chapter_path = resolve_path(chapter)
+                    if chapter_path in path_to_id:
+                        raise DomainError("现有章节目录包含重复知识路径")
+                    path_to_id[chapter_path] = chapter.id
+
+                items = sorted(
+                    raw.get("chapters", []),
+                    key=lambda item: len(item.get("parent_path") or []),
                 )
-                s.add(ch)
-                s.flush()
-                name_to_id[name] = ch.id
+                for item in items:
+                    name = str(item["name"]).strip()
+                    if not name:
+                        raise DomainError("章节模板包含空名称")
+                    raw_parent_path = item.get("parent_path") or []
+                    if not isinstance(raw_parent_path, list):
+                        raise DomainError("章节模板 parent_path 必须是数组")
+                    parent_path = tuple(str(part).strip() for part in raw_parent_path)
+                    if any(not part for part in parent_path):
+                        raise DomainError("章节模板包含空的上级路径")
+                    chapter_path = (*parent_path, name)
+                    if chapter_path in path_to_id:
+                        continue
+                    parent_id = path_to_id.get(parent_path) if parent_path else None
+                    if parent_path and parent_id is None:
+                        raise DomainError(
+                            f"章节模板缺少上级路径：{' / '.join(parent_path)}"
+                        )
+                    self._ensure_unique_chapter_name(
+                        s,
+                        subject_id=sub.id,
+                        parent_id=parent_id,
+                        name=name,
+                    )
+                    chapter = Chapter(
+                        id=new_id("ch"),
+                        subject_id=sub.id,
+                        parent_id=parent_id,
+                        name=name,
+                        sort_order=int(item.get("sort_order") or 0),
+                    )
+                    s.add(chapter)
+                    s.flush()
+                    path_to_id[chapter_path] = chapter.id
             s.commit()
             return sub.id
 
@@ -298,7 +650,12 @@ class AppServices:
 
     # ---- problems ----
 
-    def _problem_query(self, filt: ProblemFilter) -> Select[tuple[Problem]]:
+    def _problem_query(
+        self,
+        filt: ProblemFilter,
+        *,
+        chapter_ids: tuple[str, ...] | None = None,
+    ) -> Select[tuple[Problem]]:
         stmt = select(Problem).options(
             selectinload(Problem.tags),
             selectinload(Problem.assets),
@@ -314,7 +671,9 @@ class AppServices:
 
         if filt.subject_id:
             stmt = stmt.where(Problem.subject_id == filt.subject_id)
-        if filt.chapter_id:
+        if chapter_ids is not None:
+            stmt = stmt.where(Problem.chapter_id.in_(chapter_ids))
+        elif filt.chapter_id:
             stmt = stmt.where(Problem.chapter_id == filt.chapter_id)
         if filt.priority is not None:
             stmt = stmt.where(Problem.priority == filt.priority)
@@ -340,7 +699,14 @@ class AppServices:
     def list_problems(self, filt: ProblemFilter | None = None) -> list[Problem]:
         filt = filt or ProblemFilter(status="library")
         with self.session() as s:
-            rows = list(s.scalars(self._problem_query(filt)).all())
+            chapter_ids = None
+            if filt.chapter_id and filt.include_descendant_chapters:
+                chapter_ids = self._chapter_subtree_ids(s, filt.chapter_id)
+            rows = list(
+                s.scalars(
+                    self._problem_query(filt, chapter_ids=chapter_ids)
+                ).all()
+            )
             if filt.due_for_review:
                 rows = [p for p in rows if is_due(p.next_review_at)]
             s.expunge_all()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -169,3 +170,136 @@ def test_chapter_template_roundtrip(services: AppServices, tmp_path: Path) -> No
     # 再导入到同名科目应跳过已有章节且不报错
     services.import_chapter_template(tpl)
     assert len(services.list_chapters(sub.id)) == 2
+
+
+def test_chapter_template_v2_preserves_duplicate_names_in_different_paths(
+    services: AppServices,
+    tmp_path: Path,
+) -> None:
+    subject = services.create_subject("目录源")
+    basic = services.create_chapter(subject.id, "基础", sort_order=1)
+    advanced = services.create_chapter(subject.id, "进阶", sort_order=2)
+    services.create_chapter(subject.id, "通用", parent_id=basic.id)
+    services.create_chapter(subject.id, "通用", parent_id=advanced.id)
+
+    template = services.export_chapter_template(subject.id, tmp_path / "tree.json")
+    payload = json.loads(template.read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    assert {
+        (tuple(item["parent_path"]), item["name"])
+        for item in payload["chapters"]
+        if item["name"] == "通用"
+    } == {
+        (("基础",), "通用"),
+        (("进阶",), "通用"),
+    }
+
+    payload["subject"]["name"] = "目录副本"
+    template.write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    imported_subject_id = services.import_chapter_template(template)
+    imported = services.list_chapter_tree(imported_subject_id, problem_status=None)
+    assert [node.name for node in imported] == ["基础", "进阶"]
+    assert imported[0].children[0].path_names == ("基础", "通用")
+    assert imported[1].children[0].path_names == ("进阶", "通用")
+
+
+def test_recursive_chapter_tree_paths_counts_and_descendant_filter(
+    services: AppServices,
+) -> None:
+    subject = services.create_subject("高等数学")
+    limit = services.create_chapter(subject.id, "极限", sort_order=1)
+    integral = services.create_chapter(subject.id, "积分", sort_order=2)
+    double = services.create_chapter(
+        subject.id,
+        "二重积分",
+        parent_id=integral.id,
+        sort_order=1,
+    )
+    line = services.create_chapter(
+        subject.id,
+        "曲线积分",
+        parent_id=integral.id,
+        sort_order=2,
+    )
+
+    services.create_problem(
+        title="极限题",
+        status="active",
+        subject_id=subject.id,
+        chapter_id=limit.id,
+    )
+    services.create_problem(
+        title="积分基础题",
+        status="active",
+        subject_id=subject.id,
+        chapter_id=integral.id,
+    )
+    services.create_problem(
+        title="二重积分题",
+        status="active",
+        subject_id=subject.id,
+        chapter_id=double.id,
+    )
+    services.create_problem(
+        title="待整理曲线积分",
+        status="inbox",
+        subject_id=subject.id,
+        chapter_id=line.id,
+    )
+
+    roots = services.list_chapter_tree(subject.id)
+    assert [node.name for node in roots] == ["极限", "积分"]
+    integral_node = roots[1]
+    assert integral_node.path_label == "积分"
+    assert integral_node.direct_problem_count == 1
+    assert integral_node.total_problem_count == 2
+    assert [node.name for node in integral_node.children] == ["二重积分", "曲线积分"]
+    assert integral_node.children[0].path_names == ("积分", "二重积分")
+    assert integral_node.children[0].depth == 1
+    assert integral_node.children[0].total_problem_count == 1
+    assert integral_node.children[1].total_problem_count == 0
+
+    problems = services.list_problems(
+        ProblemFilter(
+            status="active",
+            chapter_id=integral.id,
+            include_descendant_chapters=True,
+        )
+    )
+    assert {problem.title for problem in problems} == {"积分基础题", "二重积分题"}
+
+
+def test_chapter_maintenance_rejects_invalid_hierarchy(services: AppServices) -> None:
+    math = services.create_subject("高等数学")
+    algebra = services.create_subject("线性代数")
+    integral = services.create_chapter(math.id, "积分")
+    double = services.create_chapter(math.id, "二重积分", parent_id=integral.id)
+    foreign_parent = services.create_chapter(algebra.id, "矩阵")
+
+    with pytest.raises(DomainError, match="同一科目"):
+        services.create_chapter(math.id, "非法章节", parent_id=foreign_parent.id)
+    with pytest.raises(DomainError, match="同一层级"):
+        services.create_chapter(math.id, "积分")
+    with pytest.raises(DomainError, match="自己的下级"):
+        services.move_chapter(integral.id, double.id)
+    with pytest.raises(DomainError, match="子章节"):
+        services.delete_chapter(integral.id)
+
+    services.create_problem(
+        title="二重积分题",
+        subject_id=math.id,
+        chapter_id=double.id,
+    )
+    with pytest.raises(DomainError, match="仍有题目"):
+        services.delete_chapter(double.id)
+
+    empty = services.create_chapter(math.id, "空章节")
+    services.rename_chapter(empty.id, "待分类")
+    moved = services.move_chapter(empty.id, integral.id, sort_order=9)
+    assert moved.parent_id == integral.id
+    assert moved.sort_order == 9
+    services.delete_chapter(empty.id)
+    assert all(chapter.id != empty.id for chapter in services.list_chapters(math.id))
