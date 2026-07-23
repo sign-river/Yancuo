@@ -12,6 +12,7 @@ Windows / 安卓 / 云端共享的**唯一规范真相**。
 | `encryption-v1.md`              | 未实现设计占位；当前 `encrypted=true` 必须拒绝 |
 | `schemas/problem.schema.json`   | 工作区题目元数据 schema             |
 | `schemas/operation.schema.json` | 阶段 J Operation schema              |
+| `schemas/search-spec.schema.json` | AI 搜索意图白名单 schema；不含 SQL、状态或知识范围 |
 | `test-vectors/`                 | hash-v1 / ebpack-v1 / sync-v1        |
 
 变更流程：先改文档说明原因与兼容性 → 再改实现。

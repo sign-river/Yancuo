@@ -1,0 +1,131 @@
+{
+  "$defs": {
+    "SearchField": {
+      "enum": [
+        "priority",
+        "problem_type",
+        "is_favorite",
+        "tags",
+        "created_days_ago",
+        "updated_days_ago"
+      ],
+      "title": "SearchField",
+      "type": "string"
+    },
+    "SearchFilter": {
+      "additionalProperties": false,
+      "description": "One strictly typed, allowlisted local filter.",
+      "properties": {
+        "field": {
+          "$ref": "#/$defs/SearchField"
+        },
+        "operator": {
+          "$ref": "#/$defs/SearchOperator"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "field",
+        "operator",
+        "value"
+      ],
+      "title": "SearchFilter",
+      "type": "object"
+    },
+    "SearchMatchMode": {
+      "enum": [
+        "all",
+        "any"
+      ],
+      "title": "SearchMatchMode",
+      "type": "string"
+    },
+    "SearchOperator": {
+      "enum": [
+        "eq",
+        "gte",
+        "lte",
+        "in",
+        "contains_any",
+        "contains_all"
+      ],
+      "title": "SearchOperator",
+      "type": "string"
+    },
+    "SearchSort": {
+      "enum": [
+        "relevance",
+        "updated_desc",
+        "priority_desc"
+      ],
+      "title": "SearchSort",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The complete expression language an AI may return.",
+  "properties": {
+    "keywords": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 8,
+      "title": "Keywords",
+      "type": "array"
+    },
+    "match_mode": {
+      "$ref": "#/$defs/SearchMatchMode",
+      "default": "all"
+    },
+    "filters": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SearchFilter"
+      },
+      "maxItems": 8,
+      "title": "Filters",
+      "type": "array"
+    },
+    "sort": {
+      "$ref": "#/$defs/SearchSort",
+      "default": "relevance"
+    },
+    "limit": {
+      "default": 20,
+      "maximum": 50,
+      "minimum": 1,
+      "title": "Limit",
+      "type": "integer"
+    },
+    "semantic_intent": {
+      "default": "",
+      "maxLength": 240,
+      "title": "Semantic Intent",
+      "type": "string"
+    }
+  },
+  "title": "SearchSpec",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yancuo.local/schemas/search-spec-v1.json"
+}
