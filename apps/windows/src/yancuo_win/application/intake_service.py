@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from PySide6.QtCore import QRect
+from PySide6.QtGui import QImage
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
@@ -47,6 +49,7 @@ from yancuo_win.data.models import (
     utcnow,
 )
 from yancuo_win.domain.rules import DomainError, validate_priority
+from yancuo_win.review.changeset import validate_and_filter_proposal
 
 
 _INTAKE_AI_FIELDS = frozenset(
@@ -131,6 +134,16 @@ class ResumableIntakeBatch:
     pending_candidates: int
     failed_items: int
     instruction: str
+
+
+@dataclass(frozen=True)
+class RegionRecognitionProposal:
+    proposal_id: str
+    candidate_id: str
+    old_fields: dict[str, Any]
+    new_fields: dict[str, Any]
+    uncertain: list[dict[str, Any]]
+    region: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -895,6 +908,272 @@ class ProblemIntakeService:
             )
             session.commit()
         return normalized
+
+    def rerecognize_ai_candidate_region(
+        self,
+        review_item_id: str,
+        current_fields: dict[str, Any],
+        *,
+        tag_names: list[str] | None = None,
+    ) -> RegionRecognitionProposal:
+        """Recognize a temporary crop and persist a comparison proposal."""
+
+        with self.runtime.session_factory() as session:
+            candidate = session.get(IntakeCandidateRecord, review_item_id)
+            if candidate is None or candidate.status != "pending":
+                raise DomainError("仅支持重新识别待确认的专用录题候选")
+            asset = session.get(IntakeAsset, candidate.intake_asset_id)
+            intake_session = session.get(IntakeSession, candidate.session_id)
+            job = (
+                session.get(AiJob, intake_session.job_id)
+                if intake_session and intake_session.job_id
+                else None
+            )
+            if asset is None or intake_session is None or job is None:
+                raise DomainError("候选题的原图或 AI 任务不存在")
+            try:
+                region = normalize_region(json.loads(candidate.region_json))
+                old_uncertain = json.loads(candidate.uncertain_json)
+            except json.JSONDecodeError:
+                region = {}
+                old_uncertain = []
+            if not region or (
+                region["x"] <= 0.001
+                and region["y"] <= 0.001
+                and region["width"] >= 0.998
+                and region["height"] >= 0.998
+            ):
+                raise DomainError("请先在原图上框选一个小于整图的题目区域")
+            image_path = self.store.resolve(asset.relative_path)
+            prompt_key = job.prompt_key
+            model = job.model
+
+        image = QImage(str(image_path))
+        if image.isNull():
+            raise DomainError("原图无法读取，不能按区域重新识别")
+        crop_rect = QRect(
+            round(region["x"] * image.width()),
+            round(region["y"] * image.height()),
+            max(1, round(region["width"] * image.width())),
+            max(1, round(region["height"] * image.height())),
+        ).intersected(image.rect())
+        if crop_rect.width() < 8 or crop_rect.height() < 8:
+            raise DomainError("当前框选区域太小，请扩大后再重新识别")
+
+        crop_dir = self.runtime.paths.cache_dir / "region_recognition"
+        crop_dir.mkdir(parents=True, exist_ok=True)
+        crop_path = crop_dir / f"{new_id('crop')}.png"
+        cropped = image.copy(crop_rect)
+        if not cropped.save(str(crop_path), "PNG"):
+            raise DomainError("无法生成区域识别临时图片")
+        try:
+            provider = get_provider(self.runtime.settings)
+            provider.validate_configuration()
+            base_prompt = self.ai.get_prompt(prompt_key).body
+            result = provider.structure_from_image(
+                image_path=str(crop_path),
+                prompt=(
+                    base_prompt
+                    + "\n\n这是一张由用户明确框选的单题裁切图。"
+                    "只识别裁切图中的这一道目标题，不要补充裁切区域以外的内容；"
+                    "仍按既定结构输出。"
+                ),
+                model=model,
+                timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+            )
+        finally:
+            crop_path.unlink(missing_ok=True)
+
+        candidates = result.candidate_results()
+        if not candidates:
+            raise DomainError("区域重新识别没有返回题目")
+        selected = candidates[0]
+        filtered, validation_uncertain = validate_and_filter_proposal(
+            selected.fields,
+            allowed_fields=set(_INTAKE_AI_FIELDS),
+            allow_delete=False,
+        )
+        old_fields = dict(current_fields)
+        old_fields["tags"] = _normalized_tags(tag_names)
+        new_fields = dict(old_fields)
+        new_fields.update(filtered)
+        uncertain = [*validation_uncertain, *selected.uncertain_fields]
+        if len(candidates) > 1:
+            uncertain.append(
+                {
+                    "field": "question_markdown",
+                    "content": "",
+                    "reason": "框选区域仍识别出多道题，当前仅展示第一道结果。",
+                }
+            )
+
+        proposal_id = new_id("audit")
+        with self.runtime.session_factory() as session:
+            current = session.get(IntakeCandidateRecord, review_item_id)
+            if current is None or current.status != "pending":
+                raise DomainError("重新识别期间候选题状态已变化")
+            session.add(
+                AuditLog(
+                    id=proposal_id,
+                    action="intake_region_rerecognition_proposed",
+                    entity_type="intake_candidate",
+                    entity_id=review_item_id,
+                    detail_json=json.dumps(
+                        {
+                            "old_fields": old_fields,
+                            "old_uncertain": old_uncertain,
+                            "new_fields": new_fields,
+                            "uncertain": uncertain,
+                            "region": region,
+                            "model": result.model,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    actor=self.runtime.identity.user_id,
+                )
+            )
+            session.commit()
+        return RegionRecognitionProposal(
+            proposal_id=proposal_id,
+            candidate_id=review_item_id,
+            old_fields=old_fields,
+            new_fields=new_fields,
+            uncertain=uncertain,
+            region=region,
+        )
+
+    def decide_region_rerecognition(
+        self,
+        proposal_id: str,
+        *,
+        apply_new: bool,
+    ) -> None:
+        with self.runtime.session_factory() as session:
+            proposal = session.get(AuditLog, proposal_id)
+            if (
+                proposal is None
+                or proposal.action != "intake_region_rerecognition_proposed"
+            ):
+                raise DomainError("区域重新识别提案不存在")
+            already_decided = session.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(
+                    AuditLog.action.in_(
+                        {
+                            "intake_region_rerecognition_applied",
+                            "intake_region_rerecognition_discarded",
+                        }
+                    ),
+                    AuditLog.detail_json.like(
+                        f'%"proposal_id": "{proposal_id}"%'
+                    ),
+                )
+            )
+            if already_decided:
+                raise DomainError("区域重新识别提案已经处理")
+            try:
+                detail = json.loads(proposal.detail_json)
+            except json.JSONDecodeError as exc:
+                raise DomainError("区域重新识别提案损坏") from exc
+            candidate = session.get(
+                IntakeCandidateRecord, proposal.entity_id
+            )
+            if candidate is None or candidate.status != "pending":
+                raise DomainError("候选题已经处理，无法应用重新识别结果")
+            if apply_new:
+                before_fields = detail.get("old_fields", {})
+                before_uncertain = detail.get("old_uncertain", [])
+                candidate.fields_json = json.dumps(
+                    detail.get("new_fields", {}), ensure_ascii=False
+                )
+                candidate.uncertain_json = json.dumps(
+                    detail.get("uncertain", []), ensure_ascii=False
+                )
+                decision_action = "intake_region_rerecognition_applied"
+                decision_detail = {
+                    "proposal_id": proposal_id,
+                    "before_fields": before_fields,
+                    "before_uncertain": before_uncertain,
+                }
+            else:
+                decision_action = "intake_region_rerecognition_discarded"
+                decision_detail = {"proposal_id": proposal_id}
+            session.add(
+                AuditLog(
+                    id=new_id("audit"),
+                    action=decision_action,
+                    entity_type="intake_candidate",
+                    entity_id=candidate.id,
+                    detail_json=json.dumps(
+                        decision_detail, ensure_ascii=False
+                    ),
+                    actor=self.runtime.identity.user_id,
+                )
+            )
+            session.commit()
+
+    def can_undo_region_rerecognition(self, candidate_id: str) -> bool:
+        return self._latest_region_apply(candidate_id) is not None
+
+    def undo_region_rerecognition(self, candidate_id: str) -> None:
+        applied = self._latest_region_apply(candidate_id)
+        if applied is None:
+            raise DomainError("没有可撤回的区域重新识别结果")
+        with self.runtime.session_factory() as session:
+            candidate = session.get(IntakeCandidateRecord, candidate_id)
+            current_apply = session.get(AuditLog, applied.id)
+            if candidate is None or candidate.status != "pending" or current_apply is None:
+                raise DomainError("候选题已经处理，无法撤回")
+            detail = json.loads(current_apply.detail_json)
+            candidate.fields_json = json.dumps(
+                detail.get("before_fields", {}), ensure_ascii=False
+            )
+            candidate.uncertain_json = json.dumps(
+                detail.get("before_uncertain", []), ensure_ascii=False
+            )
+            session.add(
+                AuditLog(
+                    id=new_id("audit"),
+                    action="intake_region_rerecognition_undone",
+                    entity_type="intake_candidate",
+                    entity_id=candidate_id,
+                    detail_json=json.dumps(
+                        {"apply_audit_id": current_apply.id},
+                        ensure_ascii=False,
+                    ),
+                    actor=self.runtime.identity.user_id,
+                )
+            )
+            session.commit()
+
+    def _latest_region_apply(self, candidate_id: str) -> AuditLog | None:
+        with self.runtime.session_factory() as session:
+            undone_ids: set[str] = set()
+            for undo in session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "intake_region_rerecognition_undone",
+                    AuditLog.entity_id == candidate_id,
+                )
+            ).all():
+                try:
+                    value = json.loads(undo.detail_json).get("apply_audit_id")
+                except json.JSONDecodeError:
+                    continue
+                if value:
+                    undone_ids.add(str(value))
+            rows = session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.action == "intake_region_rerecognition_applied",
+                    AuditLog.entity_id == candidate_id,
+                )
+                .order_by(AuditLog.created_at.desc())
+            ).all()
+            current = next((row for row in rows if row.id not in undone_ids), None)
+            if current is not None:
+                session.expunge(current)
+            return current
 
     def split_ai_candidate(
         self,

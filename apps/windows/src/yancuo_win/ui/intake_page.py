@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -40,10 +41,11 @@ from PySide6.QtWidgets import (
 from yancuo_win.application.intake_service import (
     IntakeCandidate,
     ProblemIntakeService,
+    RegionRecognitionProposal,
     ResumableIntakeBatch,
 )
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.tasks.worker import AIJobWorker
+from yancuo_win.tasks.worker import AIJobWorker, RegionRecognitionWorker
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import CardFrame, danger_button, ghost_button, primary_button
 
@@ -356,6 +358,71 @@ class ImagePreviewLabel(QLabel):
         )
 
 
+class _RegionRecognitionCompareDialog(QDialog):
+    def __init__(
+        self,
+        proposal: RegionRecognitionProposal,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.apply_new = False
+        self.setWindowTitle("比较区域重新识别结果")
+        self.resize(1320, 760)
+        root = QVBoxLayout(self)
+        title = QLabel("区域重新识别完成")
+        title.setObjectName("PageTitle")
+        root.addWidget(title)
+        hint = QLabel(
+            "左侧保留重新识别前的内容，右侧是当前蓝框生成的新结果。"
+            "只有点击“采用新结果”才会覆盖候选字段。"
+        )
+        hint.setObjectName("PageHint")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        comparison = QHBoxLayout()
+        old_card = CardFrame()
+        old_card.add_title("原结果")
+        old_view = MathContentView()
+        old_view.set_problem(
+            proposal.old_fields,
+            tag_names=proposal.old_fields.get("tags", []),
+            include_answers=True,
+        )
+        old_card.body.addWidget(old_view)
+        comparison.addWidget(old_card, stretch=1)
+
+        new_card = CardFrame()
+        new_card.add_title("区域重新识别结果")
+        if proposal.uncertain:
+            new_card.add_hint(
+                f"AI 报告 {len(proposal.uncertain)} 项不确定内容，请重点核对。"
+            )
+        new_view = MathContentView()
+        new_view.set_problem(
+            proposal.new_fields,
+            tag_names=proposal.new_fields.get("tags", []),
+            include_answers=True,
+        )
+        new_card.body.addWidget(new_view)
+        comparison.addWidget(new_card, stretch=1)
+        root.addLayout(comparison, stretch=1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        keep_old = QPushButton("保留原结果")
+        keep_old.clicked.connect(self.reject)
+        adopt = primary_button("采用新结果")
+        adopt.clicked.connect(self._adopt)
+        actions.addWidget(keep_old)
+        actions.addWidget(adopt)
+        root.addLayout(actions)
+
+    def _adopt(self) -> None:
+        self.apply_new = True
+        self.accept()
+
+
 class ProblemForm(QWidget):
     """Reusable inline form shared by manual entry and AI confirmation."""
 
@@ -573,6 +640,7 @@ class IntakePage(QWidget):
         self.ai_files: list[Path] = []
         self.ai_job_id: str | None = None
         self.ai_worker: AIJobWorker | None = None
+        self.region_worker: RegionRecognitionWorker | None = None
         self.ai_candidates: list[IntakeCandidate] = []
         self.candidate_index = 0
         self.last_problem_id: str | None = None
@@ -883,9 +951,19 @@ class IntakePage(QWidget):
         region_hint.setObjectName("PageHint")
         reset_region = QPushButton("恢复整图")
         reset_region.clicked.connect(self._reset_candidate_region)
+        self.rerecognize_region = primary_button("按当前区域重新识别")
+        self.rerecognize_region.clicked.connect(
+            self._start_region_rerecognition
+        )
+        self.undo_region_recognition = QPushButton("撤回上次重识别")
+        self.undo_region_recognition.clicked.connect(
+            self._undo_region_rerecognition
+        )
         region_actions.addWidget(region_hint)
         region_actions.addStretch(1)
         region_actions.addWidget(reset_region)
+        region_actions.addWidget(self.undo_region_recognition)
+        region_actions.addWidget(self.rerecognize_region)
         left.body.addLayout(region_actions)
         self.uncertain_label = QLabel("")
         self.uncertain_label.setWordWrap(True)
@@ -1438,6 +1516,28 @@ class IntakePage(QWidget):
         self.image_preview.set_path(candidate.original_image)
         self.image_preview.set_region(candidate.region)
         self._show_region_label(candidate.region)
+        region = candidate.region
+        is_cropped = bool(
+            region
+            and (
+                region.get("x", 0) > 0.001
+                or region.get("y", 0) > 0.001
+                or region.get("width", 1) < 0.998
+                or region.get("height", 1) < 0.998
+            )
+        )
+        self.rerecognize_region.setEnabled(
+            is_cropped
+            and not (
+                self.region_worker
+                and self.region_worker.isRunning()
+            )
+        )
+        self.undo_region_recognition.setEnabled(
+            self.intake.can_undo_region_rerecognition(
+                candidate.review_item_id
+            )
+        )
         if candidate.uncertain:
             self.uncertain_label.setText(
                 "AI 不确定字段：\n"
@@ -1503,6 +1603,7 @@ class IntakePage(QWidget):
         candidate.region.update(normalized)
         self.image_preview.set_region(normalized)
         self._show_region_label(normalized)
+        self.rerecognize_region.setEnabled(True)
         self.status_message.emit("当前题目区域已保存")
 
     def _reset_candidate_region(self) -> None:
@@ -1517,7 +1618,110 @@ class IntakePage(QWidget):
         candidate.region.clear()
         self.image_preview.set_region({})
         self._show_region_label({})
+        self.rerecognize_region.setEnabled(False)
         self.status_message.emit("当前候选已恢复使用整张原图")
+
+    def _start_region_rerecognition(self) -> None:
+        if not self.ai_candidates:
+            return
+        if self.region_worker and self.region_worker.isRunning():
+            return
+        candidate = self.ai_candidates[self.candidate_index]
+        if not candidate.region:
+            QMessageBox.information(
+                self,
+                "请先框选题目",
+                "请在左侧原图上绘制一个小于整图的题目区域，再重新识别。",
+            )
+            return
+        self.rerecognize_region.setEnabled(False)
+        self.rerecognize_region.setText("正在重新识别…")
+        self.status_message.emit("正在按当前蓝框裁切临时图片并重新识别")
+        self.region_worker = RegionRecognitionWorker(
+            self.intake,
+            candidate.review_item_id,
+            self.ai_form.values(),
+            self.ai_form.tag_names(),
+            self,
+        )
+        self.region_worker.finished_ok.connect(
+            self._on_region_rerecognition_done
+        )
+        self.region_worker.failed.connect(
+            self._on_region_rerecognition_failed
+        )
+        self.region_worker.finished.connect(
+            self._on_region_worker_finished
+        )
+        self.region_worker.start()
+
+    def _on_region_rerecognition_done(
+        self,
+        proposal: RegionRecognitionProposal,
+    ) -> None:
+        self.rerecognize_region.setText("按当前区域重新识别")
+        dialog = _RegionRecognitionCompareDialog(proposal, self)
+        dialog.exec()
+        try:
+            self.intake.decide_region_rerecognition(
+                proposal.proposal_id,
+                apply_new=dialog.apply_new,
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法处理重新识别结果", str(exc))
+            self._reload_region_candidate(proposal.candidate_id)
+            return
+        if dialog.apply_new:
+            self.status_message.emit("已采用区域重新识别结果，可继续编辑或撤回")
+            self._reload_region_candidate(proposal.candidate_id)
+        else:
+            self.status_message.emit("已保留原识别结果")
+            self._load_candidate()
+
+    def _on_region_rerecognition_failed(self, error: str) -> None:
+        self.rerecognize_region.setText("按当前区域重新识别")
+        self._load_candidate()
+        QMessageBox.warning(self, "区域重新识别失败", error)
+
+    def _on_region_worker_finished(self) -> None:
+        worker = self.region_worker
+        self.region_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if self.ai_candidates:
+            region = self.ai_candidates[self.candidate_index].region
+            self.rerecognize_region.setEnabled(bool(region))
+
+    def _reload_region_candidate(self, candidate_id: str) -> None:
+        self.ai_candidates = [
+            item
+            for item in self.intake.list_candidates(self.ai_job_id or "")
+            if item.status in {"pending", "conflict"}
+        ]
+        self.candidate_index = next(
+            (
+                index
+                for index, item in enumerate(self.ai_candidates)
+                if item.review_item_id == candidate_id
+            ),
+            0,
+        )
+        if self.ai_candidates:
+            self._load_candidate()
+
+    def _undo_region_rerecognition(self) -> None:
+        if not self.ai_candidates:
+            return
+        candidate = self.ai_candidates[self.candidate_index]
+        try:
+            self.intake.undo_region_rerecognition(
+                candidate.review_item_id
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法撤回", str(exc))
+            return
+        self._reload_region_candidate(candidate.review_item_id)
+        self.status_message.emit("已撤回上一次采用的区域重新识别结果")
 
     def _split_candidate(self) -> None:
         if not self.ai_candidates:
@@ -1718,3 +1922,5 @@ class IntakePage(QWidget):
         if self.ai_worker and self.ai_worker.isRunning():
             self.ai_worker.cancel()
             self.ai_worker.wait(3000)
+        if self.region_worker and self.region_worker.isRunning():
+            self.region_worker.wait(3000)

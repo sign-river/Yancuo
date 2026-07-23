@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from PySide6.QtGui import QColor, QImage
 from sqlalchemy import select
 
 from yancuo_win.ai.base import StructuredCandidate, StructuredResult
@@ -289,6 +290,99 @@ def test_committed_candidate_keeps_batch_open_when_images_failed(
 
     intake.abandon_ai_batch(started.job_id)
     assert intake.app.get_problem(committed.id) is not None
+
+
+def test_region_rerecognition_compares_applies_and_undoes_without_mutating_original(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "region-source.png"
+    image = QImage(240, 160, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    assert image.save(str(image_path), "PNG")
+    original_bytes = image_path.read_bytes()
+
+    started = intake.start_ai([image_path])
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    region = {"x": 0.2, "y": 0.25, "width": 0.5, "height": 0.5}
+    intake.update_ai_candidate_region(candidate.review_item_id, region)
+    baseline = dict(candidate.fields)
+    baseline_tags = list(baseline.get("tags", []))
+
+    discarded = intake.rerecognize_ai_candidate_region(
+        candidate.review_item_id,
+        baseline,
+        tag_names=baseline_tags,
+    )
+    assert discarded.old_fields["title"] == baseline["title"]
+    assert discarded.new_fields["title"] != baseline["title"]
+    intake.decide_region_rerecognition(
+        discarded.proposal_id,
+        apply_new=False,
+    )
+    unchanged = intake.list_candidates(started.job_id)[0]
+    assert unchanged.fields["title"] == baseline["title"]
+
+    proposal = intake.rerecognize_ai_candidate_region(
+        candidate.review_item_id,
+        baseline,
+        tag_names=baseline_tags,
+    )
+    intake.decide_region_rerecognition(
+        proposal.proposal_id,
+        apply_new=True,
+    )
+    applied = intake.list_candidates(started.job_id)[0]
+    assert applied.fields["title"] == proposal.new_fields["title"]
+    assert intake.can_undo_region_rerecognition(candidate.review_item_id)
+
+    intake.undo_region_rerecognition(candidate.review_item_id)
+    restored = intake.list_candidates(started.job_id)[0]
+    assert restored.fields["title"] == baseline["title"]
+    assert not intake.can_undo_region_rerecognition(candidate.review_item_id)
+    assert image_path.read_bytes() == original_bytes
+    assert not any(
+        (intake.runtime.paths.cache_dir / "region_recognition").glob("*.png")
+    )
+
+
+def test_region_rerecognition_removes_temporary_crop_after_failure(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = tmp_path / "region-failure.png"
+    image = QImage(120, 120, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    assert image.save(str(image_path), "PNG")
+    started = intake.start_ai([image_path])
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    intake.update_ai_candidate_region(
+        candidate.review_item_id,
+        {"x": 0.1, "y": 0.1, "width": 0.6, "height": 0.6},
+    )
+
+    class FailingProvider:
+        def validate_configuration(self) -> None:
+            pass
+
+        def structure_from_image(self, **_kwargs):
+            raise DomainError("region request failed")
+
+    monkeypatch.setattr(
+        "yancuo_win.application.intake_service.get_provider",
+        lambda _settings: FailingProvider(),
+    )
+    with pytest.raises(DomainError, match="region request failed"):
+        intake.rerecognize_ai_candidate_region(
+            candidate.review_item_id,
+            candidate.fields,
+        )
+    assert not any(
+        (intake.runtime.paths.cache_dir / "region_recognition").glob("*.png")
+    )
 
 
 def test_one_image_can_create_multiple_independent_candidates(
