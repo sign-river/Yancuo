@@ -1,0 +1,115 @@
+"""Library browse and processing views keep separate navigation state."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QWidget
+
+import yancuo_win.ui.intake_page as intake_page_module
+import yancuo_win.ui.problem_detail as problem_detail_module
+import yancuo_win.ui.review_page as review_page_module
+from yancuo_win.application.bootstrap import bootstrap_runtime
+from yancuo_win.application.services import AppServices
+from yancuo_win.config.settings import default_toml_path
+from yancuo_win.ui.main_window import MainWindow
+
+
+class _ReaderStub(QWidget):
+    def set_problem(self, *_args, **_kwargs) -> None:
+        pass
+
+    def set_message(self, *_args, **_kwargs) -> None:
+        pass
+
+
+@pytest.fixture()
+def window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
+    monkeypatch.setenv("YANCUO_AI__DEFAULT_PROVIDER", "mock")
+    monkeypatch.setattr(intake_page_module, "MathContentView", _ReaderStub)
+    monkeypatch.setattr(problem_detail_module, "MathContentView", _ReaderStub)
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    app = QApplication.instance() or QApplication([])
+
+    runtime = bootstrap_runtime()
+    services = AppServices(runtime)
+    subject = services.create_subject("高等数学")
+    services.create_problem(
+        title="正式极限题",
+        status="active",
+        subject_id=subject.id,
+    )
+    services.create_problem(title="待整理题", status="inbox")
+    services.create_problem(title="归档题", status="archived")
+    services.create_problem(title="回收站题", status="trashed")
+
+    main = MainWindow(runtime)
+    app.processEvents()
+    yield main
+    main.close()
+
+
+def _nav_modes(window: MainWindow) -> list[str]:
+    return [
+        str(window.nav_list.item(index).data(Qt.ItemDataRole.UserRole))
+        for index in range(window.nav_list.count())
+    ]
+
+
+def _select_mode(window: MainWindow, mode: str) -> None:
+    for index in range(window.nav_list.count()):
+        item = window.nav_list.item(index)
+        if item.data(Qt.ItemDataRole.UserRole) == mode:
+            window.nav_list.setCurrentRow(index)
+            return
+    raise AssertionError(f"missing navigation mode: {mode}")
+
+
+def _problem_titles(window: MainWindow) -> list[str]:
+    return [
+        window.problem_list.item(index).text().splitlines()[0]
+        for index in range(window.problem_list.count())
+    ]
+
+
+def test_library_views_separate_knowledge_and_lifecycle_navigation(
+    window: MainWindow,
+) -> None:
+    assert window._library_view == "browse"
+    assert window.library_browse_button.isChecked()
+    assert _nav_modes(window)[:2] == ["active", "due"]
+    assert any(mode.startswith("subject:") for mode in _nav_modes(window))
+    assert "inbox" not in _nav_modes(window)
+    assert _problem_titles(window) == ["正式极限题"]
+    assert not window.new_subject_button.isHidden()
+
+    window._set_library_view("process")
+    assert window.library_process_button.isChecked()
+    assert _nav_modes(window) == ["inbox", "archived", "trashed"]
+    assert _problem_titles(window) == ["待整理题"]
+    assert window.new_subject_button.isHidden()
+
+    _select_mode(window, "archived")
+    assert _problem_titles(window) == ["归档题"]
+    window._set_library_view("browse")
+    _select_mode(window, next(mode for mode in _nav_modes(window) if mode.startswith("subject:")))
+    assert _problem_titles(window) == ["正式极限题"]
+
+    window._set_library_view("process")
+    assert window._nav_mode == "archived"
+    assert _problem_titles(window) == ["归档题"]
+
+
+def test_due_navigation_returns_to_browse_view(window: MainWindow) -> None:
+    window._set_library_view("process")
+    _select_mode(window, "trashed")
+
+    window._goto_due_in_library()
+
+    assert window._library_view == "browse"
+    assert window._nav_mode == "due"
+    assert window.library_browse_button.isChecked()

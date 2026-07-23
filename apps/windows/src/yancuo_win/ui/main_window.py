@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -80,6 +81,11 @@ class MainWindow(QMainWindow):
         self.gmshare = GmshareService(runtime)
         self.cloud = CloudBackupService(runtime)
         self.sync = SyncService(runtime)
+        self._library_view = "browse"
+        self._library_modes = {
+            "browse": "active",
+            "process": "inbox",
+        }
         self._nav_mode = "active"
         self._selected_problem_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
@@ -295,6 +301,9 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"题目已入库：{problem_id}")
 
     def _open_problem_from_intake(self, problem_id: str) -> None:
+        self._library_modes["browse"] = "active"
+        if self._library_view != "browse":
+            self._set_library_view("browse")
         self._nav_mode = "active"
         self.main_nav.setCurrentRow(_PAGE_LIBRARY)
         self.refresh_nav()
@@ -341,22 +350,49 @@ class MainWindow(QMainWindow):
         header.addWidget(btn_more)
         outer.addLayout(header)
 
+        view_row = QHBoxLayout()
+        view_row.setSpacing(8)
+        self.library_view_group = QButtonGroup(self)
+        self.library_view_group.setExclusive(True)
+        self.library_browse_button = QPushButton("浏览题库")
+        self.library_process_button = QPushButton("处理中心")
+        for button, view in (
+            (self.library_browse_button, "browse"),
+            (self.library_process_button, "process"),
+        ):
+            button.setObjectName("LibraryViewButton")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, target=view: self._set_library_view(target)
+            )
+            self.library_view_group.addButton(button)
+            view_row.addWidget(button)
+        self.library_browse_button.setChecked(True)
+        self.library_view_hint = QLabel(
+            "按科目与知识结构浏览正式题目；待整理、归档和回收站集中在处理中心。"
+        )
+        self.library_view_hint.setObjectName("MutedLabel")
+        view_row.addWidget(self.library_view_hint)
+        view_row.addStretch(1)
+        outer.addLayout(view_row)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         filter_wrap = CardFrame()
         filter_wrap.body.setContentsMargins(10, 12, 10, 10)
-        filter_wrap.add_title("筛选")
+        self.library_nav_title = filter_wrap.add_title("知识浏览")
+        self.library_nav_hint = filter_wrap.add_hint("正式题目按科目查看")
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("FilterNav")
         self.nav_list.currentItemChanged.connect(self._on_nav_changed)
         filter_wrap.body.addWidget(self.nav_list, stretch=1)
         filter_btns = QHBoxLayout()
-        b_sub = ghost_button("新建科目")
-        b_sub.clicked.connect(self._new_subject)
-        b_tag = ghost_button("新建标签")
-        b_tag.clicked.connect(self._new_tag)
-        filter_btns.addWidget(b_sub)
-        filter_btns.addWidget(b_tag)
+        self.new_subject_button = ghost_button("新建科目")
+        self.new_subject_button.clicked.connect(self._new_subject)
+        self.new_tag_button = ghost_button("新建标签")
+        self.new_tag_button.clicked.connect(self._new_tag)
+        filter_btns.addWidget(self.new_subject_button)
+        filter_btns.addWidget(self.new_tag_button)
         filter_wrap.body.addLayout(filter_btns)
         filter_wrap.setMinimumWidth(180)
         filter_wrap.setMaximumWidth(240)
@@ -366,9 +402,9 @@ class MainWindow(QMainWindow):
         center_lay = QVBoxLayout(center)
         center_lay.setContentsMargins(0, 0, 0, 0)
         center_lay.setSpacing(8)
-        list_hint = QLabel("错题列表 · 双击打开详情")
-        list_hint.setObjectName("MutedLabel")
-        center_lay.addWidget(list_hint)
+        self.library_list_hint = QLabel("正式题目 · 双击打开详情")
+        self.library_list_hint.setObjectName("MutedLabel")
+        center_lay.addWidget(self.library_list_hint)
         self.problem_list = QListWidget()
         self.problem_list.setObjectName("ProblemList")
         self.problem_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -422,6 +458,19 @@ class MainWindow(QMainWindow):
         splitter.setSizes([200, 640, 280])
         outer.addWidget(splitter, stretch=1)
         return page
+
+    def _set_library_view(self, view: str) -> None:
+        if view not in {"browse", "process"}:
+            raise ValueError(f"unknown library view: {view}")
+        if view == self._library_view:
+            return
+        self._library_modes[self._library_view] = self._nav_mode
+        self._library_view = view
+        self._nav_mode = self._library_modes[view]
+        self.library_browse_button.setChecked(view == "browse")
+        self.library_process_button.setChecked(view == "process")
+        self.refresh_nav()
+        self.refresh_problems()
 
     def _library_more_menu(self) -> None:
         from PySide6.QtWidgets import QMenu
@@ -555,6 +604,8 @@ class MainWindow(QMainWindow):
 
     def _goto_due_in_library(self) -> None:
         self.main_nav.setCurrentRow(_PAGE_LIBRARY)
+        if self._library_view != "browse":
+            self._set_library_view("browse")
         for i in range(self.nav_list.count()):
             it = self.nav_list.item(i)
             if it and it.data(Qt.ItemDataRole.UserRole) == "due":
@@ -608,22 +659,43 @@ class MainWindow(QMainWindow):
         current_mode = self._nav_mode
         self.nav_list.blockSignals(True)
         self.nav_list.clear()
-        items = [
-            ("正式题库", "active"),
-            ("待整理 / 收件箱", "inbox"),
-            ("今日复习", "due"),
-            ("归档", "archived"),
-            ("回收站", "trashed"),
-        ]
+        if self._library_view == "browse":
+            self.library_nav_title.setText("知识浏览")
+            self.library_nav_hint.setText("正式题目按科目查看")
+            self.library_view_hint.setText(
+                "按科目与知识结构浏览正式题目；待整理、归档和回收站集中在处理中心。"
+            )
+            self.library_list_hint.setText("正式题目 · 双击打开详情")
+            self.new_subject_button.setVisible(True)
+            self.new_tag_button.setVisible(True)
+            items = [
+                ("全部正式题目", "active"),
+                ("今日待复习", "due"),
+            ]
+        else:
+            self.library_nav_title.setText("处理中心")
+            self.library_nav_hint.setText("按生命周期处理题目")
+            self.library_view_hint.setText(
+                "集中处理待整理、已归档和回收站题目，不与知识目录混排。"
+            )
+            self.library_list_hint.setText("待处理题目 · 双击打开详情")
+            self.new_subject_button.setVisible(False)
+            self.new_tag_button.setVisible(False)
+            items = [
+                (f"待整理 · {self.services.count_problems('inbox')}", "inbox"),
+                (f"已归档 · {self.services.count_problems('archived')}", "archived"),
+                (f"回收站 · {self.services.count_problems('trashed')}", "trashed"),
+            ]
         for label, mode in items:
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, mode)
             self.nav_list.addItem(item)
 
-        for sub in self.services.list_subjects():
-            item = QListWidgetItem(f"科目 · {sub.name}")
-            item.setData(Qt.ItemDataRole.UserRole, f"subject:{sub.id}")
-            self.nav_list.addItem(item)
+        if self._library_view == "browse":
+            for sub in self.services.list_subjects():
+                item = QListWidgetItem(f"科目 · {sub.name}")
+                item.setData(Qt.ItemDataRole.UserRole, f"subject:{sub.id}")
+                self.nav_list.addItem(item)
 
         for i in range(self.nav_list.count()):
             it = self.nav_list.item(i)
@@ -632,7 +704,8 @@ class MainWindow(QMainWindow):
                 break
         else:
             self.nav_list.setCurrentRow(0)
-            self._nav_mode = "active"
+            self._nav_mode = "active" if self._library_view == "browse" else "inbox"
+        self._library_modes[self._library_view] = self._nav_mode
         self.nav_list.blockSignals(False)
 
     def _filter_from_nav(self) -> ProblemFilter:
@@ -785,6 +858,7 @@ class MainWindow(QMainWindow):
         if current is None:
             return
         self._nav_mode = current.data(Qt.ItemDataRole.UserRole) or "active"
+        self._library_modes[self._library_view] = self._nav_mode
         self.refresh_problems()
 
     def _on_problem_selected(self) -> None:
@@ -1015,6 +1089,7 @@ class MainWindow(QMainWindow):
         self, neighbor_id: str | None, message: str
     ) -> None:
         changed_id = self.problem_detail_page.problem_id
+        self.refresh_nav()
         if changed_id:
             self._refresh_problem_item(changed_id)
         self.review_page.reload_queue(preserve_current=True)
@@ -1038,6 +1113,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.services.promote_to_active(pid)
+            self.refresh_nav()
             self._refresh_problem_item(pid, select=True)
         except DomainError as exc:
             QMessageBox.warning(self, "无法转入正式库", str(exc))
@@ -1056,6 +1132,7 @@ class MainWindow(QMainWindow):
         try:
             for pid in ids:
                 self.services.trash_problem(pid)
+            self.refresh_nav()
             self._remove_problem_items(ids)
             self.review_page.reload_queue(preserve_current=True)
         except DomainError as exc:
@@ -1067,6 +1144,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.services.restore_problem(pid, "inbox")
+            self.refresh_nav()
             self._refresh_problem_item(pid)
         except DomainError as exc:
             QMessageBox.warning(self, "恢复失败", str(exc))

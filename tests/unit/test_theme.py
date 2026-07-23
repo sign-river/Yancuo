@@ -35,5 +35,6 @@ def test_stylesheet_covers_dark_tabs_inputs_and_cards() -> None:
     assert DARK_THEME.bg in rendered
     assert DARK_THEME.card in rendered
     assert "QTabBar::tab:selected" in rendered
+    assert "QPushButton#LibraryViewButton:checked" in rendered
     assert "QComboBox QAbstractItemView" in rendered
     assert LIGHT_THEME.bg not in rendered

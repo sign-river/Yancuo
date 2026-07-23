@@ -402,6 +402,17 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.list_hover};
         border-radius: 8px;
     }}
+    QPushButton#LibraryViewButton {{
+        min-width: 92px;
+        background: {t.card};
+        color: {t.muted};
+    }}
+    QPushButton#LibraryViewButton:checked {{
+        background: {t.primary};
+        color: white;
+        border-color: {t.primary};
+        font-weight: 600;
+    }}
 
     QTabWidget::pane {{
         border: 1px solid {t.border};
