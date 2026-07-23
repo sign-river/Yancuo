@@ -43,6 +43,8 @@ class StructuredResult:
     raw_text: str = ""
     cost_estimate: float = 0.0
     model: str = ""
+    timings_ms: dict[str, float] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def candidate_results(self) -> list[StructuredCandidate]:
         """Return multi-problem output with single-problem compatibility."""

@@ -141,6 +141,9 @@ def test_failed_ai_item_can_retry_in_same_job_without_duplicate_problem(
     assert first is not None
     assert first.done_items == 0
     assert first.failed_items == 1
+    failed_diagnostics = ai.get_job_diagnostics(job.id)
+    assert failed_diagnostics["stage"] == "failed"
+    assert failed_diagnostics["timing_samples"] == 0
 
     provider.should_fail = False
     ai.run_job(job.id)
@@ -148,5 +151,9 @@ def test_failed_ai_item_can_retry_in_same_job_without_duplicate_problem(
     assert second is not None
     assert second.done_items == 1
     assert second.failed_items == 0
+    completed_diagnostics = ai.get_job_diagnostics(job.id)
+    assert completed_diagnostics["stage"] == "completed"
+    assert completed_diagnostics["timing_samples"] == 1
+    assert completed_diagnostics["timings_ms"]["total"] >= 0
     assert services.count_problems() == original_count
     assert len(ai.list_review_items_for_job(job.id)) == 1

@@ -824,7 +824,7 @@ class IntakePage(QWidget):
         self.progress_bar.setValue(0)
         card.body.addWidget(self.progress_bar)
         self.processing_steps = QLabel(
-            "保存原图  →  提取题目与公式  →  推荐分类和标签  →  生成待确认表单"
+            "每张图片只发起一次主 AI 请求；完成首张后会显示各阶段实测耗时。"
         )
         self.processing_steps.setWordWrap(True)
         card.body.addWidget(self.processing_steps)
@@ -866,6 +866,10 @@ class IntakePage(QWidget):
 
         left = CardFrame()
         left.add_title("原始图片与识别提示")
+        left.add_hint(
+            "蓝框表示当前题目的原图来源区域，仅用于核对、裁切定位和保存；"
+            "调整蓝框不会自动重新调用 AI。"
+        )
         self.image_preview = ImagePreviewLabel("无原图预览")
         self.image_preview.setMinimumSize(QSize(340, 360))
         self.image_preview.set_editable(True)
@@ -875,7 +879,7 @@ class IntakePage(QWidget):
         self.region_label.setObjectName("PageHint")
         left.body.addWidget(self.region_label)
         region_actions = QHBoxLayout()
-        region_hint = QLabel("空白处重画 · 框内移动 · 控制柄微调")
+        region_hint = QLabel("空白处重画 · 框内移动 · 控制柄微调 · 仅保存区域")
         region_hint.setObjectName("PageHint")
         reset_region = QPushButton("恢复整图")
         reset_region.clicked.connect(self._reset_candidate_region)
@@ -1318,16 +1322,49 @@ class IntakePage(QWidget):
             return
         self.progress_bar.setRange(0, max(1, progress.total))
         self.progress_bar.setValue(progress.done + progress.failed)
-        labels = {
-            "pending": "任务正在排队",
-            "running": "AI 正在提取题目并整理字段",
-            "completed": "识别完成，正在准备确认表单",
-            "cancelled": "任务已取消",
-        }
         self.processing_status.setText(
-            f"{labels.get(progress.status, progress.status)} · "
+            f"{progress.stage_label} · "
             f"完成 {progress.done} / {progress.total} · 失败 {progress.failed}"
         )
+        timing_labels = (
+            ("preflight", "本地预检查"),
+            ("image_encode", "图片读取与编码"),
+            ("request", "AI 请求与等待"),
+            ("response_parse", "响应 JSON 解析"),
+            ("validation", "字段校验"),
+            ("candidate_write", "候选写入"),
+            ("provider_total", "AI 提供商总计"),
+            ("total", "单图总计"),
+        )
+        measured = []
+        granular_provider = "request" in progress.timings_ms
+        for key, label in timing_labels:
+            if key == "provider_total" and granular_provider:
+                continue
+            value = progress.timings_ms.get(key)
+            if value is None:
+                continue
+            measured.append(
+                f"{label} {value / 1000:.2f} 秒"
+                if value >= 1000
+                else f"{label} {value:.0f} 毫秒"
+            )
+        if measured:
+            retry_text = (
+                f" · 自动重试 {progress.retry_count} 次"
+                if progress.retry_count
+                else ""
+            )
+            self.processing_steps.setText(
+                f"已完成 {progress.timing_samples} 张的实测平均："
+                + " · ".join(measured)
+                + retry_text
+            )
+        else:
+            self.processing_steps.setText(
+                f"当前真实阶段：{progress.stage_label}。"
+                "每张图片只发起一次主 AI 请求；完成首张后显示实测耗时。"
+            )
         if progress.status in {"completed", "cancelled"}:
             self.progress_timer.stop()
 

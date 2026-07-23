@@ -51,6 +51,7 @@ class OpenAICompatibleProvider(AIProvider):
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
         self.credential_key = credential_key or "yancuo_ai_api_key"
+        self._last_request_attempts = 0
 
     def _api_key(self) -> str:
         if self.api_key_env:
@@ -98,7 +99,9 @@ class OpenAICompatibleProvider(AIProvider):
         key = self._api_key()
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         body: Any = None
+        self._last_request_attempts = 0
         for attempt in range(1, _MAX_REQUEST_ATTEMPTS + 1):
+            self._last_request_attempts = attempt
             request = urllib.request.Request(
                 f"{self.base_url}{endpoint}",
                 data=data,
@@ -152,6 +155,7 @@ class OpenAICompatibleProvider(AIProvider):
         model: str,
         timeout_seconds: int,
     ) -> StructuredResult:
+        encode_started = time.perf_counter()
         path = Path(image_path)
         if not path.is_file():
             raise DomainError(f"图片不存在：{path}")
@@ -162,6 +166,7 @@ class OpenAICompatibleProvider(AIProvider):
         elif suffix == ".webp":
             mime = "image/webp"
         b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        image_encode_ms = (time.perf_counter() - encode_started) * 1000
         payload = {
             "model": model or "gpt-4o-mini",
             "temperature": 0,
@@ -178,13 +183,16 @@ class OpenAICompatibleProvider(AIProvider):
                 }
             ],
         }
+        request_started = time.perf_counter()
         body = self._request_json(
             "/chat/completions",
             method="POST",
             timeout_seconds=timeout_seconds,
             payload=payload,
         )
+        request_ms = (time.perf_counter() - request_started) * 1000
 
+        parse_started = time.perf_counter()
         raw_text = ""
         try:
             raw_text = body["choices"][0]["message"]["content"]
@@ -221,6 +229,7 @@ class OpenAICompatibleProvider(AIProvider):
         # 粗略费用：按 token 估算（可配置化前的占位）
         total_tokens = int(usage.get("total_tokens") or 0)
         cost = round(total_tokens * 0.00002, 6)
+        response_parse_ms = (time.perf_counter() - parse_started) * 1000
         return StructuredResult(
             fields=first.fields,
             uncertain_fields=first.uncertain_fields,
@@ -228,6 +237,12 @@ class OpenAICompatibleProvider(AIProvider):
             raw_text=raw_text,
             cost_estimate=cost,
             model=str(body.get("model") or model),
+            timings_ms={
+                "image_encode": image_encode_ms,
+                "request": request_ms,
+                "response_parse": response_parse_ms,
+            },
+            diagnostics={"request_attempts": self._last_request_attempts},
         )
 
 

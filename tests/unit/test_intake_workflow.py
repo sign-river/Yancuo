@@ -128,6 +128,15 @@ def test_ai_intake_stays_job_scoped_and_commits_candidate(
     progress = intake.progress(started.job_id)
     assert progress.status == "completed"
     assert progress.done == 1
+    assert progress.stage == "completed"
+    assert progress.timing_samples == 1
+    assert {
+        "preflight",
+        "provider_total",
+        "validation",
+        "candidate_write",
+        "total",
+    } <= progress.timings_ms.keys()
 
     candidates = intake.list_candidates(started.job_id)
     assert len(candidates) == 1

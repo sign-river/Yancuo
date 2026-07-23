@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -353,6 +354,80 @@ class AIService:
             s.expunge(job)
             return job
 
+    def get_job_diagnostics(self, job_id: str) -> dict[str, Any]:
+        """Return privacy-safe live state and measured timing aggregates."""
+
+        with self.session() as s:
+            job = s.scalars(
+                select(AiJob)
+                .where(AiJob.id == job_id)
+                .options(selectinload(AiJob.items))
+            ).first()
+            if job is None:
+                raise DomainError("任务不存在")
+            states = [item.status for item in job.items]
+            if job.status == "cancelled":
+                stage = "cancelled"
+                label = "任务已取消"
+            elif "running" in states:
+                stage = "request"
+                label = "AI 请求中（含图片上传、模型推理与响应等待）"
+            elif "pending" in states:
+                stage = "queued"
+                label = "等待处理"
+            elif "failed" in states:
+                stage = "failed"
+                label = "部分图片失败，可重新尝试"
+            else:
+                stage = "completed"
+                label = "识别与候选写入已完成"
+
+            item_ids = [item.id for item in job.items]
+            logs = (
+                s.scalars(
+                    select(AuditLog).where(
+                        AuditLog.action.in_(
+                            {"ai_item_done", "ai_item_failed"}
+                        ),
+                        AuditLog.entity_type == "ai_job_item",
+                        AuditLog.entity_id.in_(item_ids),
+                    )
+                ).all()
+                if item_ids
+                else []
+            )
+            totals: dict[str, float] = {}
+            samples = 0
+            retry_count = 0
+            for log in logs:
+                try:
+                    detail = json.loads(log.detail_json)
+                except json.JSONDecodeError:
+                    continue
+                provider_diagnostics = detail.get("provider_diagnostics")
+                if isinstance(provider_diagnostics, dict):
+                    attempts = provider_diagnostics.get("request_attempts")
+                    if isinstance(attempts, int):
+                        retry_count += max(0, attempts - 1)
+                timings = detail.get("timings_ms")
+                if log.action != "ai_item_done" or not isinstance(timings, dict):
+                    continue
+                samples += 1
+                for key, value in timings.items():
+                    if isinstance(value, (int, float)):
+                        totals[str(key)] = totals.get(str(key), 0.0) + float(value)
+            averages = {
+                key: round(value / samples, 1)
+                for key, value in totals.items()
+            } if samples else {}
+            return {
+                "stage": stage,
+                "stage_label": label,
+                "timings_ms": averages,
+                "timing_samples": samples,
+                "retry_count": retry_count,
+            }
+
     def create_intake_structure_job(
         self,
         intake_session_id: str,
@@ -534,6 +609,9 @@ class AIService:
         provider: AIProvider,
         session_holder: list[str],
     ) -> None:
+        item_started = perf_counter()
+        active_stage = "preflight"
+        timings_ms: dict[str, float] = {}
         with self.session() as s:
             job = s.get(AiJob, job_id)
             item = s.get(AiJobItem, item_id)
@@ -584,14 +662,26 @@ class AIService:
             s.commit()
 
             try:
+                timings_ms["preflight"] = (perf_counter() - item_started) * 1000
                 if not self.runtime.settings.privacy.send_original_images_to_ai:
                     raise DomainError("隐私设置禁止向 AI 发送原图")
+                active_stage = "provider"
+                provider_started = perf_counter()
                 result = provider.structure_from_image(
                     image_path=str(image_path),
                     prompt=prompt_body,
                     model=job.model,
                     timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
                 )
+                timings_ms["provider_total"] = (
+                    perf_counter() - provider_started
+                ) * 1000
+                for key, value in result.timings_ms.items():
+                    if isinstance(value, (int, float)):
+                        timings_ms[str(key)] = float(value)
+
+                active_stage = "validation"
+                validation_started = perf_counter()
                 allowed = set(json.loads(job.allowed_fields_json) or list(DEFAULT_ALLOWED_FIELDS))
                 proposals: list[
                     tuple[dict[str, Any], list[dict[str, Any]], dict[str, float]]
@@ -611,6 +701,9 @@ class AIService:
                     )
                 if not proposals:
                     raise DomainError("AI 没有返回可确认的候选题")
+                timings_ms["validation"] = (
+                    perf_counter() - validation_started
+                ) * 1000
 
                 if self.runtime.settings.ai.save_raw_responses:
                     item.raw_response = result.raw_text
@@ -630,6 +723,8 @@ class AIService:
                 item.structured_json = json.dumps(structured, ensure_ascii=False)
                 item.cost_estimate = float(result.cost_estimate)
 
+                active_stage = "candidate_write"
+                write_started = perf_counter()
                 with s.begin_nested():
                     if intake_session and isinstance(asset, IntakeAsset):
                         current_order = s.scalar(
@@ -762,10 +857,14 @@ class AIService:
                                 )
                             )
 
+                timings_ms["candidate_write"] = (
+                    perf_counter() - write_started
+                ) * 1000
                 item.status = "done"
                 item.error_message = ""
                 job.done_items += 1
                 job.updated_at = utcnow()
+                timings_ms["total"] = (perf_counter() - item_started) * 1000
                 self._audit(
                     s,
                     "ai_item_done",
@@ -778,6 +877,11 @@ class AIService:
                         ),
                         "candidate_count": len(proposals),
                         "cost": item.cost_estimate,
+                        "timings_ms": {
+                            key: round(value, 1)
+                            for key, value in timings_ms.items()
+                        },
+                        "provider_diagnostics": result.diagnostics,
                     },
                 )
                 s.commit()
@@ -786,12 +890,26 @@ class AIService:
                 item.error_message = str(exc)
                 job.failed_items += 1
                 job.updated_at = utcnow()
+                timings_ms["total"] = (perf_counter() - item_started) * 1000
                 self._audit(
                     s,
                     "ai_item_failed",
                     "ai_job_item",
                     item.id,
-                    {"error": str(exc)[:500]},
+                    {
+                        "error": str(exc)[:500],
+                        "failed_stage": active_stage,
+                        "timings_ms": {
+                            key: round(value, 1)
+                            for key, value in timings_ms.items()
+                        },
+                        "provider_diagnostics": {
+                            "request_attempts": int(
+                                getattr(provider, "_last_request_attempts", 0)
+                                or 0
+                            )
+                        },
+                    },
                 )
                 s.commit()
 

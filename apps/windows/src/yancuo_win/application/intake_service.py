@@ -14,7 +14,7 @@ dedicated intake tables without changing this public workflow API.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +116,11 @@ class IntakeProgress:
     total: int
     done: int
     failed: int
+    stage: str = "queued"
+    stage_label: str = "等待处理"
+    timings_ms: dict[str, float] = field(default_factory=dict)
+    timing_samples: int = 0
+    retry_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -621,12 +626,18 @@ class ProblemIntakeService:
         job = self.ai.get_job(job_id)
         if job is None:
             raise DomainError("录题任务不存在")
+        diagnostics = self.ai.get_job_diagnostics(job_id)
         return IntakeProgress(
             job_id=job.id,
             status=job.status,
             total=int(job.total_items or 0),
             done=int(job.done_items or 0),
             failed=int(job.failed_items or 0),
+            stage=str(diagnostics["stage"]),
+            stage_label=str(diagnostics["stage_label"]),
+            timings_ms=dict(diagnostics["timings_ms"]),
+            timing_samples=int(diagnostics["timing_samples"]),
+            retry_count=int(diagnostics["retry_count"]),
         )
 
     def list_resumable_ai_batches(self) -> list[ResumableIntakeBatch]:

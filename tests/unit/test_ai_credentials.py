@@ -146,6 +146,8 @@ def test_structure_from_image_sends_multimodal_chat_completion(
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
     assert result.fields["title"] == "提取结果"
     assert result.model == "vision-model"
+    assert {"image_encode", "request", "response_parse"} <= result.timings_ms.keys()
+    assert result.diagnostics["request_attempts"] == 1
 
 
 def test_structure_from_image_accepts_multi_problem_envelope(
@@ -252,6 +254,7 @@ def test_remote_disconnect_is_retried_before_succeeding(
     assert provider.list_models() == ["vision-model"]
     assert attempts == 3
     assert delays == [0.6, 1.2]
+    assert provider._last_request_attempts == 3
 
 
 def test_remote_disconnect_exhaustion_uses_actionable_chinese_error(
