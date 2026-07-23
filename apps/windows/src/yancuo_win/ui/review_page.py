@@ -59,9 +59,6 @@ class ReviewPage(QWidget):
         self.detail_button = QPushButton("打开题目详情")
         self.detail_button.clicked.connect(self._open_current_detail)
         header.addWidget(self.detail_button)
-        self.answer_button = primary_button("显示答案与解析")
-        self.answer_button.clicked.connect(self._toggle_answer)
-        header.addWidget(self.answer_button)
         root.addLayout(header)
 
         self.hero = QLabel("今日待复习")
@@ -71,8 +68,17 @@ class ReviewPage(QWidget):
         self.reader = MathContentView()
         root.addWidget(self.reader, stretch=1)
 
-        grade_card = CardFrame()
-        grade_card.add_title("完成思考后评分")
+        self.grade_card = CardFrame()
+        self.grade_card.add_title("完成思考后评分")
+        self.grade_hint = self.grade_card.add_hint(
+            "请先独立思考，再点击“显示答案与解析”；查看答案后才可评分。"
+        )
+        answer_row = QHBoxLayout()
+        self.answer_button = primary_button("显示答案与解析")
+        self.answer_button.clicked.connect(self._toggle_answer)
+        answer_row.addWidget(self.answer_button)
+        answer_row.addStretch(1)
+        self.grade_card.body.addLayout(answer_row)
         grade_row = QHBoxLayout()
         self.grade_buttons: list[QPushButton] = []
         for grade, label in REVIEW_GRADES.items():
@@ -81,7 +87,7 @@ class ReviewPage(QWidget):
             button.setEnabled(False)
             grade_row.addWidget(button)
             self.grade_buttons.append(button)
-        grade_card.body.addLayout(grade_row)
+        self.grade_card.body.addLayout(grade_row)
 
         nav = QHBoxLayout()
         previous = ghost_button("← 上一题")
@@ -91,8 +97,8 @@ class ReviewPage(QWidget):
         nav.addWidget(previous)
         nav.addWidget(skip)
         nav.addStretch(1)
-        grade_card.body.addLayout(nav)
-        root.addWidget(grade_card)
+        self.grade_card.body.addLayout(nav)
+        root.addWidget(self.grade_card)
 
     def reload_queue(self, *, preserve_current: bool = True) -> None:
         current_id = self.current_problem_id if preserve_current else None
@@ -174,6 +180,7 @@ class ReviewPage(QWidget):
             self.progress_label.setText("今日复习已完成")
             self.reader.set_message("复习完成", summary)
             self.answer_button.setEnabled(False)
+            self.grade_hint.setText("当前没有需要评分的题目。")
             self.detail_button.setEnabled(False)
             for button in self.grade_buttons:
                 button.setEnabled(False)
@@ -186,6 +193,11 @@ class ReviewPage(QWidget):
         self.answer_button.setEnabled(True)
         self.answer_button.setText(
             "隐藏答案与解析" if self._answer_visible else "显示答案与解析"
+        )
+        self.grade_hint.setText(
+            "答案与解析已显示，请根据掌握程度选择评分。"
+            if self._answer_visible
+            else "请先独立思考，再点击“显示答案与解析”；查看答案后才可评分。"
         )
         self.detail_button.setEnabled(True)
         for button in self.grade_buttons:
