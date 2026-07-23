@@ -52,12 +52,13 @@ def window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
         subject_id=subject.id,
         chapter_id=integral.id,
     )
-    services.create_problem(
+    favorite = services.create_problem(
         title="二重积分题",
         status="active",
         subject_id=subject.id,
         chapter_id=double.id,
     )
+    services.update_problem(favorite.id, {"is_favorite": True})
     services.create_problem(title="待整理题", status="inbox")
     services.create_problem(title="归档题", status="archived")
     services.create_problem(title="回收站题", status="trashed")
@@ -224,3 +225,27 @@ def test_catalog_menu_and_editor_use_valid_full_paths(window: MainWindow) -> Non
         for index in range(dialog.chapter.count())
     ]
     dialog.close()
+
+
+def test_smart_views_and_search_scopes_are_stable(window: MainWindow) -> None:
+    assert {"favorite", "recent"}.issubset(_nav_modes(window))
+
+    _select_mode(window, "favorite")
+    assert _problem_titles(window) == ["二重积分题"]
+    assert window.library_breadcrumb.text() == "题库 / 我的收藏"
+
+    _select_mode(window, "recent")
+    assert set(_problem_titles(window)) == {
+        "未分类极限题",
+        "积分基础题",
+        "二重积分题",
+    }
+
+    scopes = window.services.list_knowledge_scopes()
+    labels = {scope.label for scope in scopes}
+    assert "高等数学 / 积分 / 二重积分" in labels
+    child_scope = next(
+        scope for scope in scopes if scope.label == "高等数学 / 积分 / 二重积分"
+    )
+    assert child_scope.include_descendants
+    assert window.services.filter_for_knowledge_scope(child_scope).chapter_id

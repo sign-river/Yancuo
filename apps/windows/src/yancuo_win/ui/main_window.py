@@ -811,6 +811,30 @@ class MainWindow(QMainWindow):
             path="题库 / 今日待复习",
         )
         self.knowledge_tree.addTopLevelItem(due_item)
+        favorite_count = len(
+            self.services.list_problems(
+                ProblemFilter(status="active", favorite_only=True)
+            )
+        )
+        favorite_item = QTreeWidgetItem([f"我的收藏 · {favorite_count}"])
+        self._set_tree_item_data(
+            favorite_item,
+            mode="favorite",
+            path="题库 / 我的收藏",
+        )
+        self.knowledge_tree.addTopLevelItem(favorite_item)
+        recent_count = len(
+            self.services.list_problems(
+                ProblemFilter(status="active", created_within_days=30)
+            )
+        )
+        recent_item = QTreeWidgetItem([f"最近入库 · {recent_count}"])
+        self._set_tree_item_data(
+            recent_item,
+            mode="recent",
+            path="题库 / 最近入库（30 天）",
+        )
+        self.knowledge_tree.addTopLevelItem(recent_item)
 
         for subject in self.services.list_subjects():
             subject_problems = self.services.list_problems(
@@ -908,28 +932,26 @@ class MainWindow(QMainWindow):
     def _filter_from_nav(self) -> ProblemFilter:
         mode = self._nav_mode
         q = self.search_edit.text().strip() or None
-        if mode.startswith("subject:"):
-            return ProblemFilter(
-                status="active", subject_id=mode.split(":", 1)[1], query=q
-            )
-        if mode.startswith("chapter:"):
-            _, subject_id, chapter_id = mode.split(":", 2)
-            return ProblemFilter(
-                status="active",
-                subject_id=subject_id,
-                chapter_id=chapter_id,
-                include_descendant_chapters=True,
-                query=q,
-            )
-        if mode.startswith("uncategorized:"):
-            return ProblemFilter(
-                status="active",
-                subject_id=mode.split(":", 1)[1],
-                only_uncategorized=True,
-                query=q,
-            )
         if mode == "due":
             return ProblemFilter(status="active", due_for_review=True, query=q)
+        if mode == "favorite":
+            return ProblemFilter(status="active", favorite_only=True, query=q)
+        if mode == "recent":
+            return ProblemFilter(
+                status="active",
+                created_within_days=30,
+                query=q,
+            )
+        scope = next(
+            (
+                item
+                for item in self.services.list_knowledge_scopes()
+                if item.key == mode
+            ),
+            None,
+        )
+        if scope is not None:
+            return self.services.filter_for_knowledge_scope(scope, query=q)
         return ProblemFilter(status=mode, query=q)
 
     @staticmethod

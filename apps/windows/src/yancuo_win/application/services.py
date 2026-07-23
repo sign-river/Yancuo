@@ -7,7 +7,7 @@ import shutil
 import stat
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -69,6 +69,8 @@ class ProblemFilter:
     query: str | None = None
     include_trashed: bool = False
     due_for_review: bool = False
+    favorite_only: bool = False
+    created_within_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,16 @@ class CategoryChoice:
     def label(self) -> str:
         suffix = " / ".join(self.chapter_path) if self.chapter_path else "未分类"
         return f"{self.subject_name} / {suffix}"
+
+
+@dataclass(frozen=True)
+class KnowledgeScope:
+    key: str
+    label: str
+    subject_id: str | None = None
+    chapter_id: str | None = None
+    include_descendants: bool = False
+    only_uncategorized: bool = False
 
 
 class AppServices:
@@ -444,6 +456,54 @@ class AppServices:
                 self.list_chapter_tree(subject.id, problem_status=None),
             )
         return tuple(choices)
+
+    def list_knowledge_scopes(self) -> tuple[KnowledgeScope, ...]:
+        scopes = [KnowledgeScope(key="active", label="全部正式题目")]
+        category_choices = self.list_category_choices()
+        for subject in self.list_subjects():
+            scopes.append(
+                KnowledgeScope(
+                    key=f"subject:{subject.id}",
+                    label=subject.name,
+                    subject_id=subject.id,
+                )
+            )
+            scopes.append(
+                KnowledgeScope(
+                    key=f"uncategorized:{subject.id}",
+                    label=f"{subject.name} / 未分类",
+                    subject_id=subject.id,
+                    only_uncategorized=True,
+                )
+            )
+            for choice in category_choices:
+                if choice.subject_id != subject.id or choice.chapter_id is None:
+                    continue
+                scopes.append(
+                    KnowledgeScope(
+                        key=f"chapter:{subject.id}:{choice.chapter_id}",
+                        label=choice.label,
+                        subject_id=subject.id,
+                        chapter_id=choice.chapter_id,
+                        include_descendants=True,
+                    )
+                )
+        return tuple(scopes)
+
+    @staticmethod
+    def filter_for_knowledge_scope(
+        scope: KnowledgeScope,
+        *,
+        query: str | None = None,
+    ) -> ProblemFilter:
+        return ProblemFilter(
+            status="active",
+            subject_id=scope.subject_id,
+            chapter_id=scope.chapter_id,
+            include_descendant_chapters=scope.include_descendants,
+            only_uncategorized=scope.only_uncategorized,
+            query=query,
+        )
 
     def _chapter_subtree_ids(self, session: Session, chapter_id: str) -> tuple[str, ...]:
         chapter = session.get(Chapter, chapter_id)
@@ -799,6 +859,16 @@ class AppServices:
         if filt.due_for_review:
             # 正式题库中到期或从未安排复习的题
             stmt = stmt.where(Problem.status == "active")
+        if filt.favorite_only:
+            stmt = stmt.where(Problem.is_favorite.is_(True))
+        if filt.created_within_days is not None:
+            if filt.created_within_days < 1:
+                raise DomainError("最近入库天数必须大于 0")
+            stmt = stmt.where(
+                Problem.created_at
+                >= datetime.now(timezone.utc)
+                - timedelta(days=filt.created_within_days)
+            )
         return stmt.order_by(Problem.updated_at.desc())
 
     def list_problems(self, filt: ProblemFilter | None = None) -> list[Problem]:

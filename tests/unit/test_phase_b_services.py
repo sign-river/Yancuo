@@ -365,3 +365,10 @@ def test_catalog_choices_reordering_and_problem_category_move(
     moved = services.get_problem(problem.id)
     assert moved.subject_id is None
     assert moved.chapter_id is None
+
+    scopes = services.list_knowledge_scopes()
+    assert any(scope.label == "高等数学 / 积分 / 二重积分" for scope in scopes)
+    with pytest.raises(DomainError, match="天数"):
+        services.list_problems(
+            ProblemFilter(status="active", created_within_days=0)
+        )
