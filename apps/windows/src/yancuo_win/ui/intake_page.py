@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 from yancuo_win.application.intake_service import (
     IntakeCandidate,
     ProblemIntakeService,
+    ResumableIntakeBatch,
 )
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.worker import AIJobWorker
@@ -575,6 +576,7 @@ class IntakePage(QWidget):
         self.ai_candidates: list[IntakeCandidate] = []
         self.candidate_index = 0
         self.last_problem_id: str | None = None
+        self.resumable_batches: list[ResumableIntakeBatch] = []
         self._restoring_manual_draft = False
 
         self.manual_draft_timer = QTimer(self)
@@ -666,15 +668,21 @@ class IntakePage(QWidget):
         layout.addLayout(row)
 
         self.resume_card = CardFrame()
-        self.resume_card.add_title("未完成的本次会话")
+        self.resume_card.add_title("待处理录题批次")
         self.resume_hint = self.resume_card.add_hint("")
+        self.resume_batch_list = QListWidget()
+        self.resume_batch_list.setMaximumHeight(130)
+        self.resume_card.body.addWidget(self.resume_batch_list)
         self.resume_manual = QPushButton("继续手动录题")
         self.resume_manual.clicked.connect(self.show_manual)
         self.resume_ai = QPushButton("继续 AI 录题")
         self.resume_ai.clicked.connect(self._resume_ai)
+        self.abandon_ai = danger_button("放弃选中批次")
+        self.abandon_ai.clicked.connect(self._abandon_ai)
         resume_row = QHBoxLayout()
         resume_row.addWidget(self.resume_manual)
         resume_row.addWidget(self.resume_ai)
+        resume_row.addWidget(self.abandon_ai)
         resume_row.addStretch(1)
         self.resume_card.body.addLayout(resume_row)
         layout.addWidget(self.resume_card)
@@ -956,18 +964,50 @@ class IntakePage(QWidget):
             or self.manual_form.question.toPlainText().strip()
             or self.manual_images
         ) if hasattr(self, "manual_form") else False
-        has_ai = bool(self.ai_job_id or self.ai_files)
+        self.resumable_batches = self.intake.list_resumable_ai_batches()
+        self.resume_batch_list.clear()
+        selected_row = 0
+        state_labels = {
+            "processing": "识别处理中",
+            "review": "等待确认",
+            "failed": "部分图片失败，可重试",
+        }
+        for index, batch in enumerate(self.resumable_batches):
+            details = []
+            if batch.pending_candidates:
+                details.append(f"{batch.pending_candidates} 道待确认")
+            if batch.failed_items:
+                details.append(f"{batch.failed_items} 张失败")
+            suffix = " · ".join(details) or state_labels.get(batch.state, batch.state)
+            item = QListWidgetItem(
+                f"{state_labels.get(batch.state, batch.state)} · {suffix}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, batch.job_id)
+            if batch.instruction:
+                item.setToolTip(batch.instruction)
+            self.resume_batch_list.addItem(item)
+            if batch.job_id == self.ai_job_id:
+                selected_row = index
+        if self.resumable_batches:
+            self.resume_batch_list.setCurrentRow(selected_row)
+        has_ai_upload = bool(self.ai_files) and not self.resumable_batches
+        has_ai = bool(self.resumable_batches or has_ai_upload)
         self.resume_card.setVisible(has_manual or has_ai)
+        self.resume_batch_list.setVisible(bool(self.resumable_batches))
         states = []
         if has_manual:
-            states.append("手动表单尚未提交")
-        if self.ai_job_id:
-            states.append("AI 任务可以继续查看")
-        elif self.ai_files:
+            states.append("有一份手动草稿")
+        if self.resumable_batches:
+            states.append(f"有 {len(self.resumable_batches)} 个 AI 批次需要处理")
+        elif has_ai_upload:
             states.append("AI 上传列表尚未开始")
         self.resume_hint.setText("；".join(states))
         self.resume_manual.setVisible(has_manual)
         self.resume_ai.setVisible(has_ai)
+        self.resume_ai.setText(
+            "继续选中批次" if self.resumable_batches else "继续 AI 上传"
+        )
+        self.abandon_ai.setVisible(bool(self.resumable_batches))
         self.stack.setCurrentIndex(_PAGE_HOME)
 
     def show_manual(self) -> None:
@@ -988,6 +1028,23 @@ class IntakePage(QWidget):
         self.stack.setCurrentIndex(_PAGE_AI_UPLOAD)
 
     def _resume_ai(self) -> None:
+        selected = self.resume_batch_list.currentItem()
+        if selected is not None:
+            selected_job_id = selected.data(Qt.ItemDataRole.UserRole)
+            if selected_job_id and selected_job_id != self.ai_job_id:
+                if self.ai_worker and self.ai_worker.isRunning():
+                    QMessageBox.information(
+                        self,
+                        "当前批次仍在处理",
+                        "请先等待当前 AI 批次完成或取消，再切换到其他批次。",
+                    )
+                    return
+                self.ai_job_id = str(selected_job_id)
+                self.ai_candidates = [
+                    item
+                    for item in self.intake.list_candidates(self.ai_job_id)
+                    if item.status in {"pending", "conflict"}
+                ]
         if self.ai_candidates:
             self._load_candidate()
             self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
@@ -1000,6 +1057,48 @@ class IntakePage(QWidget):
                 self._poll_progress()
         else:
             self.show_ai_upload()
+
+    def _abandon_ai(self) -> None:
+        selected = self.resume_batch_list.currentItem()
+        if selected is None:
+            return
+        job_id = str(selected.data(Qt.ItemDataRole.UserRole) or "")
+        if not job_id:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "放弃录题批次",
+                "确认放弃选中的 AI 录题批次？\n"
+                "已入库的题目不会受影响，未确认候选将不再显示。",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        if (
+            job_id == self.ai_job_id
+            and self.ai_worker
+            and self.ai_worker.isRunning()
+        ):
+            self.ai_worker.cancel()
+            if not self.ai_worker.wait(3000):
+                QMessageBox.information(
+                    self,
+                    "正在取消",
+                    "AI 请求仍在结束中，请稍后再放弃这个批次。",
+                )
+                return
+        try:
+            self.intake.abandon_ai_batch(job_id)
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法放弃批次", str(exc))
+            return
+        if job_id == self.ai_job_id:
+            self.ai_job_id = None
+            self.ai_candidates.clear()
+            self.progress_timer.stop()
+        self.status_message.emit("已放弃选中的 AI 录题批次")
+        self.show_home()
 
     def _restore_existing_session(self) -> None:
         job_id = self.intake.latest_resumable_ai_job()
@@ -1246,7 +1345,11 @@ class IntakePage(QWidget):
         self.progress_timer.stop()
         self._poll_progress()
         try:
-            self.ai_candidates = self.intake.list_candidates(job_id)
+            self.ai_candidates = [
+                item
+                for item in self.intake.list_candidates(job_id)
+                if item.status in {"pending", "conflict"}
+            ]
             failures = self.intake.failed_items(job_id)
         except DomainError as exc:
             self._on_ai_failed(job_id, str(exc))
@@ -1474,12 +1577,28 @@ class IntakePage(QWidget):
             self._load_candidate()
             self.status_message.emit("题目已入库，继续确认下一题")
         else:
-            self.ai_job_id = None
-            self.ai_files.clear()
-            self.ai_file_list.clear()
-            self.ai_upload_preview.clear_preview()
-            self.ai_instruction.clear()
-            self._show_done(f"“{problem.title or 'AI 识别题目'}”已进入正式题库。")
+            failures = (
+                self.intake.failed_items(self.ai_job_id)
+                if self.ai_job_id
+                else []
+            )
+            if failures:
+                self.processing_error.setText(
+                    f"题目已入库，但本批仍有 {len(failures)} 张图片识别失败。"
+                )
+                self.processing_retry.setVisible(True)
+                self.processing_back.setVisible(False)
+                self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
+                self.status_message.emit("题目已入库，仍有失败图片可继续重试")
+            else:
+                self.ai_job_id = None
+                self.ai_files.clear()
+                self.ai_file_list.clear()
+                self.ai_upload_preview.clear_preview()
+                self.ai_instruction.clear()
+                self._show_done(
+                    f"“{problem.title or 'AI 识别题目'}”已进入正式题库。"
+                )
 
     def _reject_candidate(self) -> None:
         if not self.ai_candidates:
@@ -1505,9 +1624,22 @@ class IntakePage(QWidget):
             self.candidate_index %= len(self.ai_candidates)
             self._load_candidate()
         else:
-            self.ai_job_id = None
-            self.processing_error.setText("本批候选题均已跳过。可以返回并重新上传。")
-            self.processing_back.setVisible(True)
+            failures = (
+                self.intake.failed_items(self.ai_job_id)
+                if self.ai_job_id
+                else []
+            )
+            if not failures:
+                self.ai_job_id = None
+            self.processing_error.setText(
+                (
+                    f"候选题已处理，但本批仍有 {len(failures)} 张图片识别失败。"
+                    if failures
+                    else "本批候选题均已跳过。可以返回并重新上传。"
+                )
+            )
+            self.processing_retry.setVisible(bool(failures))
+            self.processing_back.setVisible(not failures)
             self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
 
     def _show_done(self, message: str) -> None:

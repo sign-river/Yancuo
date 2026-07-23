@@ -13,6 +13,7 @@ from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.intake_service import ProblemIntakeService
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.models import (
+    AiJob,
     IntakeCandidateRecord,
     IntakeSession,
     ReviewItem,
@@ -168,6 +169,117 @@ def test_ai_intake_stays_job_scoped_and_commits_candidate(
         proposal = json.loads(intake_item.fields_json)
         assert proposal["subject_id"] == subject.id
     assert resumed.latest_resumable_ai_job() is None
+
+
+def test_completed_legacy_job_is_not_reported_as_intake_batch(
+    intake: ProblemIntakeService,
+) -> None:
+    with intake.runtime.session_factory() as session:
+        session.add(
+            AiJob(
+                id="job_legacy_finished",
+                job_type="structure",
+                status="completed",
+                provider="mock",
+                model="offline",
+                prompt_key="intake_job_legacy",
+                total_items=1,
+                done_items=0,
+                failed_items=1,
+            )
+        )
+        session.commit()
+
+    assert intake.list_resumable_ai_batches() == []
+    assert intake.latest_resumable_ai_job() is None
+
+
+def test_stale_review_session_without_pending_work_repairs_to_completed(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "stale-session.jpg"
+    image.write_bytes(b"\xff\xd8\xffstale-session")
+    started = intake.start_ai([image])
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    intake.reject_ai_candidate(candidate.review_item_id)
+
+    with intake.runtime.session_factory() as session:
+        row = session.get(IntakeSession, started.intake_session_id)
+        assert row is not None
+        row.status = "review"
+        row.completed_at = None
+        session.commit()
+
+    assert intake.list_resumable_ai_batches() == []
+    with intake.runtime.session_factory() as session:
+        row = session.get(IntakeSession, started.intake_session_id)
+        assert row is not None
+        assert row.status == "completed"
+        assert row.completed_at is not None
+
+
+def test_abandon_ai_batch_rejects_pending_candidates_only(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "abandon-session.jpg"
+    image.write_bytes(b"\xff\xd8\xffabandon-session")
+    started = intake.start_ai([image], user_instruction="稍后再确认")
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+
+    batches = intake.list_resumable_ai_batches()
+    assert len(batches) == 1
+    assert batches[0].state == "review"
+    assert batches[0].pending_candidates == 1
+
+    intake.abandon_ai_batch(started.job_id)
+
+    assert intake.list_resumable_ai_batches() == []
+    assert intake.app.count_problems() == 0
+    with intake.runtime.session_factory() as session:
+        intake_session = session.get(IntakeSession, started.intake_session_id)
+        intake_candidate = session.get(
+            IntakeCandidateRecord, candidate.review_item_id
+        )
+        job = session.get(AiJob, started.job_id)
+        assert intake_session is not None
+        assert intake_session.status == "cancelled"
+        assert intake_candidate is not None
+        assert intake_candidate.status == "rejected"
+        assert job is not None
+        assert job.status == "cancelled"
+
+
+def test_committed_candidate_keeps_batch_open_when_images_failed(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "partial-failure.jpg"
+    image.write_bytes(b"\xff\xd8\xffpartial-failure")
+    started = intake.start_ai([image])
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    with intake.runtime.session_factory() as session:
+        job = session.get(AiJob, started.job_id)
+        assert job is not None
+        job.failed_items = 1
+        session.commit()
+
+    committed = intake.commit_ai_candidate(
+        candidate.review_item_id,
+        candidate.fields,
+    )
+
+    batches = intake.list_resumable_ai_batches()
+    assert len(batches) == 1
+    assert batches[0].state == "failed"
+    assert intake.app.get_problem(committed.id) is not None
+
+    intake.abandon_ai_batch(started.job_id)
+    assert intake.app.get_problem(committed.id) is not None
 
 
 def test_one_image_can_create_multiple_independent_candidates(

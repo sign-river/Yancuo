@@ -30,6 +30,7 @@ from yancuo_win.application.sync_service import SyncService, sync_snapshot
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
+    AiJob,
     AiJobItem,
     Asset,
     AuditLog,
@@ -115,6 +116,16 @@ class IntakeProgress:
     total: int
     done: int
     failed: int
+
+
+@dataclass(frozen=True)
+class ResumableIntakeBatch:
+    job_id: str
+    session_id: str
+    state: str
+    pending_candidates: int
+    failed_items: int
+    instruction: str
 
 
 @dataclass(frozen=True)
@@ -618,11 +629,12 @@ class ProblemIntakeService:
             failed=int(job.failed_items or 0),
         )
 
-    def latest_resumable_ai_job(self) -> str | None:
-        """Find the newest unfinished intake job after navigation/app restart."""
+    def list_resumable_ai_batches(self) -> list[ResumableIntakeBatch]:
+        """Return only dedicated intake batches that still require user action."""
 
+        result: list[ResumableIntakeBatch] = []
         with self.runtime.session_factory() as session:
-            current = session.scalars(
+            rows = session.scalars(
                 select(IntakeSession)
                 .where(
                     IntakeSession.mode == "ai",
@@ -632,19 +644,101 @@ class ProblemIntakeService:
                     IntakeSession.job_id.is_not(None),
                 )
                 .order_by(IntakeSession.updated_at.desc())
-            ).first()
-            if current and current.job_id:
-                return current.job_id
-        for job in self.ai.list_jobs(limit=50):
-            if not str(job.prompt_key or "").startswith("intake_job_"):
-                continue
-            open_items = any(
-                item.status in {"pending", "conflict"}
-                for item in self.ai.list_review_items_for_job(job.id)
+            ).all()
+            repaired = False
+            for intake_session in rows:
+                job = session.get(AiJob, intake_session.job_id)
+                if job is None:
+                    intake_session.status = "cancelled"
+                    intake_session.completed_at = utcnow()
+                    repaired = True
+                    continue
+                pending = int(
+                    session.scalar(
+                        select(func.count())
+                        .select_from(IntakeCandidateRecord)
+                        .where(
+                            IntakeCandidateRecord.session_id == intake_session.id,
+                            IntakeCandidateRecord.status == "pending",
+                        )
+                    )
+                    or 0
+                )
+                failed = int(job.failed_items or 0)
+                if pending:
+                    state = "review"
+                elif job.status in {"pending", "running"}:
+                    state = "processing"
+                elif failed:
+                    state = "failed"
+                else:
+                    # Repair stale rows left by older versions instead of
+                    # advertising an already completed batch forever.
+                    intake_session.status = "completed"
+                    intake_session.completed_at = (
+                        intake_session.completed_at or utcnow()
+                    )
+                    repaired = True
+                    continue
+                result.append(
+                    ResumableIntakeBatch(
+                        job_id=job.id,
+                        session_id=intake_session.id,
+                        state=state,
+                        pending_candidates=pending,
+                        failed_items=failed,
+                        instruction=intake_session.user_instruction,
+                    )
+                )
+            if repaired:
+                session.commit()
+        return result
+
+    def latest_resumable_ai_job(self) -> str | None:
+        """Find the newest unfinished dedicated intake job."""
+
+        batches = self.list_resumable_ai_batches()
+        return batches[0].job_id if batches else None
+
+    def abandon_ai_batch(self, job_id: str) -> None:
+        """Close a resumable batch without touching already committed problems."""
+
+        with self.runtime.session_factory() as session:
+            intake_session = session.scalar(
+                select(IntakeSession).where(
+                    IntakeSession.mode == "ai",
+                    IntakeSession.job_id == job_id,
+                )
             )
-            if open_items or job.status in {"pending", "running"} or int(job.failed_items or 0):
-                return job.id
-        return None
+            if intake_session is None:
+                raise DomainError("待处理录题批次不存在")
+            if intake_session.status in {"completed", "cancelled"}:
+                return
+            intake_session.status = "cancelled"
+            intake_session.completed_at = utcnow()
+            for candidate in session.scalars(
+                select(IntakeCandidateRecord).where(
+                    IntakeCandidateRecord.session_id == intake_session.id,
+                    IntakeCandidateRecord.status == "pending",
+                )
+            ).all():
+                candidate.status = "rejected"
+                candidate.decided_at = utcnow()
+            job = session.get(AiJob, job_id)
+            if job is not None:
+                job.status = "cancelled"
+                job.finished_at = utcnow()
+                job.updated_at = utcnow()
+                for item in session.scalars(
+                    select(AiJobItem).where(
+                        AiJobItem.job_id == job_id,
+                        AiJobItem.status.in_(
+                            {"pending", "running", "failed"}
+                        ),
+                    )
+                ).all():
+                    item.status = "cancelled"
+            session.commit()
 
     def list_candidates(self, job_id: str) -> list[IntakeCandidate]:
         candidates: list[IntakeCandidate] = []
@@ -1150,8 +1244,17 @@ class ProblemIntakeService:
                     )
                 )
                 if intake_session and not remaining:
-                    intake_session.status = "completed"
-                    intake_session.completed_at = utcnow()
+                    job = (
+                        session.get(AiJob, intake_session.job_id)
+                        if intake_session.job_id
+                        else None
+                    )
+                    if job and int(job.failed_items or 0):
+                        intake_session.status = "processing"
+                        intake_session.completed_at = None
+                    else:
+                        intake_session.status = "completed"
+                        intake_session.completed_at = utcnow()
                 session.commit()
             return problem
 
@@ -1210,8 +1313,17 @@ class ProblemIntakeService:
                     )
                 )
                 if intake_session and not remaining:
-                    intake_session.status = "completed"
-                    intake_session.completed_at = utcnow()
+                    job = (
+                        session.get(AiJob, intake_session.job_id)
+                        if intake_session.job_id
+                        else None
+                    )
+                    if job and int(job.failed_items or 0):
+                        intake_session.status = "processing"
+                        intake_session.completed_at = None
+                    else:
+                        intake_session.status = "completed"
+                        intake_session.completed_at = utcnow()
                 session.commit()
                 return
         item = self.ai.get_review_item(review_item_id)
