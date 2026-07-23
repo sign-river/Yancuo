@@ -9,7 +9,13 @@ from pathlib import Path
 import pytest
 import yancuo_win
 
-from yancuo_win.config.settings import ConfigError, default_toml_path, load_settings
+from yancuo_win.config.settings import (
+    ConfigError,
+    apply_user_preferences,
+    default_toml_path,
+    load_settings,
+    save_ai_preferences,
+)
 
 
 def test_default_toml_exists() -> None:
@@ -20,13 +26,14 @@ def test_load_default_settings() -> None:
     settings = load_settings(default_toml_path())
     assert settings.application.schema_version == 4
     assert settings.ai.enabled is True
+    assert settings.ai.default_provider == "openai_compatible"
     assert settings.cloud.enabled is True
     assert settings.cloud.default_provider == "local_folder"
     provider = settings.ai.providers.get("mock")
     assert provider is not None
     openai = settings.ai.providers.get("openai_compatible")
     assert openai is not None
-    assert openai.api_key_env == "YANCUO_AI_API_KEY"
+    assert openai.api_key_env == "FARO_API_KEY"
     assert openai.credential_key == "yancuo_ai_api_key"
 
 
@@ -50,6 +57,22 @@ def test_default_toml_has_no_plaintext_secrets() -> None:
     assert "sk-" not in lowered
     assert "api_key_env" in text
     assert "credential_key" in text
+
+
+def test_ai_preferences_roundtrip_without_secret(tmp_path: Path) -> None:
+    path = save_ai_preferences(
+        tmp_path,
+        provider="mock",
+        model="offline-test-model",
+    )
+    text = path.read_text(encoding="utf-8")
+    assert "offline-test-model" in text
+    assert "api_key" not in text.lower()
+
+    settings = load_settings(default_toml_path())
+    apply_user_preferences(settings, tmp_path)
+    assert settings.ai.default_provider == "mock"
+    assert settings.ai.default_vision_model == "offline-test-model"
 
 
 def test_bundled_resources_match_canonical_sources() -> None:

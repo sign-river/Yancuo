@@ -30,7 +30,7 @@ supported_extensions = [".jpg", ".jpeg", ".png", ".webp", ".pdf"]
 
 [ai]
 enabled = true
-default_provider = "mock"
+default_provider = "openai_compatible"
 default_vision_model = "gpt-5.6-sol"
 default_text_model = "gpt-5.6-sol"
 request_timeout_seconds = 120
@@ -47,7 +47,7 @@ api_key_env = ""
 
 [ai.providers.openai_compatible]
 base_url = "https://faroapi.com/v1"
-api_key_env = "YANCUO_AI_API_KEY"
+api_key_env = "FARO_API_KEY"
 credential_key = "yancuo_ai_api_key"
 
 [export]

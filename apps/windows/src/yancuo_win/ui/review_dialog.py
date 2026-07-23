@@ -1,4 +1,4 @@
-"""AI 审核对话框：字段级差异、接受/拒绝。"""
+"""通用变更确认对话框：字段级差异、接受/拒绝。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class ReviewDialog(QDialog):
         super().__init__(parent)
         self.ai = ai
         self.app = app
-        self.setWindowTitle("AI 审核")
+        self.setWindowTitle("待确认变更")
         self.resize(960, 640)
 
         layout = QVBoxLayout(self)
@@ -79,7 +79,7 @@ class ReviewDialog(QDialog):
 
         tip = QLabel(
             "冲突项须用「强制采用外部」或「保留内部」。"
-            "撤销请在主窗口选中题目后使用「撤销 AI」（亦适用于工作区接受）。"
+            "撤销请在题库选中题目后使用「撤销 AI 修改」（亦适用于工作区接受）。"
             "请勿直接修改 SQLite。"
         )
         tip.setWordWrap(True)

@@ -8,7 +8,12 @@ import logging
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from yancuo_win.config.settings import AppSettings, ConfigError, load_settings
+from yancuo_win.config.settings import (
+    AppSettings,
+    ConfigError,
+    apply_user_preferences,
+    load_settings,
+)
 from yancuo_win.data.db import make_engine, make_session_factory
 from yancuo_win.data.migrate import migrate, verify_core_tables
 from yancuo_win.domain.identity import LocalIdentity, load_or_create_identity
@@ -41,6 +46,7 @@ def bootstrap_runtime(*, run_migrate: bool = True) -> RuntimeContext:
         raise ConfigError(f"配置加载失败：{exc}") from exc
 
     root = resolve_data_root()
+    settings = apply_user_preferences(settings, root)
     paths = build_data_paths(root, settings.paths)
     paths.ensure_directories()
 

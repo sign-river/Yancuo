@@ -10,13 +10,13 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QTextEdit,
     QVBoxLayout,
 )
 
 from yancuo_win.application.services import AppServices
 from yancuo_win.domain.review_rules import REVIEW_GRADES
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.ui.math_content import MathContentView
 
 
 class TodayReviewDialog(QDialog):
@@ -37,8 +37,7 @@ class TodayReviewDialog(QDialog):
         self.hide_answer.stateChanged.connect(self._render)
         layout.addWidget(self.hide_answer)
 
-        self.body = QTextEdit()
-        self.body.setReadOnly(True)
+        self.body = MathContentView()
         layout.addWidget(self.body)
 
         grade_row = QHBoxLayout()
@@ -73,32 +72,29 @@ class TodayReviewDialog(QDialog):
         self.progress.setText(f"进度 {min(self._index + 1, total)}/{total}")
         p = self._current()
         if not p:
-            self.body.setPlainText("今日没有待复习题目。\n可将正式库题目「加入复习」后再来。")
-            return
-        lines = [
-            f"标题：{p.title or '(无)'}",
-            f"优先级：{p.priority}　已复习次数：{p.review_count}",
-            "",
-            "【原题】",
-            p.question_markdown or "（空）",
-        ]
-        if not self.hide_answer.isChecked():
-            lines.extend(
-                [
-                    "",
-                    "【我的作答】",
-                    p.user_answer or "（空）",
-                    "",
-                    "【正确答案】",
-                    p.correct_answer or "（空）",
-                    "",
-                    "【解析】",
-                    p.solution_markdown or "（空）",
-                ]
+            self.body.set_message(
+                "今日复习已完成",
+                "今日没有待复习题目。\n可将正式库题目“加入复习”后再来。",
             )
-        else:
-            lines.append("\n（答案已隐藏，打分后再对照）")
-        self.body.setPlainText("\n".join(lines))
+            return
+        fields = {
+            "title": p.title,
+            "priority": p.priority,
+            "question_markdown": p.question_markdown,
+            "question_latex": p.question_latex,
+            "user_answer": p.user_answer,
+            "correct_answer": p.correct_answer,
+            "solution_markdown": p.solution_markdown,
+            "error_analysis": p.error_analysis,
+            "notes": p.notes,
+            "problem_type": p.problem_type,
+            "source_book": p.source_book,
+        }
+        self.body.set_problem(
+            fields,
+            tag_names=[tag.name for tag in (p.tags or [])],
+            include_answers=not self.hide_answer.isChecked(),
+        )
 
     def _grade(self, grade: int) -> None:
         p = self._current()

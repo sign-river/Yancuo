@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from importlib import resources
 from pathlib import Path
@@ -52,14 +53,14 @@ class ImportConfig(BaseModel):
 
 class AiProviderConfig(BaseModel):
     base_url: str = ""
-    api_key_env: str = "YANCUO_AI_API_KEY"
+    api_key_env: str = "FARO_API_KEY"
     # 系统凭据键名；设置页保存的密钥读这里（环境变量优先，配置不存明文）
     credential_key: str = "yancuo_ai_api_key"
 
 
 class AiConfig(BaseModel):
     enabled: bool = False
-    default_provider: str = "mock"
+    default_provider: str = "openai_compatible"
     default_vision_model: str = ""
     default_text_model: str = ""
     request_timeout_seconds: int = Field(default=120, ge=1)
@@ -263,6 +264,77 @@ def load_settings(config_file: Path | None = None) -> AppSettings:
         raise
     except Exception as exc:  # noqa: BLE001
         raise ConfigError(f"配置加载失败：{exc}") from exc
+
+
+def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSettings:
+    """Apply non-sensitive per-user overrides stored beside the local database."""
+
+    path = Path(data_root) / "preferences.json"
+    if not path.is_file():
+        return settings
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"本地偏好设置无法读取：{path}") from exc
+    if not isinstance(payload, dict):
+        raise ConfigError(f"本地偏好设置格式无效：{path}")
+    ai = payload.get("ai")
+    if not isinstance(ai, dict):
+        return settings
+
+    provider = str(ai.get("default_provider") or "").strip()
+    if provider:
+        if provider != "mock" and provider not in settings.ai.providers:
+            raise ConfigError(f"本地偏好设置包含未知 AI 提供商：{provider}")
+        settings.ai.default_provider = provider
+    model = str(ai.get("default_vision_model") or "").strip()
+    if model:
+        settings.ai.default_vision_model = model
+        settings.ai.default_text_model = model
+    if "enabled" in ai:
+        settings.ai.enabled = bool(ai["enabled"])
+    return settings
+
+
+def save_ai_preferences(
+    data_root: Path,
+    *,
+    provider: str,
+    model: str,
+    enabled: bool = True,
+) -> Path:
+    """Persist AI selection without ever writing an API key to disk."""
+
+    provider = provider.strip()
+    model = model.strip()
+    if not provider:
+        raise ConfigError("AI 提供商不能为空")
+    if not model:
+        raise ConfigError("视觉模型 ID 不能为空")
+
+    root = Path(data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "preferences.json"
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                payload = existing
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    payload["ai"] = {
+        "enabled": enabled,
+        "default_provider": provider,
+        "default_vision_model": model,
+    }
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return path
 
 
 def _format_validation_error(exc: ValidationError) -> str:

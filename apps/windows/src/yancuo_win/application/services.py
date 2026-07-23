@@ -4,19 +4,35 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.data.ids import new_id
-from yancuo_win.data.models import Asset, Chapter, Problem, Subject, Tag, Version, utcnow
+from yancuo_win.data.models import (
+    AiJob,
+    AiJobItem,
+    Asset,
+    Chapter,
+    Problem,
+    ProblemOrigin,
+    Prompt,
+    ReviewItem,
+    ReviewSession,
+    Subject,
+    Tag,
+    Version,
+    utcnow,
+)
 from yancuo_win.domain.rules import (
     DomainError,
     assert_transition,
@@ -481,20 +497,167 @@ class AppServices:
         self.set_problem_status(problem_id, to_status)
 
     def purge_trashed(self) -> int:
+        """Permanently delete trashed problems and their dependent workflow data.
+
+        AI and review rows reference problems/assets without database-level cascade
+        rules in schema v4.  Remove those rows first so the whole purge remains one
+        atomic transaction.  Object-store files are removed only after commit and
+        only when no surviving Asset row still references the same relative path.
+        """
+
+        relative_paths: set[str] = set()
+        try:
+            with self.session() as s:
+                rows = list(
+                    s.scalars(
+                        select(Problem)
+                        .where(Problem.status == "trashed")
+                        .options(
+                            selectinload(Problem.tags),
+                            selectinload(Problem.assets),
+                            selectinload(Problem.versions),
+                        )
+                    ).all()
+                )
+                if not rows:
+                    return 0
+
+                problem_ids = [problem.id for problem in rows]
+                assets = [asset for problem in rows for asset in problem.assets]
+                asset_ids = [asset.id for asset in assets]
+                relative_paths = {asset.relative_path for asset in assets}
+
+                item_scope = AiJobItem.problem_id.in_(problem_ids)
+                if asset_ids:
+                    item_scope = or_(item_scope, AiJobItem.asset_id.in_(asset_ids))
+                affected_job_ids = set(
+                    s.scalars(select(AiJobItem.job_id).where(item_scope)).all()
+                )
+                affected_session_ids = set(
+                    s.scalars(
+                        select(ReviewItem.session_id).where(
+                            ReviewItem.problem_id.in_(problem_ids)
+                        )
+                    ).all()
+                )
+
+                s.execute(
+                    delete(ReviewItem).where(ReviewItem.problem_id.in_(problem_ids))
+                )
+                s.execute(delete(AiJobItem).where(item_scope))
+                s.execute(
+                    delete(ProblemOrigin).where(
+                        ProblemOrigin.problem_id.in_(problem_ids)
+                    )
+                )
+                s.flush()
+
+                for problem in rows:
+                    problem.tags.clear()
+                    s.delete(problem)
+                s.flush()
+
+                for session_id in affected_session_ids:
+                    review_session = s.get(ReviewSession, session_id)
+                    if review_session is None:
+                        continue
+                    has_items = s.scalar(
+                        select(func.count(ReviewItem.id)).where(
+                            ReviewItem.session_id == session_id
+                        )
+                    )
+                    if not has_items:
+                        s.delete(review_session)
+
+                for job_id in affected_job_ids:
+                    job = s.get(AiJob, job_id)
+                    if job is None:
+                        continue
+                    remaining = list(
+                        s.scalars(
+                            select(AiJobItem).where(AiJobItem.job_id == job_id)
+                        ).all()
+                    )
+                    if remaining:
+                        job.total_items = len(remaining)
+                        job.done_items = sum(item.status == "done" for item in remaining)
+                        job.failed_items = sum(
+                            item.status == "failed" for item in remaining
+                        )
+                        continue
+
+                    for review_session in s.scalars(
+                        select(ReviewSession).where(ReviewSession.job_id == job_id)
+                    ).all():
+                        has_items = s.scalar(
+                            select(func.count(ReviewItem.id)).where(
+                                ReviewItem.session_id == review_session.id
+                            )
+                        )
+                        if has_items:
+                            review_session.job_id = None
+                        else:
+                            s.delete(review_session)
+
+                    # review_sessions.job_id has no ON DELETE cascade in schema v4;
+                    # persist detach/delete decisions before removing the job.
+                    s.flush()
+                    prompt_key = job.prompt_key
+                    s.delete(job)
+                    s.flush()
+                    if prompt_key == f"intake_{job_id}":
+                        prompt_in_use = s.scalar(
+                            select(func.count(AiJob.id)).where(
+                                AiJob.prompt_key == prompt_key
+                            )
+                        )
+                        if not prompt_in_use:
+                            prompt = s.scalar(
+                                select(Prompt).where(Prompt.key == prompt_key)
+                            )
+                            if prompt is not None:
+                                s.delete(prompt)
+
+                count = len(rows)
+                s.commit()
+        except SQLAlchemyError as exc:
+            raise DomainError("清空回收站失败，所有删除操作均已回滚") from exc
+
+        self._remove_unreferenced_asset_files(relative_paths)
+        return count
+
+    def _remove_unreferenced_asset_files(self, relative_paths: set[str]) -> None:
+        """Best-effort cleanup after database references have been committed."""
+
+        objects_root = self.store.objects_root.resolve()
         with self.session() as s:
-            rows = list(
-                s.scalars(
-                    select(Problem)
-                    .where(Problem.status == "trashed")
-                    .options(selectinload(Problem.tags), selectinload(Problem.assets), selectinload(Problem.versions))
-                ).all()
-            )
-            count = len(rows)
-            for p in rows:
-                p.tags.clear()
-                s.delete(p)
-            s.commit()
-            return count
+            referenced = {
+                path
+                for path in relative_paths
+                if s.scalar(
+                    select(func.count(Asset.id)).where(Asset.relative_path == path)
+                )
+            }
+
+        for relative_path in relative_paths - referenced:
+            path = self.store.resolve(relative_path)
+            try:
+                path.relative_to(objects_root)
+            except ValueError:
+                self.runtime.logger.warning(
+                    "skip unsafe asset cleanup path: %s", relative_path
+                )
+                continue
+            try:
+                if path.is_file():
+                    path.chmod(path.stat().st_mode | stat.S_IWRITE)
+                    path.unlink()
+                if path.parent != objects_root:
+                    path.parent.rmdir()
+            except OSError as exc:
+                self.runtime.logger.warning(
+                    "orphan asset cleanup failed for %s: %s", path, exc
+                )
 
     def promote_to_active(self, problem_id: str) -> None:
         self.set_problem_status(problem_id, "active")
@@ -738,8 +901,12 @@ class AppServices:
                 stored = self.store.store_copy(path, role="original")
                 if skip:
                     exists = s.scalar(
-                        select(Asset).where(
-                            Asset.sha256 == stored.sha256, Asset.role == "original"
+                        select(Asset)
+                        .join(Problem, Problem.id == Asset.problem_id)
+                        .where(
+                            Asset.sha256 == stored.sha256,
+                            Asset.role == "original",
+                            Problem.status != "trashed",
                         )
                     )
                     if exists:

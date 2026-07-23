@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.cloud.factory import get_cloud_provider
+from yancuo_win.config.settings import ConfigError, save_ai_preferences
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import (
     delete_secret,
@@ -78,17 +79,26 @@ class SettingsDialog(QDialog):
         # —— AI ——
         ai_card = CardFrame()
         ai_card.add_title("AI（Faro / OpenAI 兼容）")
-        ai_card.add_hint("密钥只进系统凭据；选 OpenAI 兼容并保存 Key 后点「应用 AI」。")
+        ai_card.add_hint(
+            "默认直连 Faro API。密钥只进系统凭据；模型 ID 请从 Faro 模型广场复制，并确认支持图片输入。"
+        )
         ai_form = QFormLayout()
         self.ai_provider = QComboBox()
-        self.ai_provider.addItem("Mock（本地假数据）", "mock")
-        self.ai_provider.addItem("OpenAI 兼容（Faro 等）", "openai_compatible")
+        self.ai_provider.addItem("Faro API（真实识图）", "openai_compatible")
+        self.ai_provider.addItem("Mock（离线测试数据）", "mock")
         idx = self.ai_provider.findData(s.ai.default_provider)
         self.ai_provider.setCurrentIndex(max(0, idx))
         ai_form.addRow("AI 提供商", self.ai_provider)
 
+        faro_cfg = s.ai.providers.get("openai_compatible")
+        ai_form.addRow(
+            "API 地址",
+            QLabel((faro_cfg.base_url if faro_cfg else "") or "https://faroapi.com/v1"),
+        )
+
         self.ai_model = QLineEdit(s.ai.default_vision_model or "gpt-5.6-sol")
-        ai_form.addRow("视觉模型 ID", self.ai_model)
+        self.ai_model.setPlaceholderText("从 Faro 模型广场复制支持图片的模型 ID")
+        ai_form.addRow("图片模型 ID", self.ai_model)
 
         self._ai_cred_key = (
             (
@@ -110,9 +120,12 @@ class SettingsDialog(QDialog):
         save_ai.clicked.connect(self._save_ai_token)
         clear_ai = QPushButton("清除 AI 密钥")
         clear_ai.clicked.connect(self._clear_ai_token)
-        apply_ai = QPushButton("应用 AI 到当前会话")
+        test_ai = QPushButton("测试 Faro 连接")
+        test_ai.clicked.connect(self._test_ai_connection)
+        apply_ai = QPushButton("保存并应用 AI 设置")
         apply_ai.clicked.connect(self._apply_ai_session)
-        ai_card.body.addLayout(button_row(save_ai, clear_ai, apply_ai))
+        ai_card.body.addLayout(button_row(save_ai, clear_ai, test_ai))
+        ai_card.body.addLayout(button_row(apply_ai))
         layout.addWidget(ai_card)
 
         # —— 云端 ——
@@ -205,24 +218,63 @@ class SettingsDialog(QDialog):
 
     def _apply_ai_session(self) -> None:
         name = self.ai_provider.currentData()
-        self.runtime.settings.ai.default_provider = name
-        self.runtime.settings.ai.enabled = True
         model = self.ai_model.text().strip()
-        if model:
+        if not model:
+            QMessageBox.warning(self, "模型未设置", "请填写 Faro 模型广场中的图片模型 ID")
+            return
+        try:
+            provider = get_provider(self.runtime.settings, name)
+            provider.validate_configuration()
+            save_ai_preferences(
+                self.runtime.paths.root,
+                provider=name,
+                model=model,
+                enabled=True,
+            )
+            self.runtime.settings.ai.default_provider = name
+            self.runtime.settings.ai.enabled = True
             self.runtime.settings.ai.default_vision_model = model
             self.runtime.settings.ai.default_text_model = model
-        try:
-            if name != "mock":
-                provider = get_provider(self.runtime.settings, name)
-                if hasattr(provider, "_api_key"):
-                    provider._api_key()  # type: ignore[attr-defined]
             QMessageBox.information(
                 self,
-                "已应用",
-                f"当前会话 AI：{name}\n模型：{self.runtime.settings.ai.default_vision_model}",
+                "已保存并应用",
+                f"AI 提供商：{'Faro API' if name == 'openai_compatible' else 'Mock'}\n"
+                f"图片模型：{model}\n下次启动仍会保留此选择。",
             )
+        except (ConfigError, DomainError) as exc:
+            QMessageBox.warning(self, "AI 设置未就绪", str(exc))
+
+    def _test_ai_connection(self) -> None:
+        name = self.ai_provider.currentData()
+        if name == "mock":
+            QMessageBox.information(self, "Mock", "Mock 不访问网络，请选择 Faro API。")
+            return
+        model = self.ai_model.text().strip()
+        try:
+            provider = get_provider(self.runtime.settings, name)
+            provider.validate_configuration()
+            list_models = getattr(provider, "list_models", None)
+            if not callable(list_models):
+                raise DomainError("当前提供商不支持连接测试")
+            models = list_models(timeout_seconds=20)
         except DomainError as exc:
-            QMessageBox.warning(self, "密钥未就绪", str(exc))
+            QMessageBox.warning(self, "Faro 连接失败", str(exc))
+            return
+
+        if model and model not in models:
+            sample = "、".join(models[:8]) or "（服务未返回模型）"
+            QMessageBox.warning(
+                self,
+                "连接成功，但模型未找到",
+                f"Faro 身份验证成功，但模型列表中没有“{model}”。\n"
+                f"请从模型广场重新复制 ID。当前返回示例：{sample}",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Faro 连接成功",
+            f"已通过 Faro 身份验证，并在模型列表中找到“{model}”。",
+        )
 
     def _credential_key_for_provider(self) -> str | None:
         name = self.provider.currentData()

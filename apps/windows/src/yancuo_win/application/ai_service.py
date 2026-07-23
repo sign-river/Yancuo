@@ -220,6 +220,24 @@ class AIService:
             s.expunge_all()
             return list(rows)
 
+    def list_review_items_for_job(self, job_id: str) -> list[ReviewItem]:
+        """Return review candidates belonging to one AI job.
+
+        The legacy review dialog shows every source in one global queue.  The
+        intake workflow needs a job-scoped view so users stay inside the same
+        recording session from upload through confirmation.
+        """
+
+        with self.session() as s:
+            rows = s.scalars(
+                select(ReviewItem)
+                .join(ReviewSession, ReviewSession.id == ReviewItem.session_id)
+                .where(ReviewSession.job_id == job_id)
+                .order_by(ReviewItem.id)
+            ).all()
+            s.expunge_all()
+            return list(rows)
+
     def get_review_item(self, item_id: str) -> ReviewItem | None:
         with self.session() as s:
             item = s.get(ReviewItem, item_id)
@@ -237,7 +255,13 @@ class AIService:
             )
             return float(total or 0.0)
 
-    def create_structure_job(self, problem_ids: list[str]) -> AiJob:
+    def create_structure_job(
+        self,
+        problem_ids: list[str],
+        *,
+        user_instruction: str = "",
+        allowed_fields: set[str] | frozenset[str] | None = None,
+    ) -> AiJob:
         if not self.runtime.settings.ai.enabled:
             raise DomainError("AI 功能未启用（config [ai].enabled）")
         if not problem_ids:
@@ -247,17 +271,39 @@ class AIService:
             raise DomainError(f"单次最多 {max_n} 张/题")
         if self.today_cost() >= self.runtime.settings.ai.max_daily_cost_yuan:
             raise DomainError("已达每日 AI 费用上限")
-
+        base_prompt = self.get_prompt("structure_recognize")
         provider_name = self.runtime.settings.ai.default_provider
-        allowed = sorted(DEFAULT_ALLOWED_FIELDS)
+        allowed = sorted(allowed_fields or DEFAULT_ALLOWED_FIELDS)
         with self.session() as s:
+            job_id = new_id("job")
+            prompt_key = "structure_recognize"
+            instruction = user_instruction.strip()
+            if instruction:
+                prompt_key = f"intake_{job_id}"
+                body = (
+                    f"{base_prompt.body.rstrip()}\n\n"
+                    "## 本次录题补充要求\n"
+                    f"{instruction}\n\n"
+                    "补充要求只用于定位和理解图片内容，不得改变输出 JSON 结构、"
+                    "字段权限或原图保护规则。"
+                )
+                s.add(
+                    Prompt(
+                        id=new_id("prompt"),
+                        key=prompt_key,
+                        name="AI 录题临时提示词",
+                        body=body,
+                        version=1,
+                        is_builtin=False,
+                    )
+                )
             job = AiJob(
-                id=new_id("job"),
+                id=job_id,
                 job_type="structure_recognize",
                 status="pending",
                 provider=provider_name,
                 model=self.runtime.settings.ai.default_vision_model or "mock-v1",
-                prompt_key="structure_recognize",
+                prompt_key=prompt_key,
                 total_items=0,
                 allowed_fields_json=json.dumps(allowed, ensure_ascii=False),
             )
@@ -293,7 +339,11 @@ class AIService:
                 "ai_job_created",
                 "ai_job",
                 job.id,
-                {"problem_ids": problem_ids, "provider": provider_name},
+                {
+                    "problem_ids": problem_ids,
+                    "provider": provider_name,
+                    "has_user_instruction": bool(instruction),
+                },
             )
             s.commit()
             s.refresh(job)
@@ -302,7 +352,6 @@ class AIService:
 
     def run_job(self, job_id: str, *, should_cancel: Callable[[], bool] | None = None) -> AiJob:
         """同步执行任务（可由后台线程调用）。不直接写入正式题库字段。"""
-        prompt = self.get_prompt("structure_recognize")
         provider = get_provider(self.runtime.settings)
 
         with self.session() as s:
@@ -313,14 +362,22 @@ class AIService:
                 raise DomainError("任务不存在")
             if job.status == "cancelled":
                 return job
+            prompt_key = job.prompt_key or "structure_recognize"
             job.status = "running"
             job.updated_at = utcnow()
             s.commit()
 
+        prompt = self.get_prompt(prompt_key)
+
         # 重新加载条目 ID 列表，逐条处理并短事务提交，便于 UI 刷新进度
         with self.session() as s:
             item_ids = list(
-                s.scalars(select(AiJobItem.id).where(AiJobItem.job_id == job_id)).all()
+                s.scalars(
+                    select(AiJobItem.id).where(
+                        AiJobItem.job_id == job_id,
+                        AiJobItem.status.in_(("pending", "running", "failed")),
+                    )
+                ).all()
             )
 
         session_id: str | None = None

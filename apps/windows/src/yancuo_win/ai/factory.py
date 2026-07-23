@@ -21,7 +21,7 @@ def get_provider(settings: AppSettings, name: str | None = None) -> AIProvider:
             raise DomainError(f"未配置提供商：{provider_name}")
         return OpenAICompatibleProvider(
             base_url=cfg.base_url or "https://api.openai.com/v1",
-            api_key_env=cfg.api_key_env or "YANCUO_AI_API_KEY",
+            api_key_env=cfg.api_key_env or "FARO_API_KEY",
             credential_key=cfg.credential_key or "yancuo_ai_api_key",
         )
     raise DomainError(f"未知 AI 提供商：{provider_name}")

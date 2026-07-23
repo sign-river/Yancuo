@@ -6,10 +6,13 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from sqlalchemy import select
 
+from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.config.settings import default_toml_path
+from yancuo_win.data.models import AiJob, AiJobItem, Asset, ReviewItem
 from yancuo_win.domain.rules import DomainError
 
 
@@ -17,6 +20,7 @@ from yancuo_win.domain.rules import DomainError
 def services(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppServices:
     monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
+    monkeypatch.setenv("YANCUO_AI__DEFAULT_PROVIDER", "mock")
     return AppServices(bootstrap_runtime())
 
 
@@ -62,6 +66,61 @@ def test_import_image_dedup_and_immutable(
     assert asset.is_immutable is True
     with pytest.raises(DomainError):
         services.try_overwrite_original(asset.id)
+
+
+def test_trashed_image_can_be_reimported_without_deleting_shared_object(
+    services: AppServices, tmp_path: Path
+) -> None:
+    image = tmp_path / "retry.jpg"
+    image.write_bytes(b"\xff\xd8\xff" + b"retry-after-trash")
+
+    first_id = services.import_images([image])["created"][0]
+    first = services.get_problem(first_id)
+    assert first is not None
+    object_path = services.store.resolve(first.assets[0].relative_path)
+    services.trash_problem(first_id)
+
+    second = services.import_images([image])
+    assert len(second["created"]) == 1
+    second_id = second["created"][0]
+    assert second["skipped"] == []
+
+    assert services.purge_trashed() == 1
+    assert services.get_problem(first_id) is None
+    assert services.get_problem(second_id) is not None
+    assert object_path.is_file()
+
+
+def test_purge_trashed_removes_ai_dependencies_and_orphan_file(
+    services: AppServices, tmp_path: Path
+) -> None:
+    image = tmp_path / "ai-trash.jpg"
+    image.write_bytes(b"\xff\xd8\xff" + b"ai-trash-with-dependencies")
+    problem_id = services.import_images([image])["created"][0]
+    problem = services.get_problem(problem_id)
+    assert problem is not None
+    asset_id = problem.assets[0].id
+    object_path = services.store.resolve(problem.assets[0].relative_path)
+
+    ai = AIService(services.runtime)
+    job = ai.create_structure_job([problem_id])
+    ai.run_job(job.id)
+    assert ai.list_review_items_for_job(job.id)
+
+    services.trash_problem(problem_id)
+    assert services.purge_trashed() == 1
+
+    assert services.get_problem(problem_id) is None
+    assert not object_path.exists()
+    with services.session() as session:
+        assert session.get(Asset, asset_id) is None
+        assert session.get(AiJob, job.id) is None
+        assert session.scalar(
+            select(AiJobItem).where(AiJobItem.problem_id == problem_id)
+        ) is None
+        assert session.scalar(
+            select(ReviewItem).where(ReviewItem.problem_id == problem_id)
+        ) is None
 
 
 def test_search_filter_and_tags(services: AppServices) -> None:

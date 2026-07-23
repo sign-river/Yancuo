@@ -32,6 +32,10 @@ def app_stylesheet() -> str:
     QMainWindow, QDialog {{
         background: {COLOR_BG};
     }}
+    QScrollArea {{
+        background: transparent;
+        border: none;
+    }}
     QStatusBar {{
         background: {COLOR_CARD};
         color: {COLOR_MUTED};
@@ -166,6 +170,29 @@ def app_stylesheet() -> str:
         background: {COLOR_LIST_SELECTED};
         color: {COLOR_TEXT};
     }}
+    QListWidget#UploadFileList {{
+        background: #F8FAFD;
+        border: 1px solid {COLOR_BORDER};
+        border-radius: 8px;
+        outline: none;
+        padding: 6px;
+    }}
+    QListWidget#UploadFileList::item {{
+        background: {COLOR_CARD};
+        border: 1px solid {COLOR_BORDER};
+        border-radius: 8px;
+        padding: 6px;
+        margin: 3px;
+    }}
+    QListWidget#UploadFileList::item:hover {{
+        background: {COLOR_LIST_HOVER};
+        border-color: #C9D4E8;
+    }}
+    QListWidget#UploadFileList::item:selected {{
+        background: {COLOR_LIST_SELECTED};
+        border-color: {COLOR_PRIMARY};
+        color: {COLOR_TEXT};
+    }}
 
     /* —— 输入 —— */
     QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {{
@@ -234,6 +261,19 @@ def app_stylesheet() -> str:
     QPushButton#GhostButton:hover {{
         background: {COLOR_LIST_HOVER};
         border-radius: 8px;
+    }}
+
+    QProgressBar {{
+        background: #EEF2F8;
+        border: 1px solid {COLOR_BORDER};
+        border-radius: 7px;
+        min-height: 14px;
+        text-align: center;
+        color: {COLOR_TEXT};
+    }}
+    QProgressBar::chunk {{
+        background: {COLOR_PRIMARY};
+        border-radius: 6px;
     }}
 
     QScrollBar:vertical {{

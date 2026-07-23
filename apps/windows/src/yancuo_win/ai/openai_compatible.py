@@ -39,8 +39,77 @@ class OpenAICompatibleProvider(AIProvider):
         if secret:
             return secret.strip()
         raise DomainError(
-            f"未配置 AI 密钥：请在设置中保存，或设置环境变量 {self.api_key_env or 'YANCUO_AI_API_KEY'}"
+            f"未配置 AI 密钥：请在设置中保存，或设置环境变量 {self.api_key_env or 'FARO_API_KEY'}"
         )
+
+    def validate_configuration(self) -> None:
+        if not self.base_url.startswith(("https://", "http://")):
+            raise DomainError("AI Base URL 无效")
+        self._api_key()
+
+    def list_models(self, *, timeout_seconds: int = 20) -> list[str]:
+        """Validate Faro/OpenAI-compatible authentication and return model IDs."""
+
+        body = self._request_json(
+            "/models",
+            method="GET",
+            timeout_seconds=timeout_seconds,
+        )
+        data = body.get("data")
+        if not isinstance(data, list):
+            raise DomainError("AI 模型列表响应格式无效")
+        models = [
+            str(item.get("id")).strip()
+            for item in data
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ]
+        return sorted(set(models))
+
+    def _request_json(
+        self,
+        endpoint: str,
+        *,
+        method: str,
+        timeout_seconds: int,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        key = self._api_key()
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(
+            f"{self.base_url}{endpoint}",
+            data=data,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key}",
+            },
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            detail = detail.replace(key, "***")
+            hints = {
+                400: "请检查模型 ID 与请求兼容性",
+                401: "请检查 Faro API Key 是否完整、启用且未过期",
+                404: "请检查 Base URL 是否为 https://faroapi.com/v1",
+                429: "请检查 Faro 余额、令牌额度或稍后重试",
+            }
+            hint = hints.get(exc.code, "请稍后重试")
+            raise DomainError(
+                f"AI 请求失败 HTTP {exc.code}：{hint}。服务返回：{detail[:240]}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise DomainError(f"无法连接 AI 服务：{exc.reason}") from exc
+        except TimeoutError as exc:
+            raise DomainError("连接 AI 服务超时") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise DomainError("AI 服务返回了无法解析的响应") from exc
+        if not isinstance(body, dict):
+            raise DomainError("AI 响应格式无效")
+        return body
 
     def structure_from_image(
         self,
@@ -76,25 +145,12 @@ class OpenAICompatibleProvider(AIProvider):
                 }
             ],
         }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._api_key()}",
-            },
+        body = self._request_json(
+            "/chat/completions",
             method="POST",
+            timeout_seconds=timeout_seconds,
+            payload=payload,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            # 绝不回显完整 Authorization
-            raise DomainError(f"AI 请求失败 HTTP {exc.code}: {detail[:300]}") from exc
-        except Exception as exc:  # noqa: BLE001
-            raise DomainError(f"AI 请求失败：{exc}") from exc
 
         raw_text = ""
         try:

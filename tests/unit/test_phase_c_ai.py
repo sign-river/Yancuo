@@ -19,6 +19,7 @@ from yancuo_win.review.changeset import validate_and_filter_proposal
 def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
+    monkeypatch.setenv("YANCUO_AI__DEFAULT_PROVIDER", "mock")
     return bootstrap_runtime()
 
 

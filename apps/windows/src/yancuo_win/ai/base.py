@@ -19,6 +19,11 @@ class StructuredResult:
 class AIProvider(ABC):
     name: str
 
+    def validate_configuration(self) -> None:
+        """Fail before a workflow creates staging data when setup is incomplete."""
+
+        return None
+
     @abstractmethod
     def structure_from_image(
         self,
