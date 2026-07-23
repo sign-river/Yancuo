@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QFileDialog,
     QFrame,
@@ -31,6 +32,7 @@ from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.cloud_service import CloudBackupService
 from yancuo_win.application.intake_service import ProblemIntakeService
+from yancuo_win.application.search_service import SearchIndexService
 from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.application.sync_service import SyncService
 from yancuo_win.cloud.factory import get_cloud_provider
@@ -636,6 +638,19 @@ class MainWindow(QMainWindow):
         self.data_path_label.setWordWrap(True)
         path_card.body.addWidget(self.data_path_label)
         lay.addWidget(path_card)
+
+        search_card = CardFrame()
+        search_card.add_title("本地搜索索引")
+        self.search_index_summary = QLabel(
+            SearchIndexService(self.runtime).check_consistency().summary
+        )
+        self.search_index_summary.setObjectName("MutedLabel")
+        self.search_index_summary.setWordWrap(True)
+        search_card.body.addWidget(self.search_index_summary)
+        rebuild_search = ghost_button("检查并重建搜索索引")
+        rebuild_search.clicked.connect(self._rebuild_search_index)
+        search_card.body.addLayout(button_row(rebuild_search))
+        lay.addWidget(search_card)
         lay.addStretch(1)
         return page
 
@@ -1699,6 +1714,26 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         SettingsDialog(self.runtime, self).exec()
         self._refresh_focus_pages()
+
+    def _rebuild_search_index(self) -> None:
+        self.search_index_summary.setText("正在检查并重建本地索引…")
+        self.status.showMessage("正在重建本地搜索索引")
+        QApplication.processEvents()
+        try:
+            service = SearchIndexService(self.runtime)
+            count = service.rebuild()
+            health = service.check_consistency()
+            self.search_index_summary.setText(health.summary)
+            self.status.showMessage(f"本地搜索索引已重建：{count} 道题", 5000)
+            QMessageBox.information(
+                self,
+                "搜索索引已重建",
+                f"已处理 {count} 道题。\n{health.summary}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.search_index_summary.setText(f"重建失败：{exc}")
+            self.status.showMessage("本地搜索索引重建失败", 5000)
+            QMessageBox.warning(self, "搜索索引重建失败", str(exc))
 
     def _ai_recognize(self) -> None:
         ids = self._selected_ids()

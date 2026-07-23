@@ -102,7 +102,7 @@ def bootstrap_runtime(*, run_migrate: bool = True) -> RuntimeContext:
         schema_version = get_schema_version(engine)
     session_factory = make_session_factory(engine)
 
-    return RuntimeContext(
+    runtime = RuntimeContext(
         settings=settings,
         paths=paths,
         identity=identity,
@@ -111,3 +111,13 @@ def bootstrap_runtime(*, run_migrate: bool = True) -> RuntimeContext:
         schema_version=schema_version,
         logger=logger,
     )
+    if run_migrate and schema_version >= 7:
+        from yancuo_win.application.search_service import (
+            SearchIndexService,
+            install_search_index_hooks,
+        )
+
+        install_search_index_hooks(session_factory)
+        search_health = SearchIndexService(runtime).repair_if_needed()
+        logger.info("search index: %s", search_health.summary)
+    return runtime
