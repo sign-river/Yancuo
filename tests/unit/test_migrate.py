@@ -41,7 +41,7 @@ def test_bootstrap_creates_layout(
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
 
     runtime = bootstrap_runtime()
-    assert runtime.schema_version == 7
+    assert runtime.schema_version == 8
     assert runtime.paths.database.is_file()
     assert runtime.paths.asset_objects_dir.is_dir()
     assert runtime.paths.identity_file.is_file()
@@ -146,6 +146,21 @@ def test_migrate_v6_to_v7_adds_trigram_search_projection(tmp_path: Path) -> None
     assert matches == [("p1",)]
 
 
+def test_migrate_v7_to_v8_adds_independent_note_tables(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path / "notes-upgrade.db")
+    assert migrate(engine, target_version=7) == 7
+    assert migrate(engine, target_version=8) == 8
+    with engine.connect() as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            )
+        }
+    assert {"note_documents", "note_blocks", "note_assets", "note_tags"} <= tables
+    assert verify_core_tables(engine) == []
+
+
 def test_pre_migration_backup_can_restore_original_database(tmp_path: Path) -> None:
     database = tmp_path / "restore.db"
     engine = make_engine(database)
@@ -224,6 +239,6 @@ def test_bootstrap_restores_backup_when_migration_fails(
         ).scalar_one()
     restored.dispose()
     assert marker == "original"
-    backups = list((data_root / "backups").glob("pre-migration-v6-to-v7-*.sqlite"))
+    backups = list((data_root / "backups").glob("pre-migration-v6-to-v8-*.sqlite"))
     assert len(backups) == 1
     verify_sqlite_database(backups[0], expected_schema_version=6)

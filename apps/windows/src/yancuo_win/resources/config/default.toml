@@ -9,7 +9,7 @@ language = "zh_CN"
 theme = "system"
 auto_save_seconds = 30
 confirm_before_delete = true
-schema_version = 7
+schema_version = 8
 
 [paths]
 database = "error_book.db"

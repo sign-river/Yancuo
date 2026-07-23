@@ -4,7 +4,7 @@ Windows / 安卓 / 云端共享的**唯一规范真相**。
 
 | 文件                            | 状态                                 |
 | ------------------------------- | ------------------------------------ |
-| `data-format-v1.md`             | 跨端字段语义 v1；当前数据库 schema_version=7、data_format_version=1 |
+| `data-format-v1.md`             | 跨端字段语义 v1；当前数据库 schema_version=8、data_format_version=1 |
 | `workspace-format-v1.md`        | 阶段 D 定稿                          |
 | `ebpack-format-v1.md`           | 阶段 F 定稿；当前仅支持未加密 v1 包  |
 | `sync-protocol-v1.md`           | 阶段 J 定稿；Windows LocalFolder 已接入，远端/Android 增量后置 |

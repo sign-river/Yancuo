@@ -259,6 +259,16 @@ def _migrate_to_v7(engine: Engine) -> None:
     logger.info("migrated database to schema_version=7")
 
 
+def _migrate_to_v8(engine: Engine) -> None:
+    """Add independent note documents, ordered blocks, tags, and assets."""
+
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 8)
+        session.commit()
+    logger.info("migrated database to schema_version=8")
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -310,6 +320,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     5: _migrate_to_v5,
     6: _migrate_to_v6,
     7: _migrate_to_v7,
+    8: _migrate_to_v8,
 }
 
 
@@ -358,6 +369,8 @@ def verify_core_tables(engine: Engine) -> list[str]:
     }
     if get_schema_version(engine) >= 7:
         required.update({"search_documents", "search_documents_fts"})
+    if get_schema_version(engine) >= 8:
+        required.update({"note_documents", "note_blocks", "note_assets", "note_tags"})
     with engine.connect() as conn:
         rows = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table'")

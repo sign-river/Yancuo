@@ -33,7 +33,7 @@ Kotlin + Jetpack Compose 客户端，定位：**移动采集与复习**。
 
 数据根：`filesDir/yancuo_data/`（`error_book.db`、`assets/objects/`、`identity.json`）。
 
-与 Windows 共享：`schema_version=7`、`data_format_version=1`、内容寻址对象库、`.ebpack` v1。Android 当前只导入未加密包；schema v5/v6 的候选区域与 intake 暂存表、schema v7 的搜索投影属于 Windows 过程或派生数据，不在 Android UI 中提供对应功能。平台特定 FTS 虚表不会写入 `.ebpack` 快照。
+与 Windows 共享：`schema_version=8`、`data_format_version=1`、内容寻址对象库、`.ebpack` v1。Android 当前只导入未加密包；schema v5/v6 的候选区域与 intake 暂存表、schema v7 的搜索投影、schema v8 的笔记基础表均尚未在 Android UI 中提供对应功能。平台特定 FTS 虚表不会写入 `.ebpack` 快照。
 
 ## 云端能力边界
 

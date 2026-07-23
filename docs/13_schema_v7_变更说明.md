@@ -83,7 +83,7 @@ schema v7 增加一个可随时重建的搜索投影。`Problem`、`Tag`、`Subj
 - 失败会保留查询并允许切换普通搜索，关闭窗口会请求取消后台任务；
 - 收藏、最近入库、今日复习和处理中心的本地允许 ID 集合不能被模型覆盖。
 
-笔记模块和统一题库/笔记搜索属于 `SEARCH-07`，这些能力不由 schema v7 自动获得。
+笔记模块和统一题库/笔记搜索属于 `SEARCH-07`，这些能力不由 schema v7 自动获得。schema v8 已建立独立笔记权威模型，见 [`14_schema_v8_变更说明.md`](14_schema_v8_变更说明.md)；笔记尚未进入 `SearchDocument` 投影。
 
 ## `.ebpack` 与 Android
 

@@ -15,11 +15,12 @@
 | [docs/10\_schema_v5_变更说明.md](docs/10_schema_v5_变更说明.md)   | AI 候选区域坐标迁移 |
 | [docs/11\_schema_v6_变更说明.md](docs/11_schema_v6_变更说明.md)   | 专用录题暂存模型 |
 | [docs/13\_schema_v7_变更说明.md](docs/13_schema_v7_变更说明.md)   | 本地搜索投影与迁移保护 |
+| [docs/14\_schema_v8_变更说明.md](docs/14_schema_v8_变更说明.md)   | 笔记基础模型与迁移保护 |
 | [protocol/data-format-v1.md](protocol/data-format-v1.md)            | 跨端数据格式 v1      |
 
 ## 当前进度
 
-路线图 A–K 的代码与协议验收范围已落地，当前数据库为 `schema_version=7`，跨端字段语义为 `data_format_version=1`。这里的“完成”指对应阶段的实现已入库，不等于所有后续能力（加密、PDF、远端增量同步）都已提供。
+路线图 A–K 的代码与协议验收范围已落地，当前数据库为 `schema_version=8`，跨端字段语义为 `data_format_version=1`。这里的“完成”指对应阶段的实现已入库，不等于所有后续能力（加密、PDF、远端增量同步）都已提供。
 
 主线后已落地：
 
@@ -49,6 +50,7 @@
 - 题库离线搜索界面：普通搜索支持题目、答案、解析、标签、备注和来源，可在当前知识范围与全部正式题目间切换；处理中心保持状态隔离，AI 搜索入口在安全规范完成前明确禁用
 - AI 搜索安全规范：模型只能返回固定 JSON Schema 的白名单 `SearchSpec`；状态和知识范围由本地程序强制注入，SQL、未知字段、越权范围和超限结果会被拒绝
 - AI 搜索已接入题库：网络请求在后台线程执行，界面显示当前阶段、候选范围、披露字段、耗时、token 和估算费用；失败时保留查询并可回退普通搜索
+- 笔记基础模型：schema v8 新增独立的 NoteDocument / NoteBlock / NoteAsset 与笔记标签关系；笔记不复用题目字段，尚待笔记 UI、AI 提取与统一搜索接入
 - 可发布基线第一轮：正式题目写操作补齐 Operation 日志与远端 create 落地；ZIP/`.ebpack`/`.gmshare` 恢复增加路径、体积、校验与回滚保护
 - Windows wheel 已内置默认配置与协议 schema，并新增 Python 3.11–3.13 的 Windows CI、静态检查和安装后资源烟测
 

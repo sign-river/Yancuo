@@ -1,7 +1,7 @@
 # `.ebpack` 可移植包格式 v1
 
 > 状态：阶段 F 定稿；Windows 支持导出/导入，Android 支持导入 v1 包。变更前须说明原因与兼容性影响。
-> 当前包版本：`schema_version=7`、`data_format_version=1`。
+> 当前包版本：`schema_version=8`、`data_format_version=1`。
 > 实现：Windows `yancuo_win.import_export.ebpack`；Android `EbpackImporter`。
 > 测试向量：`protocol/test-vectors/ebpack-v1/`
 

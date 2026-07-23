@@ -2,12 +2,14 @@
 
 from yancuo_win.application.bootstrap import RuntimeContext, bootstrap_runtime
 from yancuo_win.application.intake_service import ProblemIntakeService
+from yancuo_win.application.note_service import NoteService
 from yancuo_win.application.services import AppServices, ProblemFilter
 
 __all__ = [
     "AppServices",
     "ProblemFilter",
     "ProblemIntakeService",
+    "NoteService",
     "RuntimeContext",
     "bootstrap_runtime",
 ]
