@@ -92,6 +92,19 @@ class ChapterTreeNode:
         return " / ".join(self.path_names)
 
 
+@dataclass(frozen=True)
+class CategoryChoice:
+    subject_id: str
+    subject_name: str
+    chapter_id: str | None
+    chapter_path: tuple[str, ...] = ()
+
+    @property
+    def label(self) -> str:
+        suffix = " / ".join(self.chapter_path) if self.chapter_path else "未分类"
+        return f"{self.subject_name} / {suffix}"
+
+
 class AppServices:
     def __init__(self, runtime: RuntimeContext) -> None:
         self.runtime = runtime
@@ -151,6 +164,14 @@ class AppServices:
             sub = s.get(Subject, subject_id)
             if not sub:
                 raise DomainError("科目不存在")
+            duplicate = s.scalar(
+                select(Subject).where(
+                    Subject.name == name,
+                    Subject.id != subject_id,
+                )
+            )
+            if duplicate:
+                raise DomainError(f"科目已存在：{name}")
             sub.name = name
             sub.updated_at = utcnow()
             s.commit()
@@ -169,6 +190,30 @@ class AppServices:
             if chapter_count or problem_count:
                 raise DomainError("科目下仍有章节或题目，无法删除")
             s.delete(sub)
+            s.commit()
+
+    def reorder_subject(self, subject_id: str, delta: int) -> None:
+        with self.session() as s:
+            rows = list(
+                s.scalars(
+                    select(Subject).order_by(
+                        Subject.sort_order,
+                        Subject.name,
+                        Subject.id,
+                    )
+                ).all()
+            )
+            index = next((i for i, row in enumerate(rows) if row.id == subject_id), -1)
+            if index < 0:
+                raise DomainError("科目不存在")
+            target = max(0, min(len(rows) - 1, index + delta))
+            if target == index:
+                return
+            row = rows.pop(index)
+            rows.insert(target, row)
+            for order, subject in enumerate(rows):
+                subject.sort_order = order
+                subject.updated_at = utcnow()
             s.commit()
 
     def list_chapters(self, subject_id: str) -> list[Chapter]:
@@ -342,6 +387,63 @@ class AppServices:
                 raise DomainError("章节下仍有题目，无法删除")
             s.delete(chapter)
             s.commit()
+
+    def reorder_chapter(self, chapter_id: str, delta: int) -> None:
+        with self.session() as s:
+            chapter = s.get(Chapter, chapter_id)
+            if chapter is None:
+                raise DomainError("章节不存在")
+            siblings = list(
+                s.scalars(
+                    select(Chapter).where(
+                        Chapter.subject_id == chapter.subject_id,
+                        Chapter.parent_id == chapter.parent_id,
+                    )
+                ).all()
+            )
+            siblings.sort(key=self._chapter_sort_key)
+            index = next(
+                (i for i, sibling in enumerate(siblings) if sibling.id == chapter_id),
+                -1,
+            )
+            target = max(0, min(len(siblings) - 1, index + delta))
+            if index < 0 or target == index:
+                return
+            row = siblings.pop(index)
+            siblings.insert(target, row)
+            for order, sibling in enumerate(siblings):
+                sibling.sort_order = order
+                sibling.updated_at = utcnow()
+            s.commit()
+
+    def list_category_choices(self) -> tuple[CategoryChoice, ...]:
+        choices: list[CategoryChoice] = []
+
+        def append_nodes(subject: Subject, nodes: tuple[ChapterTreeNode, ...]) -> None:
+            for node in nodes:
+                choices.append(
+                    CategoryChoice(
+                        subject_id=subject.id,
+                        subject_name=subject.name,
+                        chapter_id=node.chapter_id,
+                        chapter_path=node.path_names,
+                    )
+                )
+                append_nodes(subject, node.children)
+
+        for subject in self.list_subjects():
+            choices.append(
+                CategoryChoice(
+                    subject_id=subject.id,
+                    subject_name=subject.name,
+                    chapter_id=None,
+                )
+            )
+            append_nodes(
+                subject,
+                self.list_chapter_tree(subject.id, problem_status=None),
+            )
+        return tuple(choices)
 
     def _chapter_subtree_ids(self, session: Session, chapter_id: str) -> tuple[str, ...]:
         chapter = session.get(Chapter, chapter_id)
@@ -1240,6 +1342,58 @@ class AppServices:
         for problem_id, before, after in sync_changes:
             self._record_sync_change(problem_id, before=before, after=after)
         return updated
+
+    def move_problems_to_category(
+        self,
+        problem_ids: list[str],
+        *,
+        subject_id: str | None,
+        chapter_id: str | None,
+    ) -> int:
+        """Move problems to one validated catalog destination, including uncategorized."""
+
+        from yancuo_win.application.sync_service import sync_snapshot
+
+        if not problem_ids:
+            return 0
+        with self.session() as s:
+            if subject_id is not None and s.get(Subject, subject_id) is None:
+                raise DomainError("目标科目不存在")
+            if chapter_id is not None:
+                chapter = s.get(Chapter, chapter_id)
+                if chapter is None:
+                    raise DomainError("目标章节不存在")
+                if subject_id is None or chapter.subject_id != subject_id:
+                    raise DomainError("目标章节不属于所选科目")
+
+            changes: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+            for problem in s.scalars(
+                select(Problem)
+                .where(Problem.id.in_(problem_ids))
+                .options(selectinload(Problem.tags))
+            ):
+                if problem.status == "trashed":
+                    continue
+                if (
+                    problem.subject_id == subject_id
+                    and problem.chapter_id == chapter_id
+                ):
+                    continue
+                before = sync_snapshot(problem)
+                problem.subject_id = subject_id
+                problem.chapter_id = chapter_id
+                problem.updated_at = utcnow()
+                self._add_version(
+                    s,
+                    problem,
+                    source="manual",
+                    summary="移动题目分类",
+                )
+                changes.append((problem.id, before, sync_snapshot(problem)))
+            s.commit()
+        for problem_id, before, after in changes:
+            self._record_sync_change(problem_id, before=before, after=after)
+        return len(changes)
 
     def _add_version(
         self,

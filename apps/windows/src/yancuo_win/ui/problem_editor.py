@@ -57,11 +57,19 @@ class ProblemEditorDialog(QDialog):
             i = self.subject.findData(problem.subject_id)
             if i >= 0:
                 self.subject.setCurrentIndex(i)
+        self.chapter = QComboBox()
+        self.subject.currentIndexChanged.connect(self._reload_chapters)
+        self._reload_chapters()
+        if problem.chapter_id:
+            i = self.chapter.findData(problem.chapter_id)
+            if i >= 0:
+                self.chapter.setCurrentIndex(i)
 
         form.addRow("标题", self.title_edit)
         form.addRow("优先级", self.priority)
         form.addRow("状态", self.status)
         form.addRow("科目", self.subject)
+        form.addRow("章节", self.chapter)
 
         self.question = QTextEdit(problem.question_markdown or "")
         self.question.setPlaceholderText("原题 Markdown / 文本")
@@ -119,7 +127,6 @@ class ProblemEditorDialog(QDialog):
             fields = {
                 "title": self.title_edit.text().strip() or None,
                 "priority": self.priority.value(),
-                "subject_id": self.subject.currentData(),
                 "question_markdown": self.question.toPlainText(),
                 "question_latex": self.latex.toPlainText(),
                 "user_answer": self.user_answer.toPlainText(),
@@ -129,6 +136,11 @@ class ProblemEditorDialog(QDialog):
                 "notes": self.notes.toPlainText(),
             }
             self.services.update_problem(self.problem_id, fields)
+            self.services.move_problems_to_category(
+                [self.problem_id],
+                subject_id=self.subject.currentData(),
+                chapter_id=self.chapter.currentData(),
+            )
             new_status = self.status.currentData()
             current = self.services.get_problem(self.problem_id)
             if current and new_status and current.status != new_status:
@@ -136,3 +148,15 @@ class ProblemEditorDialog(QDialog):
             self.accept()
         except DomainError as exc:
             QMessageBox.warning(self, "无法保存", str(exc))
+
+    def _reload_chapters(self) -> None:
+        current = self.chapter.currentData() if hasattr(self, "chapter") else None
+        self.chapter.clear()
+        self.chapter.addItem("（未分类）", None)
+        subject_id = self.subject.currentData()
+        if subject_id:
+            for choice in self.services.list_category_choices():
+                if choice.subject_id == subject_id and choice.chapter_id is not None:
+                    self.chapter.addItem(" / ".join(choice.chapter_path), choice.chapter_id)
+        index = self.chapter.findData(current)
+        self.chapter.setCurrentIndex(index if index >= 0 else 0)

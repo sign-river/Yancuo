@@ -122,6 +122,7 @@ def test_ai_intake_stays_job_scoped_and_commits_candidate(
     prompt = intake.ai.get_prompt(job.prompt_key)
     assert "只提取画红圈的题目" in prompt.body
     assert "subject_name" in prompt.body
+    assert "线性代数 / 矩阵" in prompt.body
     assert "Markdown 字段中的公式必须使用 $...$ 或 $$...$$ 定界" in prompt.body
     assert "question_latex 只写裸 LaTeX" in prompt.body
 

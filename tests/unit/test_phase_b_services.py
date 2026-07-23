@@ -303,3 +303,65 @@ def test_chapter_maintenance_rejects_invalid_hierarchy(services: AppServices) ->
     assert moved.sort_order == 9
     services.delete_chapter(empty.id)
     assert all(chapter.id != empty.id for chapter in services.list_chapters(math.id))
+
+
+def test_catalog_choices_reordering_and_problem_category_move(
+    services: AppServices,
+) -> None:
+    math = services.create_subject("高等数学", sort_order=1)
+    algebra = services.create_subject("线性代数", sort_order=2)
+    integral = services.create_chapter(math.id, "积分", sort_order=1)
+    double = services.create_chapter(
+        math.id,
+        "二重积分",
+        parent_id=integral.id,
+    )
+    derivative = services.create_chapter(math.id, "导数", sort_order=2)
+    problem = services.create_problem(
+        title="待移动题",
+        status="active",
+        subject_id=math.id,
+        chapter_id=double.id,
+    )
+
+    labels = [choice.label for choice in services.list_category_choices()]
+    assert "高等数学 / 积分 / 二重积分" in labels
+    assert "高等数学 / 未分类" in labels
+
+    services.reorder_subject(algebra.id, -1)
+    assert [subject.id for subject in services.list_subjects()][:2] == [
+        algebra.id,
+        math.id,
+    ]
+    services.reorder_chapter(derivative.id, -1)
+    assert [chapter.id for chapter in services.list_chapters(math.id) if chapter.parent_id is None][
+        :2
+    ] == [derivative.id, integral.id]
+
+    assert (
+        services.move_problems_to_category(
+            [problem.id],
+            subject_id=math.id,
+            chapter_id=None,
+        )
+        == 1
+    )
+    moved = services.get_problem(problem.id)
+    assert moved.subject_id == math.id
+    assert moved.chapter_id is None
+
+    with pytest.raises(DomainError, match="不属于"):
+        services.move_problems_to_category(
+            [problem.id],
+            subject_id=algebra.id,
+            chapter_id=double.id,
+        )
+
+    services.move_problems_to_category(
+        [problem.id],
+        subject_id=None,
+        chapter_id=None,
+    )
+    moved = services.get_problem(problem.id)
+    assert moved.subject_id is None
+    assert moved.chapter_id is None

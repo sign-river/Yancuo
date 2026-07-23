@@ -15,6 +15,7 @@ from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.ui.main_window import MainWindow
+from yancuo_win.ui.problem_editor import ProblemEditorDialog
 
 
 class _ReaderStub(QWidget):
@@ -191,3 +192,35 @@ def test_knowledge_tree_aggregates_descendants_and_preserves_expansion(
     assert window._find_knowledge_item(parent_mode).isExpanded()
     assert window._nav_mode == uncategorized_mode
     assert _problem_titles(window) == ["未分类极限题"]
+
+
+def test_catalog_menu_and_editor_use_valid_full_paths(window: MainWindow) -> None:
+    child_mode = next(
+        mode
+        for mode in _nav_modes(window)
+        if mode.startswith("chapter:")
+        and window._find_knowledge_item(mode).text(0).startswith("二重积分")
+    )
+    _select_mode(window, child_mode)
+    actions = [action.text() for action in window._build_catalog_menu().actions()]
+    assert {
+        "新建子章节",
+        "重命名章节",
+        "移动到其他上级",
+        "章节上移",
+        "章节下移",
+        "删除章节",
+    }.issubset(actions)
+    assert any(button.text() == "移动分类" for button in window._ctx_buttons)
+
+    problem = next(
+        problem
+        for problem in window.services.list_problems()
+        if problem.title == "二重积分题"
+    )
+    dialog = ProblemEditorDialog(window.services, problem, window)
+    assert "积分 / 二重积分" in [
+        dialog.chapter.itemText(index)
+        for index in range(dialog.chapter.count())
+    ]
+    dialog.close()

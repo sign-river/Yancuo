@@ -392,6 +392,12 @@ class MainWindow(QMainWindow):
         self.knowledge_tree.setObjectName("KnowledgeTree")
         self.knowledge_tree.setHeaderHidden(True)
         self.knowledge_tree.setIndentation(16)
+        self.knowledge_tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.knowledge_tree.customContextMenuRequested.connect(
+            self._show_catalog_context_menu
+        )
         self.knowledge_tree.currentItemChanged.connect(
             self._on_knowledge_nav_changed
         )
@@ -406,8 +412,11 @@ class MainWindow(QMainWindow):
         self.new_subject_button.clicked.connect(self._new_subject)
         self.new_tag_button = ghost_button("新建标签")
         self.new_tag_button.clicked.connect(self._new_tag)
+        self.catalog_menu_button = ghost_button("目录操作 ▾")
+        self.catalog_menu_button.clicked.connect(self._show_catalog_menu)
         filter_btns.addWidget(self.new_subject_button)
         filter_btns.addWidget(self.new_tag_button)
+        filter_btns.addWidget(self.catalog_menu_button)
         filter_wrap.body.addLayout(filter_btns)
         filter_wrap.setMinimumWidth(210)
         filter_wrap.setMaximumWidth(300)
@@ -443,6 +452,7 @@ class MainWindow(QMainWindow):
             ("加入复习", self._schedule_review, "normal"),
             ("AI 补全", self._ai_recognize, "normal"),
             ("撤销 AI 修改", self._undo_ai, "normal"),
+            ("移动分类", self._move_selected_category, "normal"),
             ("删除", self._trash_selected, "danger"),
             ("恢复", self._restore_selected, "normal"),
             ("清空回收站", self._purge_trash, "danger"),
@@ -518,7 +528,13 @@ class MainWindow(QMainWindow):
                 btn.setEnabled(True)
             elif label == "恢复":
                 btn.setEnabled(has_selection and self._nav_mode == "trashed")
-            elif label in ("入正式库", "加入复习", "AI 补全", "撤销 AI 修改"):
+            elif label in (
+                "入正式库",
+                "加入复习",
+                "AI 补全",
+                "撤销 AI 修改",
+                "移动分类",
+            ):
                 btn.setEnabled(has_selection and self._nav_mode != "trashed")
             else:
                 btn.setEnabled(has_selection)
@@ -685,6 +701,7 @@ class MainWindow(QMainWindow):
             self.library_list_hint.setText("正式题目 · 双击打开详情")
             self.new_subject_button.setVisible(True)
             self.new_tag_button.setVisible(True)
+            self.catalog_menu_button.setVisible(True)
             self.library_nav_stack.setCurrentIndex(0)
             self._refresh_knowledge_tree(current_mode)
         else:
@@ -696,6 +713,7 @@ class MainWindow(QMainWindow):
             self.library_list_hint.setText("待处理题目 · 双击打开详情")
             self.new_subject_button.setVisible(False)
             self.new_tag_button.setVisible(False)
+            self.catalog_menu_button.setVisible(False)
             self.library_nav_stack.setCurrentIndex(1)
             self._refresh_process_nav(current_mode)
         self._library_modes[self._library_view] = self._nav_mode
@@ -836,6 +854,13 @@ class MainWindow(QMainWindow):
             current = all_item
             self._nav_mode = "active"
         self.knowledge_tree.setCurrentItem(current)
+        parent = current.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            mode = str(parent.data(0, Qt.ItemDataRole.UserRole) or "")
+            if mode:
+                self._knowledge_expanded_modes.add(mode)
+            parent = parent.parent()
         self.knowledge_tree.blockSignals(False)
         scrollbar = self.knowledge_tree.verticalScrollBar()
         QTimer.singleShot(
@@ -1167,9 +1192,9 @@ class MainWindow(QMainWindow):
             if problem.chapter_id:
                 chapter_name = next(
                     (
-                        chapter.name
-                        for chapter in self.services.list_chapters(problem.subject_id)
-                        if chapter.id == problem.chapter_id
+                        " / ".join(choice.chapter_path)
+                        for choice in self.services.list_category_choices()
+                        if choice.chapter_id == problem.chapter_id
                     ),
                     None,
                 )
@@ -1777,15 +1802,271 @@ class MainWindow(QMainWindow):
         except DomainError as exc:
             QMessageBox.warning(self, "失败", str(exc))
 
+    def _show_catalog_context_menu(self, position) -> None:  # noqa: ANN001
+        item = self.knowledge_tree.itemAt(position)
+        if item is not None:
+            self.knowledge_tree.setCurrentItem(item)
+        menu = self._build_catalog_menu()
+        menu.exec(self.knowledge_tree.viewport().mapToGlobal(position))
+
+    def _show_catalog_menu(self) -> None:
+        menu = self._build_catalog_menu()
+        menu.exec(
+            self.catalog_menu_button.mapToGlobal(
+                self.catalog_menu_button.rect().bottomLeft()
+            )
+        )
+
+    def _build_catalog_menu(self):
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        menu.addAction("新建科目", self._new_subject)
+        mode = self._nav_mode
+        if mode.startswith("subject:"):
+            subject_id = mode.split(":", 1)[1]
+            menu.addAction(
+                "新建一级章节",
+                lambda: self._new_chapter(subject_id, None),
+            )
+            menu.addSeparator()
+            menu.addAction("重命名科目", lambda: self._rename_subject(subject_id))
+            menu.addAction("科目上移", lambda: self._reorder_subject(subject_id, -1))
+            menu.addAction("科目下移", lambda: self._reorder_subject(subject_id, 1))
+            menu.addAction("删除科目", lambda: self._delete_subject(subject_id))
+        elif mode.startswith("uncategorized:"):
+            subject_id = mode.split(":", 1)[1]
+            menu.addAction(
+                "新建一级章节",
+                lambda: self._new_chapter(subject_id, None),
+            )
+        elif mode.startswith("chapter:"):
+            _, subject_id, chapter_id = mode.split(":", 2)
+            menu.addAction(
+                "新建子章节",
+                lambda: self._new_chapter(subject_id, chapter_id),
+            )
+            menu.addSeparator()
+            menu.addAction("重命名章节", lambda: self._rename_chapter(chapter_id))
+            menu.addAction(
+                "移动到其他上级",
+                lambda: self._move_chapter_dialog(subject_id, chapter_id),
+            )
+            menu.addAction("章节上移", lambda: self._reorder_chapter(chapter_id, -1))
+            menu.addAction("章节下移", lambda: self._reorder_chapter(chapter_id, 1))
+            menu.addAction(
+                "删除章节",
+                lambda: self._delete_chapter(subject_id, chapter_id),
+            )
+        return menu
+
+    def _refresh_catalog_to(self, mode: str) -> None:
+        self._library_view = "browse"
+        self._nav_mode = mode
+        self._library_modes["browse"] = mode
+        self.refresh_nav()
+        self.refresh_problems()
+
     def _new_subject(self) -> None:
         name, ok = QInputDialog.getText(self, "新建科目", "科目名称：")
         if not ok or not name.strip():
             return
         try:
-            self.services.create_subject(name.strip())
-            self.refresh_nav()
+            subject = self.services.create_subject(name.strip())
+            self._refresh_catalog_to(f"subject:{subject.id}")
         except DomainError as exc:
             QMessageBox.warning(self, "失败", str(exc))
+
+    def _new_chapter(self, subject_id: str, parent_id: str | None) -> None:
+        name, ok = QInputDialog.getText(self, "新建章节", "章节名称：")
+        if not ok or not name.strip():
+            return
+        try:
+            chapter = self.services.create_chapter(
+                subject_id,
+                name.strip(),
+                parent_id=parent_id,
+            )
+            self._knowledge_expanded_modes.update(
+                {f"subject:{subject_id}", f"chapter:{subject_id}:{parent_id}"}
+                if parent_id
+                else {f"subject:{subject_id}"}
+            )
+            self._refresh_catalog_to(
+                f"chapter:{subject_id}:{chapter.id}"
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法新建章节", str(exc))
+
+    def _rename_subject(self, subject_id: str) -> None:
+        subject = next(
+            (item for item in self.services.list_subjects() if item.id == subject_id),
+            None,
+        )
+        if subject is None:
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "重命名科目",
+            "科目名称：",
+            text=subject.name,
+        )
+        if not ok or not name.strip():
+            return
+        try:
+            self.services.rename_subject(subject_id, name.strip())
+            self._refresh_catalog_to(f"subject:{subject_id}")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法重命名", str(exc))
+
+    def _rename_chapter(self, chapter_id: str) -> None:
+        chapter = next(
+            (
+                item
+                for subject in self.services.list_subjects()
+                for item in self.services.list_chapters(subject.id)
+                if item.id == chapter_id
+            ),
+            None,
+        )
+        if chapter is None:
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "重命名章节",
+            "章节名称：",
+            text=chapter.name,
+        )
+        if not ok or not name.strip():
+            return
+        try:
+            self.services.rename_chapter(chapter_id, name.strip())
+            self._refresh_catalog_to(
+                f"chapter:{chapter.subject_id}:{chapter_id}"
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法重命名", str(exc))
+
+    def _move_chapter_dialog(self, subject_id: str, chapter_id: str) -> None:
+        choices = [
+            choice
+            for choice in self.services.list_category_choices()
+            if choice.subject_id == subject_id and choice.chapter_id is not None
+        ]
+        current = next(
+            (choice for choice in choices if choice.chapter_id == chapter_id),
+            None,
+        )
+        valid = [
+            choice
+            for choice in choices
+            if current is None
+            or choice.chapter_path[: len(current.chapter_path)]
+            != current.chapter_path
+        ]
+        labels = ["（科目根目录）", *(choice.label for choice in valid)]
+        selected, ok = QInputDialog.getItem(
+            self,
+            "移动章节",
+            "选择新的上级：",
+            labels,
+            editable=False,
+        )
+        if not ok:
+            return
+        parent_id = None
+        if selected != labels[0]:
+            parent_id = valid[labels.index(selected) - 1].chapter_id
+        try:
+            self.services.move_chapter(chapter_id, parent_id)
+            self._refresh_catalog_to(f"chapter:{subject_id}:{chapter_id}")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法移动章节", str(exc))
+
+    def _reorder_subject(self, subject_id: str, delta: int) -> None:
+        try:
+            self.services.reorder_subject(subject_id, delta)
+            self._refresh_catalog_to(f"subject:{subject_id}")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法排序", str(exc))
+
+    def _reorder_chapter(self, chapter_id: str, delta: int) -> None:
+        chapter = next(
+            (
+                item
+                for subject in self.services.list_subjects()
+                for item in self.services.list_chapters(subject.id)
+                if item.id == chapter_id
+            ),
+            None,
+        )
+        if chapter is None:
+            return
+        try:
+            self.services.reorder_chapter(chapter_id, delta)
+            self._refresh_catalog_to(
+                f"chapter:{chapter.subject_id}:{chapter_id}"
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法排序", str(exc))
+
+    def _delete_subject(self, subject_id: str) -> None:
+        if (
+            QMessageBox.question(self, "删除科目", "确认删除这个空科目？")
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            self.services.delete_subject(subject_id)
+            self._refresh_catalog_to("active")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法删除", str(exc))
+
+    def _delete_chapter(self, subject_id: str, chapter_id: str) -> None:
+        if (
+            QMessageBox.question(self, "删除章节", "确认删除这个空章节？")
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            self.services.delete_chapter(chapter_id)
+            self._refresh_catalog_to(f"subject:{subject_id}")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法删除", str(exc))
+
+    def _move_selected_category(self) -> None:
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "提示", "请先选择题目")
+            return
+        choices = self.services.list_category_choices()
+        labels = ["（未指定科目）", *(choice.label for choice in choices)]
+        selected, ok = QInputDialog.getItem(
+            self,
+            "移动分类",
+            f"将 {len(ids)} 道题移动到：",
+            labels,
+            editable=False,
+        )
+        if not ok:
+            return
+        subject_id = None
+        chapter_id = None
+        if selected != labels[0]:
+            choice = choices[labels.index(selected) - 1]
+            subject_id = choice.subject_id
+            chapter_id = choice.chapter_id
+        try:
+            count = self.services.move_problems_to_category(
+                ids,
+                subject_id=subject_id,
+                chapter_id=chapter_id,
+            )
+            self.refresh_nav()
+            self.refresh_problems()
+            QMessageBox.information(self, "完成", f"已移动 {count} 道题")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法移动分类", str(exc))
 
     def _new_tag(self) -> None:
         name, ok = QInputDialog.getText(self, "新建标签", "标签名称：")

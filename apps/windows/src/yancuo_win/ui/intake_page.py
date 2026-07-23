@@ -551,8 +551,12 @@ class ProblemForm(QWidget):
         self.chapter.addItem("（未指定）", None)
         subject_id = self.subject.currentData()
         if subject_id:
-            for chapter in self.intake.app.list_chapters(subject_id):
-                self.chapter.addItem(chapter.name, chapter.id)
+            for choice in self.intake.app.list_category_choices():
+                if choice.subject_id == subject_id and choice.chapter_id is not None:
+                    self.chapter.addItem(
+                        " / ".join(choice.chapter_path),
+                        choice.chapter_id,
+                    )
         index = self.chapter.findData(current)
         self.chapter.setCurrentIndex(index if index >= 0 else 0)
 
@@ -598,8 +602,10 @@ class ProblemForm(QWidget):
         self._reload_chapters()
         chapter_id = values.get("chapter_id")
         if not chapter_id and values.get("chapter_name"):
+            expected_name = str(values["chapter_name"])
             for idx in range(self.chapter.count()):
-                if self.chapter.itemText(idx) == str(values["chapter_name"]):
+                label = self.chapter.itemText(idx)
+                if label == expected_name or label.rsplit(" / ", 1)[-1] == expected_name:
                     chapter_id = self.chapter.itemData(idx)
                     break
         chapter_index = self.chapter.findData(chapter_id)

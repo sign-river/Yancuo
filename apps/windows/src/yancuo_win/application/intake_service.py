@@ -546,12 +546,13 @@ class ProblemIntakeService:
             "请额外输出 subject_name、chapter_name、problem_type 和 priority（1-5）。",
             "question_markdown、user_answer、correct_answer、solution_markdown、error_analysis 等 Markdown 字段中的公式必须使用 $...$ 或 $$...$$ 定界；不要输出无定界符的裸公式。",
             "question_latex 只写裸 LaTeX，不要再包 $、$$、\\(\\) 或 \\[\\] 定界符。",
-            "subject_name/chapter_name 优先从以下现有分类中选择；无法判断时留空，不要编造。",
+            "subject_name/chapter_name 必须从以下有效完整路径中选择；chapter_name 使用完整章节路径；无法判断时留空，不要编造。",
         ]
-        for subject in self.app.list_subjects():
-            chapters = self.app.list_chapters(subject.id)
-            chapter_text = "、".join(chapter.name for chapter in chapters) or "（暂无章节）"
-            lines.append(f"- {subject.name}：{chapter_text}")
+        for choice in self.app.list_category_choices():
+            if choice.chapter_id is None:
+                lines.append(f"- {choice.subject_name} / （未分类）")
+            else:
+                lines.append(f"- {choice.label}")
         return "\n".join(lines)
 
     def start_ai(
