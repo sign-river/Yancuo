@@ -63,6 +63,7 @@ class ProblemFilter:
     subject_id: str | None = None
     chapter_id: str | None = None
     include_descendant_chapters: bool = False
+    only_uncategorized: bool = False
     tag_id: str | None = None
     priority: int | None = None
     query: str | None = None
@@ -671,7 +672,9 @@ class AppServices:
 
         if filt.subject_id:
             stmt = stmt.where(Problem.subject_id == filt.subject_id)
-        if chapter_ids is not None:
+        if filt.only_uncategorized:
+            stmt = stmt.where(Problem.chapter_id.is_(None))
+        elif chapter_ids is not None:
             stmt = stmt.where(Problem.chapter_id.in_(chapter_ids))
         elif filt.chapter_id:
             stmt = stmt.where(Problem.chapter_id == filt.chapter_id)

@@ -230,6 +230,12 @@ def app_stylesheet(theme: str = "light") -> str:
         font-weight: 600;
         color: {t.text};
     }}
+    QLabel#LibraryBreadcrumb {{
+        color: {t.primary};
+        font-size: 12px;
+        font-weight: 600;
+        padding: 2px 4px;
+    }}
     QLabel#ImagePreview {{
         background: {t.upload_bg};
         border: 1px solid {t.border};
@@ -255,14 +261,14 @@ def app_stylesheet(theme: str = "light") -> str:
         border-radius: 10px;
     }}
 
-    QListWidget#FilterNav, QListWidget#ProblemList {{
+    QListWidget#FilterNav, QListWidget#ProblemList, QTreeWidget#KnowledgeTree {{
         background: {t.card};
         border: 1px solid {t.border};
         border-radius: 12px;
         outline: none;
         padding: 6px;
     }}
-    QListWidget#FilterNav::item {{
+    QListWidget#FilterNav::item, QTreeWidget#KnowledgeTree::item {{
         height: 34px;
         padding: 6px 10px;
         margin: 1px 0;
@@ -274,10 +280,12 @@ def app_stylesheet(theme: str = "light") -> str:
         margin: 2px 4px;
         border-radius: 8px;
     }}
-    QListWidget#FilterNav::item:hover, QListWidget#ProblemList::item:hover {{
+    QListWidget#FilterNav::item:hover, QListWidget#ProblemList::item:hover,
+    QTreeWidget#KnowledgeTree::item:hover {{
         background: {t.list_hover};
     }}
-    QListWidget#FilterNav::item:selected, QListWidget#ProblemList::item:selected {{
+    QListWidget#FilterNav::item:selected, QListWidget#ProblemList::item:selected,
+    QTreeWidget#KnowledgeTree::item:selected {{
         background: {t.list_selected};
         color: {t.text};
         font-weight: 600;

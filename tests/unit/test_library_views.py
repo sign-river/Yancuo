@@ -38,10 +38,24 @@ def window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
     runtime = bootstrap_runtime()
     services = AppServices(runtime)
     subject = services.create_subject("高等数学")
+    integral = services.create_chapter(subject.id, "积分")
+    double = services.create_chapter(subject.id, "二重积分", parent_id=integral.id)
     services.create_problem(
-        title="正式极限题",
+        title="未分类极限题",
         status="active",
         subject_id=subject.id,
+    )
+    services.create_problem(
+        title="积分基础题",
+        status="active",
+        subject_id=subject.id,
+        chapter_id=integral.id,
+    )
+    services.create_problem(
+        title="二重积分题",
+        status="active",
+        subject_id=subject.id,
+        chapter_id=double.id,
     )
     services.create_problem(title="待整理题", status="inbox")
     services.create_problem(title="归档题", status="archived")
@@ -54,18 +68,29 @@ def window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
 
 
 def _nav_modes(window: MainWindow) -> list[str]:
+    if window._library_view == "browse":
+        return [
+            str(item.data(0, Qt.ItemDataRole.UserRole))
+            for item in window._iter_knowledge_items()
+        ]
     return [
-        str(window.nav_list.item(index).data(Qt.ItemDataRole.UserRole))
-        for index in range(window.nav_list.count())
+        str(window.process_nav.item(index).data(Qt.ItemDataRole.UserRole))
+        for index in range(window.process_nav.count())
     ]
 
 
 def _select_mode(window: MainWindow, mode: str) -> None:
-    for index in range(window.nav_list.count()):
-        item = window.nav_list.item(index)
-        if item.data(Qt.ItemDataRole.UserRole) == mode:
-            window.nav_list.setCurrentRow(index)
+    if window._library_view == "browse":
+        item = window._find_knowledge_item(mode)
+        if item is not None:
+            window.knowledge_tree.setCurrentItem(item)
             return
+    else:
+        for index in range(window.process_nav.count()):
+            item = window.process_nav.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == mode:
+                window.process_nav.setCurrentRow(index)
+                return
     raise AssertionError(f"missing navigation mode: {mode}")
 
 
@@ -84,7 +109,11 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
     assert _nav_modes(window)[:2] == ["active", "due"]
     assert any(mode.startswith("subject:") for mode in _nav_modes(window))
     assert "inbox" not in _nav_modes(window)
-    assert _problem_titles(window) == ["正式极限题"]
+    assert set(_problem_titles(window)) == {
+        "未分类极限题",
+        "积分基础题",
+        "二重积分题",
+    }
     assert not window.new_subject_button.isHidden()
 
     window._set_library_view("process")
@@ -97,7 +126,11 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
     assert _problem_titles(window) == ["归档题"]
     window._set_library_view("browse")
     _select_mode(window, next(mode for mode in _nav_modes(window) if mode.startswith("subject:")))
-    assert _problem_titles(window) == ["正式极限题"]
+    assert set(_problem_titles(window)) == {
+        "未分类极限题",
+        "积分基础题",
+        "二重积分题",
+    }
 
     window._set_library_view("process")
     assert window._nav_mode == "archived"
@@ -113,3 +146,48 @@ def test_due_navigation_returns_to_browse_view(window: MainWindow) -> None:
     assert window._library_view == "browse"
     assert window._nav_mode == "due"
     assert window.library_browse_button.isChecked()
+
+
+def test_knowledge_tree_aggregates_descendants_and_preserves_expansion(
+    window: MainWindow,
+) -> None:
+    subject_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("subject:")
+    )
+    chapter_modes = [
+        mode for mode in _nav_modes(window) if mode.startswith("chapter:")
+    ]
+    parent_mode = next(
+        mode
+        for mode in chapter_modes
+        if window._find_knowledge_item(mode).text(0).startswith("积分 ·")
+    )
+    child_mode = next(mode for mode in chapter_modes if mode != parent_mode)
+    uncategorized_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("uncategorized:")
+    )
+
+    _select_mode(window, parent_mode)
+    assert set(_problem_titles(window)) == {"积分基础题", "二重积分题"}
+    assert window.library_breadcrumb.text() == "题库 / 高等数学 / 积分"
+
+    _select_mode(window, child_mode)
+    assert _problem_titles(window) == ["二重积分题"]
+    assert window.library_breadcrumb.text() == "题库 / 高等数学 / 积分 / 二重积分"
+
+    _select_mode(window, uncategorized_mode)
+    assert _problem_titles(window) == ["未分类极限题"]
+
+    subject_item = window._find_knowledge_item(subject_mode)
+    parent_item = window._find_knowledge_item(parent_mode)
+    assert subject_item is not None
+    assert parent_item is not None
+    subject_item.setExpanded(True)
+    parent_item.setExpanded(True)
+    window._set_library_view("process")
+    window._set_library_view("browse")
+
+    assert window._find_knowledge_item(subject_mode).isExpanded()
+    assert window._find_knowledge_item(parent_mode).isExpanded()
+    assert window._nav_mode == uncategorized_mode
+    assert _problem_titles(window) == ["未分类极限题"]

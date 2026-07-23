@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStatusBar,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -67,6 +69,7 @@ _STATUS_LABELS = {
     "archived": "归档",
     "trashed": "回收站",
 }
+_NAV_PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
 class MainWindow(QMainWindow):
@@ -86,6 +89,8 @@ class MainWindow(QMainWindow):
             "browse": "active",
             "process": "inbox",
         }
+        self._knowledge_expanded_modes: set[str] = set()
+        self._knowledge_scroll_value = 0
         self._nav_mode = "active"
         self._selected_problem_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
@@ -382,10 +387,20 @@ class MainWindow(QMainWindow):
         filter_wrap.body.setContentsMargins(10, 12, 10, 10)
         self.library_nav_title = filter_wrap.add_title("知识浏览")
         self.library_nav_hint = filter_wrap.add_hint("正式题目按科目查看")
-        self.nav_list = QListWidget()
-        self.nav_list.setObjectName("FilterNav")
-        self.nav_list.currentItemChanged.connect(self._on_nav_changed)
-        filter_wrap.body.addWidget(self.nav_list, stretch=1)
+        self.library_nav_stack = QStackedWidget()
+        self.knowledge_tree = QTreeWidget()
+        self.knowledge_tree.setObjectName("KnowledgeTree")
+        self.knowledge_tree.setHeaderHidden(True)
+        self.knowledge_tree.setIndentation(16)
+        self.knowledge_tree.currentItemChanged.connect(
+            self._on_knowledge_nav_changed
+        )
+        self.process_nav = QListWidget()
+        self.process_nav.setObjectName("FilterNav")
+        self.process_nav.currentItemChanged.connect(self._on_process_nav_changed)
+        self.library_nav_stack.addWidget(self.knowledge_tree)
+        self.library_nav_stack.addWidget(self.process_nav)
+        filter_wrap.body.addWidget(self.library_nav_stack, stretch=1)
         filter_btns = QHBoxLayout()
         self.new_subject_button = ghost_button("新建科目")
         self.new_subject_button.clicked.connect(self._new_subject)
@@ -394,14 +409,17 @@ class MainWindow(QMainWindow):
         filter_btns.addWidget(self.new_subject_button)
         filter_btns.addWidget(self.new_tag_button)
         filter_wrap.body.addLayout(filter_btns)
-        filter_wrap.setMinimumWidth(180)
-        filter_wrap.setMaximumWidth(240)
+        filter_wrap.setMinimumWidth(210)
+        filter_wrap.setMaximumWidth(300)
         splitter.addWidget(filter_wrap)
 
         center = QWidget()
         center_lay = QVBoxLayout(center)
         center_lay.setContentsMargins(0, 0, 0, 0)
         center_lay.setSpacing(8)
+        self.library_breadcrumb = QLabel("题库 / 全部正式题目")
+        self.library_breadcrumb.setObjectName("LibraryBreadcrumb")
+        center_lay.addWidget(self.library_breadcrumb)
         self.library_list_hint = QLabel("正式题目 · 双击打开详情")
         self.library_list_hint.setObjectName("MutedLabel")
         center_lay.addWidget(self.library_list_hint)
@@ -464,11 +482,14 @@ class MainWindow(QMainWindow):
             raise ValueError(f"unknown library view: {view}")
         if view == self._library_view:
             return
+        if self._library_view == "browse":
+            self._capture_knowledge_tree_state()
         self._library_modes[self._library_view] = self._nav_mode
         self._library_view = view
         self._nav_mode = self._library_modes[view]
         self.library_browse_button.setChecked(view == "browse")
         self.library_process_button.setChecked(view == "process")
+        self.library_nav_stack.setCurrentIndex(0 if view == "browse" else 1)
         self.refresh_nav()
         self.refresh_problems()
 
@@ -606,11 +627,9 @@ class MainWindow(QMainWindow):
         self.main_nav.setCurrentRow(_PAGE_LIBRARY)
         if self._library_view != "browse":
             self._set_library_view("browse")
-        for i in range(self.nav_list.count()):
-            it = self.nav_list.item(i)
-            if it and it.data(Qt.ItemDataRole.UserRole) == "due":
-                self.nav_list.setCurrentRow(i)
-                break
+        item = self._find_knowledge_item("due")
+        if item is not None:
+            self.knowledge_tree.setCurrentItem(item)
 
     def _refresh_focus_pages(self) -> None:
         due = 0
@@ -657,21 +676,17 @@ class MainWindow(QMainWindow):
 
     def refresh_nav(self) -> None:
         current_mode = self._nav_mode
-        self.nav_list.blockSignals(True)
-        self.nav_list.clear()
         if self._library_view == "browse":
             self.library_nav_title.setText("知识浏览")
-            self.library_nav_hint.setText("正式题目按科目查看")
+            self.library_nav_hint.setText("展开科目与章节，父节点包含全部下级题目")
             self.library_view_hint.setText(
                 "按科目与知识结构浏览正式题目；待整理、归档和回收站集中在处理中心。"
             )
             self.library_list_hint.setText("正式题目 · 双击打开详情")
             self.new_subject_button.setVisible(True)
             self.new_tag_button.setVisible(True)
-            items = [
-                ("全部正式题目", "active"),
-                ("今日待复习", "due"),
-            ]
+            self.library_nav_stack.setCurrentIndex(0)
+            self._refresh_knowledge_tree(current_mode)
         else:
             self.library_nav_title.setText("处理中心")
             self.library_nav_hint.setText("按生命周期处理题目")
@@ -681,32 +696,189 @@ class MainWindow(QMainWindow):
             self.library_list_hint.setText("待处理题目 · 双击打开详情")
             self.new_subject_button.setVisible(False)
             self.new_tag_button.setVisible(False)
-            items = [
-                (f"待整理 · {self.services.count_problems('inbox')}", "inbox"),
-                (f"已归档 · {self.services.count_problems('archived')}", "archived"),
-                (f"回收站 · {self.services.count_problems('trashed')}", "trashed"),
-            ]
-        for label, mode in items:
+            self.library_nav_stack.setCurrentIndex(1)
+            self._refresh_process_nav(current_mode)
+        self._library_modes[self._library_view] = self._nav_mode
+        self._update_library_breadcrumb()
+
+    def _capture_knowledge_tree_state(self) -> None:
+        expanded: set[str] = set()
+
+        def visit(item: QTreeWidgetItem) -> None:
+            mode = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+            if item.isExpanded() and mode:
+                expanded.add(mode)
+            for index in range(item.childCount()):
+                visit(item.child(index))
+
+        for index in range(self.knowledge_tree.topLevelItemCount()):
+            visit(self.knowledge_tree.topLevelItem(index))
+        self._knowledge_expanded_modes = expanded
+        self._knowledge_scroll_value = (
+            self.knowledge_tree.verticalScrollBar().value()
+        )
+
+    def _iter_knowledge_items(self) -> list[QTreeWidgetItem]:
+        items: list[QTreeWidgetItem] = []
+
+        def visit(item: QTreeWidgetItem) -> None:
+            items.append(item)
+            for index in range(item.childCount()):
+                visit(item.child(index))
+
+        for index in range(self.knowledge_tree.topLevelItemCount()):
+            visit(self.knowledge_tree.topLevelItem(index))
+        return items
+
+    def _find_knowledge_item(self, mode: str) -> QTreeWidgetItem | None:
+        return next(
+            (
+                item
+                for item in self._iter_knowledge_items()
+                if item.data(0, Qt.ItemDataRole.UserRole) == mode
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _set_tree_item_data(
+        item: QTreeWidgetItem,
+        *,
+        mode: str,
+        path: str,
+    ) -> None:
+        item.setData(0, Qt.ItemDataRole.UserRole, mode)
+        item.setData(0, _NAV_PATH_ROLE, path)
+
+    def _append_chapter_nodes(
+        self,
+        parent: QTreeWidgetItem,
+        nodes,
+        *,
+        subject_name: str,
+    ) -> None:
+        for node in nodes:
+            item = QTreeWidgetItem(
+                [f"{node.name} · {node.total_problem_count}"]
+            )
+            mode = f"chapter:{node.subject_id}:{node.chapter_id}"
+            self._set_tree_item_data(
+                item,
+                mode=mode,
+                path=f"题库 / {subject_name} / {node.path_label}",
+            )
+            parent.addChild(item)
+            self._append_chapter_nodes(
+                item,
+                node.children,
+                subject_name=subject_name,
+            )
+
+    def _refresh_knowledge_tree(self, current_mode: str) -> None:
+        self._capture_knowledge_tree_state()
+        self.knowledge_tree.blockSignals(True)
+        self.knowledge_tree.clear()
+
+        all_item = QTreeWidgetItem(["全部正式题目"])
+        self._set_tree_item_data(
+            all_item,
+            mode="active",
+            path="题库 / 全部正式题目",
+        )
+        self.knowledge_tree.addTopLevelItem(all_item)
+        due_item = QTreeWidgetItem(["今日待复习"])
+        self._set_tree_item_data(
+            due_item,
+            mode="due",
+            path="题库 / 今日待复习",
+        )
+        self.knowledge_tree.addTopLevelItem(due_item)
+
+        for subject in self.services.list_subjects():
+            subject_problems = self.services.list_problems(
+                ProblemFilter(status="active", subject_id=subject.id)
+            )
+            subject_item = QTreeWidgetItem(
+                [f"{subject.name} · {len(subject_problems)}"]
+            )
+            subject_mode = f"subject:{subject.id}"
+            self._set_tree_item_data(
+                subject_item,
+                mode=subject_mode,
+                path=f"题库 / {subject.name}",
+            )
+            self.knowledge_tree.addTopLevelItem(subject_item)
+
+            uncategorized_count = sum(
+                problem.chapter_id is None for problem in subject_problems
+            )
+            uncategorized = QTreeWidgetItem(
+                [f"未分类 · {uncategorized_count}"]
+            )
+            self._set_tree_item_data(
+                uncategorized,
+                mode=f"uncategorized:{subject.id}",
+                path=f"题库 / {subject.name} / 未分类",
+            )
+            subject_item.addChild(uncategorized)
+            self._append_chapter_nodes(
+                subject_item,
+                self.services.list_chapter_tree(subject.id),
+                subject_name=subject.name,
+            )
+
+        for item in self._iter_knowledge_items():
+            mode = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+            item.setExpanded(mode in self._knowledge_expanded_modes)
+
+        current = self._find_knowledge_item(current_mode)
+        if current is None:
+            current = all_item
+            self._nav_mode = "active"
+        self.knowledge_tree.setCurrentItem(current)
+        self.knowledge_tree.blockSignals(False)
+        scrollbar = self.knowledge_tree.verticalScrollBar()
+        QTimer.singleShot(
+            0,
+            lambda value=self._knowledge_scroll_value, bar=scrollbar: bar.setValue(
+                min(value, bar.maximum())
+            ),
+        )
+
+    def _refresh_process_nav(self, current_mode: str) -> None:
+        self.process_nav.blockSignals(True)
+        self.process_nav.clear()
+        for label, mode in (
+            (f"待整理 · {self.services.count_problems('inbox')}", "inbox"),
+            (f"已归档 · {self.services.count_problems('archived')}", "archived"),
+            (f"回收站 · {self.services.count_problems('trashed')}", "trashed"),
+        ):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, mode)
-            self.nav_list.addItem(item)
+            item.setData(
+                _NAV_PATH_ROLE,
+                f"处理中心 / {label.split(' · ', 1)[0]}",
+            )
+            self.process_nav.addItem(item)
 
-        if self._library_view == "browse":
-            for sub in self.services.list_subjects():
-                item = QListWidgetItem(f"科目 · {sub.name}")
-                item.setData(Qt.ItemDataRole.UserRole, f"subject:{sub.id}")
-                self.nav_list.addItem(item)
-
-        for i in range(self.nav_list.count()):
-            it = self.nav_list.item(i)
-            if it.data(Qt.ItemDataRole.UserRole) == current_mode:
-                self.nav_list.setCurrentRow(i)
+        for index in range(self.process_nav.count()):
+            item = self.process_nav.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == current_mode:
+                self.process_nav.setCurrentRow(index)
                 break
         else:
-            self.nav_list.setCurrentRow(0)
-            self._nav_mode = "active" if self._library_view == "browse" else "inbox"
-        self._library_modes[self._library_view] = self._nav_mode
-        self.nav_list.blockSignals(False)
+            self.process_nav.setCurrentRow(0)
+            self._nav_mode = "inbox"
+        self.process_nav.blockSignals(False)
+
+    def _update_library_breadcrumb(self) -> None:
+        if self._library_view == "browse":
+            item = self.knowledge_tree.currentItem()
+            path = item.data(0, _NAV_PATH_ROLE) if item else None
+        else:
+            item = self.process_nav.currentItem()
+            path = item.data(_NAV_PATH_ROLE) if item else None
+        self.library_breadcrumb.setText(str(path or "题库"))
 
     def _filter_from_nav(self) -> ProblemFilter:
         mode = self._nav_mode
@@ -714,6 +886,22 @@ class MainWindow(QMainWindow):
         if mode.startswith("subject:"):
             return ProblemFilter(
                 status="active", subject_id=mode.split(":", 1)[1], query=q
+            )
+        if mode.startswith("chapter:"):
+            _, subject_id, chapter_id = mode.split(":", 2)
+            return ProblemFilter(
+                status="active",
+                subject_id=subject_id,
+                chapter_id=chapter_id,
+                include_descendant_chapters=True,
+                query=q,
+            )
+        if mode.startswith("uncategorized:"):
+            return ProblemFilter(
+                status="active",
+                subject_id=mode.split(":", 1)[1],
+                only_uncategorized=True,
+                query=q,
             )
         if mode == "due":
             return ProblemFilter(status="active", due_for_review=True, query=q)
@@ -852,14 +1040,33 @@ class MainWindow(QMainWindow):
         )
         self.sidebar_stats.setText(summary)
 
-    def _on_nav_changed(
-        self, current: QListWidgetItem | None, _prev: QListWidgetItem | None
+    def _apply_nav_mode(self, mode: str) -> None:
+        self._nav_mode = mode
+        self._library_modes[self._library_view] = mode
+        self._update_library_breadcrumb()
+        self.refresh_problems()
+
+    def _on_knowledge_nav_changed(
+        self,
+        current: QTreeWidgetItem | None,
+        _prev: QTreeWidgetItem | None,
     ) -> None:
         if current is None:
             return
-        self._nav_mode = current.data(Qt.ItemDataRole.UserRole) or "active"
-        self._library_modes[self._library_view] = self._nav_mode
-        self.refresh_problems()
+        self._apply_nav_mode(
+            str(current.data(0, Qt.ItemDataRole.UserRole) or "active")
+        )
+
+    def _on_process_nav_changed(
+        self,
+        current: QListWidgetItem | None,
+        _prev: QListWidgetItem | None,
+    ) -> None:
+        if current is None:
+            return
+        self._apply_nav_mode(
+            str(current.data(Qt.ItemDataRole.UserRole) or "inbox")
+        )
 
     def _on_problem_selected(self) -> None:
         items = self.problem_list.selectedItems()
