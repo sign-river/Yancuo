@@ -893,6 +893,32 @@ class AppServices:
             s.expunge_all()
             return list(rows)
 
+    def list_problems_by_ids(self, problem_ids: Iterable[str]) -> list[Problem]:
+        """Load a ranked problem ID result set without losing its order."""
+
+        ordered_ids = list(dict.fromkeys(problem_ids))
+        if not ordered_ids:
+            return []
+        with self.session() as session:
+            rows = list(
+                session.scalars(
+                    select(Problem)
+                    .where(Problem.id.in_(ordered_ids))
+                    .options(
+                        selectinload(Problem.tags),
+                        selectinload(Problem.assets),
+                    )
+                ).all()
+            )
+            by_id = {problem.id: problem for problem in rows}
+            ordered = [
+                by_id[problem_id]
+                for problem_id in ordered_ids
+                if problem_id in by_id
+            ]
+            session.expunge_all()
+            return ordered
+
     def get_problem(self, problem_id: str) -> Problem | None:
         with self.session() as s:
             problem = s.scalars(

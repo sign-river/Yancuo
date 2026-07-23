@@ -58,7 +58,13 @@ def window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
         subject_id=subject.id,
         chapter_id=double.id,
     )
-    services.update_problem(favorite.id, {"is_favorite": True})
+    services.update_problem(
+        favorite.id,
+        {
+            "is_favorite": True,
+            "solution_markdown": "使用格林公式完成区域转换",
+        },
+    )
     services.create_problem(title="待整理题", status="inbox")
     services.create_problem(title="归档题", status="archived")
     services.create_problem(title="回收站题", status="trashed")
@@ -249,3 +255,57 @@ def test_smart_views_and_search_scopes_are_stable(window: MainWindow) -> None:
     )
     assert child_scope.include_descendants
     assert window.services.filter_for_knowledge_scope(child_scope).chapter_id
+
+
+def test_local_search_controls_explain_mode_and_privacy(
+    window: MainWindow,
+) -> None:
+    assert window.local_search_button.isChecked()
+    assert window.local_search_button.isEnabled()
+    assert not window.ai_search_button.isEnabled()
+    assert "安全查询规范" in window.ai_search_button.toolTip()
+    assert "完全离线" in window.search_privacy_hint.text()
+    assert window.search_scope_combo.currentData() == "current"
+
+
+def test_local_search_uses_index_and_current_knowledge_scope(
+    window: MainWindow,
+) -> None:
+    parent_mode = next(
+        mode
+        for mode in _nav_modes(window)
+        if mode.startswith("chapter:")
+        and window._find_knowledge_item(mode).text(0).startswith("积分 ·")
+    )
+    _select_mode(window, parent_mode)
+    window.search_edit.setText("未分类极限题")
+    window.refresh_problems()
+    assert _problem_titles(window) == []
+    assert "0 条结果" in window.library_list_hint.text()
+
+    window.search_scope_combo.setCurrentIndex(1)
+    assert _problem_titles(window) == ["未分类极限题"]
+    assert "全部正式题目" in window.library_list_hint.text()
+
+    window.search_edit.setText("格林公式")
+    window.refresh_problems()
+    assert _problem_titles(window) == ["二重积分题"]
+
+
+def test_processing_search_stays_in_current_lifecycle_status(
+    window: MainWindow,
+) -> None:
+    window._set_library_view("process")
+    assert not window.search_scope_combo.isEnabled()
+    window.search_edit.setText("题")
+    window.refresh_problems()
+    assert _problem_titles(window) == ["待整理题"]
+
+    _select_mode(window, "archived")
+    assert _problem_titles(window) == ["归档题"]
+    assert window.search_scope_combo.currentData() == "current"
+
+    window._clear_library_search()
+    assert window.search_edit.text() == ""
+    assert _problem_titles(window) == ["归档题"]
+    assert window.library_list_hint.text() == "待处理题目 · 双击打开详情"

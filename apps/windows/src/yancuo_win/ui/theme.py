@@ -260,6 +260,11 @@ def app_stylesheet(theme: str = "light") -> str:
         border: 1px solid {t.border};
         border-radius: 10px;
     }}
+    QFrame#SearchToolbar {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+    }}
 
     QListWidget#FilterNav, QListWidget#ProblemList, QTreeWidget#KnowledgeTree {{
         background: {t.card};
@@ -418,6 +423,16 @@ def app_stylesheet(theme: str = "light") -> str:
     QPushButton#LibraryViewButton:checked {{
         background: {t.primary};
         color: white;
+        border-color: {t.primary};
+        font-weight: 600;
+    }}
+    QPushButton#SearchModeButton {{
+        min-width: 78px;
+        color: {t.muted};
+    }}
+    QPushButton#SearchModeButton:checked {{
+        background: {t.list_selected};
+        color: {t.primary};
         border-color: {t.primary};
         font-weight: 600;
     }}

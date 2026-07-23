@@ -8,6 +8,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -79,6 +80,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.runtime = runtime
         self.services = AppServices(runtime)
+        self.search = SearchIndexService(runtime)
         self.ai = AIService(runtime)
         self.intake = ProblemIntakeService(runtime)
         self.workspace = WorkspaceService(runtime)
@@ -339,13 +341,6 @@ class MainWindow(QMainWindow):
         header.addWidget(title)
         header.addStretch(1)
 
-        self.search_edit = QLineEdit()
-        self.search_edit.setObjectName("SearchEdit")
-        self.search_edit.setPlaceholderText("搜索题目 / 答案 / 备注 / 书名…")
-        self.search_edit.setFixedWidth(280)
-        self.search_edit.returnPressed.connect(self.refresh_problems)
-        header.addWidget(self.search_edit)
-
         btn_import = primary_button("AI 图片录题")
         btn_import.clicked.connect(self._show_ai_intake)
         btn_new = QPushButton("手动录题")
@@ -356,6 +351,57 @@ class MainWindow(QMainWindow):
         header.addWidget(btn_new)
         header.addWidget(btn_more)
         outer.addLayout(header)
+
+        search_bar = QFrame()
+        search_bar.setObjectName("SearchToolbar")
+        search_row = QHBoxLayout(search_bar)
+        search_row.setContentsMargins(8, 8, 8, 8)
+        search_row.setSpacing(8)
+        self.search_mode_group = QButtonGroup(self)
+        self.search_mode_group.setExclusive(True)
+        self.local_search_button = QPushButton("普通搜索")
+        self.local_search_button.setCheckable(True)
+        self.local_search_button.setChecked(True)
+        self.ai_search_button = QPushButton("AI 搜索")
+        self.ai_search_button.setCheckable(True)
+        self.ai_search_button.setEnabled(False)
+        self.ai_search_button.setToolTip(
+            "将在安全查询规范完成后开放；当前不会上传题目内容"
+        )
+        for button in (self.local_search_button, self.ai_search_button):
+            button.setObjectName("SearchModeButton")
+            self.search_mode_group.addButton(button)
+            search_row.addWidget(button)
+
+        self.search_scope_combo = QComboBox()
+        self.search_scope_combo.setObjectName("SearchScopeCombo")
+        self.search_scope_combo.addItem("当前范围", "current")
+        self.search_scope_combo.addItem("全部正式题目", "all_active")
+        self.search_scope_combo.setMinimumWidth(190)
+        self.search_scope_combo.currentIndexChanged.connect(
+            self._on_search_scope_changed
+        )
+        search_row.addWidget(self.search_scope_combo)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setObjectName("SearchEdit")
+        self.search_edit.setPlaceholderText("搜索题目、答案、解析、标签、备注或来源…")
+        self.search_edit.returnPressed.connect(self.refresh_problems)
+        search_row.addWidget(self.search_edit, stretch=1)
+        search_button = primary_button("搜索")
+        search_button.clicked.connect(self.refresh_problems)
+        clear_search = ghost_button("清除")
+        clear_search.clicked.connect(self._clear_library_search)
+        search_row.addWidget(search_button)
+        search_row.addWidget(clear_search)
+        outer.addWidget(search_bar)
+
+        self.search_privacy_hint = QLabel(
+            "普通搜索完全离线，只查询本机索引；AI 搜索尚未开放，不会发送题目内容。"
+        )
+        self.search_privacy_hint.setObjectName("MutedLabel")
+        self.search_privacy_hint.setWordWrap(True)
+        outer.addWidget(self.search_privacy_hint)
 
         view_row = QHBoxLayout()
         view_row.setSpacing(8)
@@ -642,7 +688,7 @@ class MainWindow(QMainWindow):
         search_card = CardFrame()
         search_card.add_title("本地搜索索引")
         self.search_index_summary = QLabel(
-            SearchIndexService(self.runtime).check_consistency().summary
+            self.search.check_consistency().summary
         )
         self.search_index_summary.setObjectName("MutedLabel")
         self.search_index_summary.setWordWrap(True)
@@ -943,10 +989,41 @@ class MainWindow(QMainWindow):
             item = self.process_nav.currentItem()
             path = item.data(_NAV_PATH_ROLE) if item else None
         self.library_breadcrumb.setText(str(path or "题库"))
+        self._refresh_search_scope_control()
 
-    def _filter_from_nav(self) -> ProblemFilter:
+    def _refresh_search_scope_control(self) -> None:
+        if not hasattr(self, "search_scope_combo"):
+            return
+        current_path = self.library_breadcrumb.text()
+        current_label = current_path.split(" / ", 1)[-1]
+        self.search_scope_combo.blockSignals(True)
+        self.search_scope_combo.setItemText(0, f"当前：{current_label}")
+        if self._library_view == "process":
+            self.search_scope_combo.setCurrentIndex(0)
+            self.search_scope_combo.setEnabled(False)
+            self.search_scope_combo.setToolTip(
+                "处理中心搜索固定在当前生命周期状态，避免混入其他状态"
+            )
+        else:
+            self.search_scope_combo.setEnabled(True)
+            self.search_scope_combo.setToolTip(
+                "可搜索当前知识范围，或临时扩展到全部正式题目"
+            )
+        self.search_scope_combo.blockSignals(False)
+
+    def _on_search_scope_changed(self, _index: int) -> None:
+        if self.search_edit.text().strip():
+            self.refresh_problems()
+
+    def _clear_library_search(self) -> None:
+        if not self.search_edit.text():
+            return
+        self.search_edit.clear()
+        self.refresh_problems()
+
+    def _filter_from_nav(self, *, include_query: bool = True) -> ProblemFilter:
         mode = self._nav_mode
-        q = self.search_edit.text().strip() or None
+        q = self.search_edit.text().strip() or None if include_query else None
         if mode == "due":
             return ProblemFilter(status="active", due_for_review=True, query=q)
         if mode == "favorite":
@@ -968,6 +1045,76 @@ class MainWindow(QMainWindow):
         if scope is not None:
             return self.services.filter_for_knowledge_scope(scope, query=q)
         return ProblemFilter(status=mode, query=q)
+
+    def _knowledge_scope_from_nav(self):
+        return next(
+            (
+                scope
+                for scope in self.services.list_knowledge_scopes()
+                if scope.key == self._nav_mode
+            ),
+            None,
+        )
+
+    def _search_current_view(self, query: str) -> list[Problem]:
+        use_all_active = (
+            self._library_view == "browse"
+            and self.search_scope_combo.currentData() == "all_active"
+        )
+        if self._library_view == "process":
+            statuses = (self._nav_mode,)
+            scope = None
+        elif use_all_active:
+            statuses = ("active",)
+            scope = None
+        else:
+            statuses = ("active",)
+            scope = self._knowledge_scope_from_nav()
+
+        hits = self.search.search(
+            query,
+            scope=scope,
+            statuses=statuses,
+            limit=200,
+        )
+        problems = self.services.list_problems_by_ids(
+            hit.problem_id for hit in hits
+        )
+        if (
+            not use_all_active
+            and self._library_view == "browse"
+            and self._nav_mode in {"due", "favorite", "recent"}
+        ):
+            allowed_ids = {
+                problem.id
+                for problem in self.services.list_problems(
+                    self._filter_from_nav(include_query=False)
+                )
+            }
+            problems = [
+                problem for problem in problems if problem.id in allowed_ids
+            ]
+        return problems
+
+    def _problems_for_current_view(self) -> list[Problem]:
+        query = self.search_edit.text().strip()
+        if query:
+            return self._search_current_view(query)
+        return self.services.list_problems(
+            self._filter_from_nav(include_query=False)
+        )
+
+    def _update_library_list_hint(self, result_count: int | None = None) -> None:
+        query = self.search_edit.text().strip()
+        if query and result_count is not None:
+            scope = self.search_scope_combo.currentText()
+            self.library_list_hint.setText(
+                f"普通搜索 · {result_count} 条结果 · {scope} · 最多显示 200 条"
+            )
+        elif self._library_view == "browse":
+            self.library_list_hint.setText("正式题目 · 双击打开详情")
+        else:
+            self.library_list_hint.setText("待处理题目 · 双击打开详情")
 
     @staticmethod
     def _problem_item_text(problem: Problem) -> str:
@@ -1001,9 +1148,9 @@ class MainWindow(QMainWindow):
             self.problem_list.verticalScrollBar().value() if preserve_view else 0
         )
         try:
-            problems = self.services.list_problems(self._filter_from_nav())
-        except DomainError as exc:
-            QMessageBox.warning(self, "筛选失败", str(exc))
+            problems = self._problems_for_current_view()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "搜索或筛选失败", str(exc))
             return
         self.problem_list.blockSignals(True)
         self.problem_list.clear()
@@ -1024,6 +1171,7 @@ class MainWindow(QMainWindow):
                 ),
             )
         self._on_problem_selected()
+        self._update_library_list_hint(len(problems))
         self._update_status()
 
     def _refresh_problem_item(
@@ -1039,12 +1187,12 @@ class MainWindow(QMainWindow):
             matching = next(
                 (
                     problem
-                    for problem in self.services.list_problems(self._filter_from_nav())
+                    for problem in self._problems_for_current_view()
                     if problem.id == problem_id
                 ),
                 None,
             )
-        except DomainError as exc:
+        except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "刷新失败", str(exc))
             return
 
@@ -1720,10 +1868,11 @@ class MainWindow(QMainWindow):
         self.status.showMessage("正在重建本地搜索索引")
         QApplication.processEvents()
         try:
-            service = SearchIndexService(self.runtime)
-            count = service.rebuild()
-            health = service.check_consistency()
+            count = self.search.rebuild()
+            health = self.search.check_consistency()
             self.search_index_summary.setText(health.summary)
+            if self.search_edit.text().strip():
+                self.refresh_problems()
             self.status.showMessage(f"本地搜索索引已重建：{count} 道题", 5000)
             QMessageBox.information(
                 self,

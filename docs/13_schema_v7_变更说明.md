@@ -51,6 +51,18 @@ schema v7 增加一个可随时重建的搜索投影。`Problem`、`Tag`、`Subj
 
 这套维护不要求 AI、工作区、分享或同步模块分别调用索引 API，因此新增 ORM 写入路径默认不会绕开索引。
 
+## 题库界面接入
+
+`SEARCH-03` 已把题库搜索框接入本地索引：
+
+- 浏览题库可搜索当前科目/章节子树，也可临时扩展到全部正式题目；
+- 今日待复习、收藏和最近入库会在 FTS 候选上继续执行智能视图条件；
+- 处理中心只搜索当前 inbox、archived 或 trashed 状态；
+- 搜索结果按 FTS 相关性顺序加载题目对象，不改变题目权威数据；
+- AI 搜索入口当前禁用，普通搜索不会发送网络请求。
+
+AI 搜索的白名单查询结构、候选限制和模型返回校验属于 `SEARCH-04`—`SEARCH-06`，不由 schema v7 自动获得。
+
 ## `.ebpack` 与 Android
 
 FTS5 trigram 依赖 Windows 随应用使用的 SQLite 能力。Android API 26 等旧系统 SQLite 不保证提供相同 tokenizer，因此：
