@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -26,7 +27,11 @@ from PySide6.QtWidgets import (
 from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.cloud.factory import get_cloud_provider
-from yancuo_win.config.settings import ConfigError, save_ai_preferences
+from yancuo_win.config.settings import (
+    ConfigError,
+    save_ai_preferences,
+    save_theme_preference,
+)
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import (
     delete_secret,
@@ -35,6 +40,7 @@ from yancuo_win.infrastructure.credentials import (
     set_secret,
 )
 from yancuo_win.ui.widgets import CardFrame, button_row, primary_button
+from yancuo_win.ui.theme import apply_app_theme, get_theme_manager
 
 
 class SettingsDialog(QDialog):
@@ -61,6 +67,27 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(0, 0, 4, 0)
 
         s = runtime.settings
+
+        appearance = CardFrame()
+        appearance.add_title("外观")
+        appearance.add_hint("可跟随 Windows，也可固定使用浅色或深色；保存后立即应用。")
+        appearance_form = QFormLayout()
+        self.theme_mode = QComboBox()
+        self.theme_mode.addItem("跟随系统", "system")
+        self.theme_mode.addItem("浅色", "light")
+        self.theme_mode.addItem("深色", "dark")
+        theme_index = self.theme_mode.findData(s.application.theme)
+        self.theme_mode.setCurrentIndex(max(0, theme_index))
+        appearance_form.addRow("主题", self.theme_mode)
+        self.theme_status = QLabel("")
+        self.theme_status.setObjectName("MutedLabel")
+        appearance_form.addRow("当前状态", self.theme_status)
+        appearance.body.addLayout(appearance_form)
+        apply_theme = primary_button("保存并应用外观")
+        apply_theme.clicked.connect(self._apply_theme)
+        appearance.body.addLayout(button_row(apply_theme))
+        layout.addWidget(appearance)
+        self._refresh_theme_status()
 
         info = CardFrame()
         info.add_title("本机")
@@ -192,6 +219,33 @@ class SettingsDialog(QDialog):
         outer.addWidget(buttons)
 
         self._refresh_token_ui()
+
+    def _refresh_theme_status(self) -> None:
+        app = QApplication.instance()
+        manager = get_theme_manager(app)
+        resolved = manager.resolved if manager else "light"
+        selected = str(self.theme_mode.currentData())
+        label = {"light": "浅色", "dark": "深色"}.get(resolved, resolved)
+        if selected == "system":
+            self.theme_status.setText(f"跟随系统（当前为{label}）")
+        else:
+            self.theme_status.setText(f"当前为{label}")
+
+    def _apply_theme(self) -> None:
+        mode = str(self.theme_mode.currentData())
+        try:
+            save_theme_preference(self.runtime.paths.root, mode)
+            self.runtime.settings.application.theme = mode
+            app = QApplication.instance()
+            if app is not None:
+                manager = get_theme_manager(app)
+                if manager is None:
+                    apply_app_theme(app, mode)
+                else:
+                    manager.set_mode(mode)
+            self._refresh_theme_status()
+        except (ConfigError, ValueError) as exc:
+            QMessageBox.warning(self, "外观设置未保存", str(exc))
 
     def _ai_credential_key(self) -> str:
         cfg = self.runtime.settings.ai.providers.get("openai_compatible")

@@ -100,9 +100,7 @@ class _DetailImage(QLabel):
         self.setMinimumSize(QSize(280, 300))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("双击放大查看原始图片")
-        self.setStyleSheet(
-            "background: #F5F7FA; border: 1px solid #E5EAF2; border-radius: 8px;"
-        )
+        self.setObjectName("ImagePreview")
 
     def set_path(self, path: Path | None) -> bool:
         self._source = QPixmap(str(path)) if path and path.is_file() else QPixmap()

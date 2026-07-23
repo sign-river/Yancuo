@@ -114,3 +114,15 @@ def test_problem_document_hides_answers_without_leaking_source() -> None:
     assert "答案与解析已隐藏" in rendered
     assert "secret-answer" not in rendered
     assert "secret-solution" not in rendered
+
+
+def test_problem_document_uses_dark_theme_tokens() -> None:
+    rendered = build_problem_html(
+        {"title": "暗色公式", "question_markdown": r"计算 \(\frac{1}{2}\)"},
+        theme="dark",
+    )
+
+    assert '<meta name="color-scheme" content="dark">' in rendered
+    assert "background: #11151C" in rendered
+    assert "color: #E8EDF5" in rendered
+    assert "<mfrac>" in rendered

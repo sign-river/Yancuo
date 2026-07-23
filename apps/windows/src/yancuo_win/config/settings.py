@@ -24,6 +24,14 @@ class ApplicationConfig(BaseModel):
     confirm_before_delete: bool = True
     schema_version: int = Field(default=1, ge=1)
 
+    @field_validator("theme")
+    @classmethod
+    def validate_theme(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"system", "light", "dark"}:
+            raise ValueError("theme 必须是 system、light 或 dark")
+        return value
+
 
 class PathsConfig(BaseModel):
     database: str = "error_book.db"
@@ -278,6 +286,16 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
         raise ConfigError(f"本地偏好设置无法读取：{path}") from exc
     if not isinstance(payload, dict):
         raise ConfigError(f"本地偏好设置格式无效：{path}")
+
+    application = payload.get("application")
+    if isinstance(application, dict) and "theme" in application:
+        try:
+            settings.application.theme = ApplicationConfig.validate_theme(
+                str(application["theme"])
+            )
+        except ValueError as exc:
+            raise ConfigError(f"本地偏好设置包含无效主题：{application['theme']}") from exc
+
     ai = payload.get("ai")
     if not isinstance(ai, dict):
         return settings
@@ -328,6 +346,39 @@ def save_ai_preferences(
         "default_provider": provider,
         "default_vision_model": model,
     }
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return path
+
+
+def save_theme_preference(data_root: Path, theme: str) -> Path:
+    """Persist the selected appearance without discarding other preferences."""
+
+    try:
+        normalized = ApplicationConfig.validate_theme(theme)
+    except ValueError as exc:
+        raise ConfigError(f"无效主题：{theme}") from exc
+
+    root = Path(data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "preferences.json"
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                payload = existing
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    application = payload.get("application")
+    if not isinstance(application, dict):
+        application = {}
+    application["theme"] = normalized
+    payload["application"] = application
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

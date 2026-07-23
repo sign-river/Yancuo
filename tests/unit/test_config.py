@@ -10,11 +10,13 @@ import pytest
 import yancuo_win
 
 from yancuo_win.config.settings import (
+    ApplicationConfig,
     ConfigError,
     apply_user_preferences,
     default_toml_path,
     load_settings,
     save_ai_preferences,
+    save_theme_preference,
 )
 
 
@@ -73,6 +75,30 @@ def test_ai_preferences_roundtrip_without_secret(tmp_path: Path) -> None:
     apply_user_preferences(settings, tmp_path)
     assert settings.ai.default_provider == "mock"
     assert settings.ai.default_vision_model == "offline-test-model"
+
+
+def test_theme_preferences_roundtrip_without_ai_settings(tmp_path: Path) -> None:
+    path = save_theme_preference(tmp_path, "dark")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload == {"application": {"theme": "dark"}}
+
+    settings = load_settings(default_toml_path())
+    apply_user_preferences(settings, tmp_path)
+    assert settings.application.theme == "dark"
+
+
+def test_theme_preference_preserves_ai_settings(tmp_path: Path) -> None:
+    save_ai_preferences(tmp_path, provider="mock", model="offline-test-model")
+    path = save_theme_preference(tmp_path, "light")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert payload["application"]["theme"] == "light"
+    assert payload["ai"]["default_vision_model"] == "offline-test-model"
+
+
+def test_application_rejects_unknown_theme() -> None:
+    with pytest.raises(ValueError):
+        ApplicationConfig(theme="sepia")
 
 
 def test_bundled_resources_match_canonical_sources() -> None:

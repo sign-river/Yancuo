@@ -9,7 +9,10 @@ from typing import Any
 
 from latex2mathml import converter
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 from PySide6.QtWebEngineWidgets import QWebEngineView
+
+from yancuo_win.ui.theme import current_theme_name, get_theme_manager, theme_tokens
 
 
 _MATH_PATTERN = re.compile(
@@ -165,9 +168,11 @@ def build_problem_html(
     include_answers: bool = True,
     show_header: bool = True,
     show_answer_notice: bool = True,
+    theme: str = "light",
 ) -> str:
     """Build a complete, self-contained HTML problem document."""
 
+    colors = theme_tokens(theme)
     title = str(fields.get("title") or "无标题题目")
     question = str(fields.get("question_markdown") or "")
     latex = str(fields.get("question_latex") or "").strip()
@@ -235,11 +240,11 @@ def build_problem_html(
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="{colors.name}">
 <style>
-  :root {{ color-scheme: light; }}
+  :root {{ color-scheme: {colors.name}; }}
   * {{ box-sizing: border-box; }}
-  html, body {{ margin: 0; min-height: 100%; background: #f5f7fb; color: #172033; }}
+  html, body {{ margin: 0; min-height: 100%; background: {colors.bg}; color: {colors.text}; }}
   body {{
     padding: 24px;
     font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
@@ -247,16 +252,16 @@ def build_problem_html(
     line-height: 1.8;
   }}
   .problem-header {{ margin: 0 0 18px; }}
-  .eyebrow {{ color: #3572ff; font-size: 13px; font-weight: 700; letter-spacing: .08em; }}
+  .eyebrow {{ color: {colors.primary}; font-size: 13px; font-weight: 700; letter-spacing: .08em; }}
   h1 {{ margin: 4px 0 12px; font-size: 26px; line-height: 1.35; }}
   h2 {{ margin: 0 0 12px; font-size: 17px; line-height: 1.4; }}
   .meta-row {{ display: flex; flex-wrap: wrap; gap: 8px; }}
   .reader-meta {{ margin: 0 0 14px; }}
-  .meta-chip, .tag {{ padding: 4px 10px; border-radius: 999px; background: #eaf0ff; color: #315fb8; font-size: 13px; }}
-  .tag {{ background: #eef1f5; color: #566074; }}
+  .meta-chip, .tag {{ padding: 4px 10px; border-radius: 999px; background: {colors.chip_bg}; color: {colors.chip_text}; font-size: 13px; }}
+  .tag {{ background: {colors.tag_bg}; color: {colors.tag_text}; }}
   .content-card {{
-    margin: 0 0 14px; padding: 18px 20px; background: #fff;
-    border: 1px solid #e1e7f0; border-radius: 12px;
+    margin: 0 0 14px; padding: 18px 20px; background: {colors.card};
+    border: 1px solid {colors.border}; border-radius: 12px;
   }}
   .rich-text {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
   .rich-text math {{
@@ -264,12 +269,12 @@ def build_problem_html(
     font-size: 1.18em;
   }}
   .rich-text math[display="block"] {{ margin: .85em 0; text-align: left; }}
-  .empty {{ color: #9aa3b3; }}
+  .empty {{ color: {colors.muted}; }}
   .answer-hidden {{
-    margin: 0 0 14px; padding: 14px 18px; border: 1px dashed #bdc8d9;
-    border-radius: 10px; color: #7c8799; background: #fbfcfe;
+    margin: 0 0 14px; padding: 14px 18px; border: 1px dashed {colors.border};
+    border-radius: 10px; color: {colors.muted}; background: {colors.hidden_bg};
   }}
-  .math-fallback {{ padding: 2px 5px; border-radius: 4px; background: #fff3d9; color: #744b00; }}
+  .math-fallback {{ padding: 2px 5px; border-radius: 4px; background: {colors.fallback_bg}; color: {colors.fallback_text}; }}
   .math-fallback-block {{ display: block; padding: 10px; overflow-x: auto; }}
 </style>
 </head>
@@ -283,8 +288,12 @@ class MathContentView(QWebEngineView):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.last_html = ""
+        self._last_render: dict[str, Any] | None = None
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.page().setBackgroundColor(Qt.GlobalColor.transparent)
+        manager = get_theme_manager(QApplication.instance())
+        if manager is not None:
+            manager.theme_changed.connect(self._on_theme_changed)
 
     def set_problem(
         self,
@@ -295,14 +304,30 @@ class MathContentView(QWebEngineView):
         show_header: bool = True,
         show_answer_notice: bool = True,
     ) -> None:
+        self._last_render = {
+            "fields": dict(fields),
+            "tag_names": tuple(tag_names),
+            "include_answers": include_answers,
+            "show_header": show_header,
+            "show_answer_notice": show_answer_notice,
+        }
+        self._render_last()
+
+    def _render_last(self) -> None:
+        if self._last_render is None:
+            return
         self.last_html = build_problem_html(
-            fields,
-            tag_names=tag_names,
-            include_answers=include_answers,
-            show_header=show_header,
-            show_answer_notice=show_answer_notice,
+            self._last_render["fields"],
+            tag_names=self._last_render["tag_names"],
+            include_answers=self._last_render["include_answers"],
+            show_header=self._last_render["show_header"],
+            show_answer_notice=self._last_render["show_answer_notice"],
+            theme=current_theme_name(),
         )
         self.setHtml(self.last_html)
+
+    def _on_theme_changed(self, _theme: str) -> None:
+        self._render_last()
 
     def set_message(self, title: str, message: str) -> None:
         self.set_problem(

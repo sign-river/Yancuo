@@ -813,12 +813,12 @@ class MainWindow(QMainWindow):
         self.detail.setObjectName("")
         self.detail.setText(
             f"<b>{p.title or '（无标题）'}</b><br>"
-            f"<span style='color:#8F959E'>{status} · P{p.priority} · r{p.revision}</span><br><br>"
+            f"<small>{status} · P{p.priority} · r{p.revision}</small><br><br>"
             f"<b>标签</b><br>{tags}<br><br>"
             f"<b>原题预览</b><br>"
             f"{(p.question_markdown or '（空）')[:300]}<br><br>"
             f"<b>附件</b><br>{assets.replace(chr(10), '<br>')}<br><br>"
-            f"<span style='color:#8F959E;font-size:11px'>ID {p.id}</span>"
+            f"<small>ID {p.id}</small>"
         )
         self.detail.setTextFormat(Qt.TextFormat.RichText)
         self.detail.style().unpolish(self.detail)

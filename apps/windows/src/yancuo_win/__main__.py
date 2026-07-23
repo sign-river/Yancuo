@@ -24,7 +24,7 @@ def main() -> int:
 
     from yancuo_win.ui.theme import apply_app_theme
 
-    apply_app_theme(app)
+    apply_app_theme(app, runtime.settings.application.theme)
 
     window = MainWindow(runtime)
     window.show()

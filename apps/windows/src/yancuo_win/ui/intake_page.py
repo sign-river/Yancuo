@@ -71,9 +71,7 @@ class ImagePreviewLabel(QLabel):
         self._region_before_drag: dict[str, float] = {}
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(QSize(360, 260))
-        self.setStyleSheet(
-            "background: #F5F7FA; border: 1px solid #E5EAF2; border-radius: 8px;"
-        )
+        self.setObjectName("ImagePreview")
 
     def set_path(self, path: Path | None) -> bool:
         self.source = QPixmap(str(path)) if path is not None else QPixmap()
@@ -824,7 +822,7 @@ class IntakePage(QWidget):
         card.body.addWidget(self.processing_steps)
         self.processing_error = QLabel("")
         self.processing_error.setWordWrap(True)
-        self.processing_error.setStyleSheet("color: #F54A45;")
+        self.processing_error.setObjectName("DangerLabel")
         card.body.addWidget(self.processing_error)
         actions = QHBoxLayout()
         cancel = danger_button("取消后台任务")
@@ -1296,10 +1294,12 @@ class IntakePage(QWidget):
                 "AI 不确定字段：\n"
                 + json.dumps(candidate.uncertain, ensure_ascii=False, indent=2)
             )
-            self.uncertain_label.setStyleSheet("color: #B26A00;")
+            self.uncertain_label.setObjectName("WarningLabel")
         else:
             self.uncertain_label.setText("未报告不确定字段")
-            self.uncertain_label.setStyleSheet("")
+            self.uncertain_label.setObjectName("")
+        self.uncertain_label.style().unpolish(self.uncertain_label)
+        self.uncertain_label.style().polish(self.uncertain_label)
 
     def _queue_ai_preview(self) -> None:
         self.preview_timer.start()

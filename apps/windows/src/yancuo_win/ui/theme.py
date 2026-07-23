@@ -1,69 +1,189 @@
-"""研错库浅色蓝白主题（飞书 / 现代桌面工具风格）。"""
+"""Application-wide light/dark theme tokens and live theme switching."""
 
 from __future__ import annotations
 
-from PySide6.QtGui import QFont
+from dataclasses import dataclass
+
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import QApplication
 
-# 设计令牌
-COLOR_BG = "#F5F7FA"
-COLOR_SIDEBAR = "#EEF2F8"
-COLOR_CARD = "#FFFFFF"
-COLOR_BORDER = "#E5EAF2"
-COLOR_TEXT = "#1F2329"
-COLOR_MUTED = "#8F959E"
-COLOR_PRIMARY = "#3370FF"
-COLOR_PRIMARY_HOVER = "#2860E1"
-COLOR_PRIMARY_PRESSED = "#1F54C9"
-COLOR_DANGER = "#F54A45"
-COLOR_DANGER_BG = "#FEF0F0"
-COLOR_NAV_ACTIVE = "#3370FF"
-COLOR_NAV_ACTIVE_TEXT = "#FFFFFF"
-COLOR_LIST_HOVER = "#F0F4FF"
-COLOR_LIST_SELECTED = "#E8F0FF"
+THEME_MODES = {"system", "light", "dark"}
 
 
-def app_stylesheet() -> str:
+@dataclass(frozen=True)
+class ThemeTokens:
+    name: str
+    bg: str
+    sidebar: str
+    card: str
+    border: str
+    text: str
+    muted: str
+    primary: str
+    primary_hover: str
+    primary_pressed: str
+    danger: str
+    danger_bg: str
+    danger_border: str
+    nav_text: str
+    list_hover: str
+    list_selected: str
+    input_disabled: str
+    upload_bg: str
+    hover_border: str
+    progress_bg: str
+    scrollbar: str
+    chip_bg: str
+    chip_text: str
+    tag_bg: str
+    tag_text: str
+    hidden_bg: str
+    fallback_bg: str
+    fallback_text: str
+
+
+LIGHT_THEME = ThemeTokens(
+    name="light",
+    bg="#F5F7FA",
+    sidebar="#EEF2F8",
+    card="#FFFFFF",
+    border="#E5EAF2",
+    text="#1F2329",
+    muted="#8F959E",
+    primary="#3370FF",
+    primary_hover="#2860E1",
+    primary_pressed="#1F54C9",
+    danger="#F54A45",
+    danger_bg="#FEF0F0",
+    danger_border="#F8B9B7",
+    nav_text="#FFFFFF",
+    list_hover="#F0F4FF",
+    list_selected="#E8F0FF",
+    input_disabled="#F0F2F5",
+    upload_bg="#F8FAFD",
+    hover_border="#C9D4E8",
+    progress_bg="#EEF2F8",
+    scrollbar="#D0D7E2",
+    chip_bg="#EAF0FF",
+    chip_text="#315FB8",
+    tag_bg="#EEF1F5",
+    tag_text="#566074",
+    hidden_bg="#FBFCFE",
+    fallback_bg="#FFF3D9",
+    fallback_text="#744B00",
+)
+
+DARK_THEME = ThemeTokens(
+    name="dark",
+    bg="#11151C",
+    sidebar="#171C24",
+    card="#1E2530",
+    border="#303A49",
+    text="#E8EDF5",
+    muted="#9AA6B7",
+    primary="#5B8CFF",
+    primary_hover="#78A0FF",
+    primary_pressed="#4776DB",
+    danger="#FF7875",
+    danger_bg="#3B2428",
+    danger_border="#7A3F45",
+    nav_text="#FFFFFF",
+    list_hover="#273142",
+    list_selected="#2B3D61",
+    input_disabled="#272E39",
+    upload_bg="#181E27",
+    hover_border="#465367",
+    progress_bg="#202733",
+    scrollbar="#465164",
+    chip_bg="#263858",
+    chip_text="#A9C2FF",
+    tag_bg="#2A313C",
+    tag_text="#BAC4D2",
+    hidden_bg="#191F29",
+    fallback_bg="#3B321F",
+    fallback_text="#FFD88A",
+)
+
+
+def normalize_theme_mode(mode: str) -> str:
+    normalized = str(mode or "system").strip().lower()
+    if normalized not in THEME_MODES:
+        raise ValueError(f"unsupported theme mode: {mode}")
+    return normalized
+
+
+def resolve_theme_mode(
+    mode: str,
+    system_color_scheme: Qt.ColorScheme | None = None,
+) -> str:
+    """Resolve system/light/dark into the concrete palette to render."""
+
+    normalized = normalize_theme_mode(mode)
+    if normalized != "system":
+        return normalized
+    return (
+        "dark"
+        if system_color_scheme == Qt.ColorScheme.Dark
+        else "light"
+    )
+
+
+def theme_tokens(theme: str) -> ThemeTokens:
+    return DARK_THEME if normalize_theme_mode(theme) == "dark" else LIGHT_THEME
+
+
+def current_theme_name(app: QApplication | None = None) -> str:
+    app = app or QApplication.instance()
+    if app is None:
+        return "light"
+    value = app.property("yancuoResolvedTheme")
+    return "dark" if value == "dark" else "light"
+
+
+def app_stylesheet(theme: str = "light") -> str:
+    t = theme_tokens(theme)
     return f"""
     QWidget {{
-        color: {COLOR_TEXT};
+        color: {t.text};
         font-size: 13px;
     }}
-    QMainWindow, QDialog {{
-        background: {COLOR_BG};
+    QMainWindow, QDialog, QMenu, QTabWidget::pane {{
+        background: {t.bg};
     }}
     QScrollArea {{
         background: transparent;
         border: none;
     }}
     QStatusBar {{
-        background: {COLOR_CARD};
-        color: {COLOR_MUTED};
-        border-top: 1px solid {COLOR_BORDER};
+        background: {t.card};
+        color: {t.muted};
+        border-top: 1px solid {t.border};
         padding: 4px 10px;
     }}
-    QToolTip {{
-        background: {COLOR_CARD};
-        color: {COLOR_TEXT};
-        border: 1px solid {COLOR_BORDER};
+    QToolTip, QMenu {{
+        background: {t.card};
+        color: {t.text};
+        border: 1px solid {t.border};
         padding: 6px 8px;
-        border-radius: 6px;
+    }}
+    QMenu::item:selected {{
+        background: {t.list_selected};
     }}
 
-    /* —— 侧栏 —— */
     QFrame#AppSidebar {{
-        background: {COLOR_SIDEBAR};
-        border-right: 1px solid {COLOR_BORDER};
+        background: {t.sidebar};
+        border-right: 1px solid {t.border};
     }}
     QLabel#BrandTitle {{
         font-size: 18px;
         font-weight: 700;
-        color: {COLOR_TEXT};
+        color: {t.text};
         padding: 4px 0 0 0;
     }}
     QLabel#BrandSubtitle {{
         font-size: 12px;
-        color: {COLOR_MUTED};
+        color: {t.muted};
         padding-bottom: 8px;
     }}
     QListWidget#MainNav {{
@@ -77,42 +197,52 @@ def app_stylesheet() -> str:
         padding: 8px 14px;
         margin: 2px 0;
         border-radius: 8px;
-        color: {COLOR_TEXT};
+        color: {t.text};
     }}
     QListWidget#MainNav::item:hover {{
-        background: rgba(51, 112, 255, 0.08);
+        background: {t.list_hover};
     }}
     QListWidget#MainNav::item:selected {{
-        background: {COLOR_NAV_ACTIVE};
-        color: {COLOR_NAV_ACTIVE_TEXT};
+        background: {t.primary};
+        color: {t.nav_text};
         font-weight: 600;
     }}
 
-    /* —— 卡片与页面 —— */
     QFrame#PageRoot, QWidget#PageRoot {{
-        background: {COLOR_BG};
+        background: {t.bg};
     }}
     QFrame#CardFrame {{
-        background: {COLOR_CARD};
-        border: 1px solid {COLOR_BORDER};
+        background: {t.card};
+        border: 1px solid {t.border};
         border-radius: 12px;
     }}
     QLabel#PageTitle {{
         font-size: 20px;
         font-weight: 700;
-        color: {COLOR_TEXT};
+        color: {t.text};
     }}
     QLabel#PageHint, QLabel#MutedLabel {{
-        color: {COLOR_MUTED};
+        color: {t.muted};
         font-size: 12px;
     }}
     QLabel#SectionTitle {{
         font-size: 14px;
         font-weight: 600;
-        color: {COLOR_TEXT};
+        color: {t.text};
+    }}
+    QLabel#ImagePreview {{
+        background: {t.upload_bg};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+    }}
+    QLabel#DangerLabel {{
+        color: {t.danger};
+    }}
+    QLabel#WarningLabel {{
+        color: {t.fallback_text};
     }}
     QLabel#HeroBanner {{
-        background: {COLOR_PRIMARY};
+        background: {t.primary};
         color: white;
         border-radius: 12px;
         padding: 18px 20px;
@@ -120,15 +250,14 @@ def app_stylesheet() -> str:
         font-weight: 600;
     }}
     QFrame#ContextBar {{
-        background: {COLOR_CARD};
-        border: 1px solid {COLOR_BORDER};
+        background: {t.card};
+        border: 1px solid {t.border};
         border-radius: 10px;
     }}
 
-    /* —— 次级筛选 —— */
-    QListWidget#FilterNav {{
-        background: {COLOR_CARD};
-        border: 1px solid {COLOR_BORDER};
+    QListWidget#FilterNav, QListWidget#ProblemList {{
+        background: {t.card};
+        border: 1px solid {t.border};
         border-radius: 12px;
         outline: none;
         padding: 6px;
@@ -139,150 +268,185 @@ def app_stylesheet() -> str:
         margin: 1px 0;
         border-radius: 8px;
     }}
-    QListWidget#FilterNav::item:hover {{
-        background: {COLOR_LIST_HOVER};
-    }}
-    QListWidget#FilterNav::item:selected {{
-        background: {COLOR_LIST_SELECTED};
-        color: {COLOR_PRIMARY};
-        font-weight: 600;
-    }}
-
-    /* —— 题列表 —— */
-    QListWidget#ProblemList {{
-        background: {COLOR_CARD};
-        border: 1px solid {COLOR_BORDER};
-        border-radius: 12px;
-        outline: none;
-        padding: 4px;
-    }}
     QListWidget#ProblemList::item {{
         min-height: 52px;
         padding: 10px 12px;
         margin: 2px 4px;
         border-radius: 8px;
-        border-bottom: 1px solid transparent;
     }}
-    QListWidget#ProblemList::item:hover {{
-        background: {COLOR_LIST_HOVER};
+    QListWidget#FilterNav::item:hover, QListWidget#ProblemList::item:hover {{
+        background: {t.list_hover};
     }}
-    QListWidget#ProblemList::item:selected {{
-        background: {COLOR_LIST_SELECTED};
-        color: {COLOR_TEXT};
+    QListWidget#FilterNav::item:selected, QListWidget#ProblemList::item:selected {{
+        background: {t.list_selected};
+        color: {t.text};
+        font-weight: 600;
     }}
     QListWidget#UploadFileList {{
-        background: #F8FAFD;
-        border: 1px solid {COLOR_BORDER};
+        background: {t.upload_bg};
+        border: 1px solid {t.border};
         border-radius: 8px;
         outline: none;
         padding: 6px;
     }}
     QListWidget#UploadFileList::item {{
-        background: {COLOR_CARD};
-        border: 1px solid {COLOR_BORDER};
+        background: {t.card};
+        border: 1px solid {t.border};
         border-radius: 8px;
         padding: 6px;
         margin: 3px;
     }}
     QListWidget#UploadFileList::item:hover {{
-        background: {COLOR_LIST_HOVER};
-        border-color: #C9D4E8;
+        background: {t.list_hover};
+        border-color: {t.hover_border};
     }}
     QListWidget#UploadFileList::item:selected {{
-        background: {COLOR_LIST_SELECTED};
-        border-color: {COLOR_PRIMARY};
-        color: {COLOR_TEXT};
+        background: {t.list_selected};
+        border-color: {t.primary};
+        color: {t.text};
     }}
 
-    /* —— 输入 —— */
     QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {{
-        background: {COLOR_CARD};
-        border: 1px solid {COLOR_BORDER};
+        background: {t.card};
+        color: {t.text};
+        border: 1px solid {t.border};
         border-radius: 8px;
         padding: 7px 10px;
-        selection-background-color: {COLOR_LIST_SELECTED};
+        selection-background-color: {t.list_selected};
     }}
-    QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{
-        border: 1px solid {COLOR_PRIMARY};
+    QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
+        border: 1px solid {t.primary};
+    }}
+    QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
+    QSpinBox:disabled, QComboBox:disabled {{
+        color: {t.muted};
+        background: {t.input_disabled};
+    }}
+    QComboBox QAbstractItemView {{
+        background: {t.card};
+        color: {t.text};
+        border: 1px solid {t.border};
+        selection-background-color: {t.list_selected};
+    }}
+    QTreeWidget, QTableWidget, QTableView {{
+        background: {t.card};
+        alternate-background-color: {t.sidebar};
+        color: {t.text};
+        border: 1px solid {t.border};
+        gridline-color: {t.border};
+        selection-background-color: {t.list_selected};
+        selection-color: {t.text};
+    }}
+    QHeaderView::section {{
+        background: {t.sidebar};
+        color: {t.text};
+        border: none;
+        border-right: 1px solid {t.border};
+        border-bottom: 1px solid {t.border};
+        padding: 6px 8px;
     }}
     QLineEdit#SearchEdit {{
-        background: {COLOR_CARD};
-        border: 1px solid {COLOR_BORDER};
+        background: {t.card};
+        border: 1px solid {t.border};
         border-radius: 10px;
         padding: 8px 14px;
         min-height: 20px;
     }}
 
-    /* —— 按钮 —— */
     QPushButton {{
-        background: {COLOR_CARD};
-        border: 1px solid {COLOR_BORDER};
+        background: {t.card};
+        color: {t.text};
+        border: 1px solid {t.border};
         border-radius: 8px;
         padding: 8px 14px;
         min-height: 18px;
     }}
     QPushButton:hover {{
-        background: {COLOR_LIST_HOVER};
-        border-color: #C9D4E8;
+        background: {t.list_hover};
+        border-color: {t.hover_border};
     }}
     QPushButton:pressed {{
-        background: {COLOR_LIST_SELECTED};
+        background: {t.list_selected};
     }}
     QPushButton:disabled {{
-        color: {COLOR_MUTED};
-        background: #F0F2F5;
+        color: {t.muted};
+        background: {t.input_disabled};
     }}
     QPushButton#PrimaryButton {{
-        background: {COLOR_PRIMARY};
+        background: {t.primary};
         color: white;
         border: none;
         font-weight: 600;
     }}
     QPushButton#PrimaryButton:hover {{
-        background: {COLOR_PRIMARY_HOVER};
+        background: {t.primary_hover};
     }}
     QPushButton#PrimaryButton:pressed {{
-        background: {COLOR_PRIMARY_PRESSED};
+        background: {t.primary_pressed};
     }}
     QPushButton#DangerButton {{
-        background: {COLOR_CARD};
-        color: {COLOR_DANGER};
-        border: 1px solid #F8B9B7;
+        background: {t.card};
+        color: {t.danger};
+        border: 1px solid {t.danger_border};
     }}
     QPushButton#DangerButton:hover {{
-        background: {COLOR_DANGER_BG};
+        background: {t.danger_bg};
     }}
     QPushButton#GhostButton {{
         background: transparent;
         border: none;
-        color: {COLOR_PRIMARY};
+        color: {t.primary};
         padding: 6px 10px;
     }}
     QPushButton#GhostButton:hover {{
-        background: {COLOR_LIST_HOVER};
+        background: {t.list_hover};
         border-radius: 8px;
     }}
 
+    QTabWidget::pane {{
+        border: 1px solid {t.border};
+        background: {t.card};
+    }}
+    QTabBar::tab {{
+        background: {t.sidebar};
+        color: {t.muted};
+        border: 1px solid {t.border};
+        padding: 8px 14px;
+    }}
+    QTabBar::tab:selected {{
+        background: {t.card};
+        color: {t.primary};
+        border-bottom-color: {t.card};
+        font-weight: 600;
+    }}
+    QTabBar::tab:hover:!selected {{
+        background: {t.list_hover};
+        color: {t.text};
+    }}
+    QCheckBox::indicator, QRadioButton::indicator {{
+        width: 16px;
+        height: 16px;
+    }}
+
     QProgressBar {{
-        background: #EEF2F8;
-        border: 1px solid {COLOR_BORDER};
+        background: {t.progress_bg};
+        border: 1px solid {t.border};
         border-radius: 7px;
         min-height: 14px;
         text-align: center;
-        color: {COLOR_TEXT};
+        color: {t.text};
     }}
     QProgressBar::chunk {{
-        background: {COLOR_PRIMARY};
+        background: {t.primary};
         border-radius: 6px;
     }}
-
     QScrollBar:vertical {{
         background: transparent;
         width: 10px;
         margin: 2px;
     }}
     QScrollBar::handle:vertical {{
-        background: #D0D7E2;
+        background: {t.scrollbar};
         border-radius: 5px;
         min-height: 24px;
     }}
@@ -296,10 +460,97 @@ def app_stylesheet() -> str:
     """
 
 
-def apply_app_theme(app: QApplication) -> None:
+def _app_palette(tokens: ThemeTokens) -> QPalette:
+    palette = QPalette()
+    roles = {
+        QPalette.ColorRole.Window: tokens.bg,
+        QPalette.ColorRole.WindowText: tokens.text,
+        QPalette.ColorRole.Base: tokens.card,
+        QPalette.ColorRole.AlternateBase: tokens.sidebar,
+        QPalette.ColorRole.ToolTipBase: tokens.card,
+        QPalette.ColorRole.ToolTipText: tokens.text,
+        QPalette.ColorRole.Text: tokens.text,
+        QPalette.ColorRole.Button: tokens.card,
+        QPalette.ColorRole.ButtonText: tokens.text,
+        QPalette.ColorRole.BrightText: "#FFFFFF",
+        QPalette.ColorRole.Link: tokens.primary,
+        QPalette.ColorRole.Highlight: tokens.primary,
+        QPalette.ColorRole.HighlightedText: tokens.nav_text,
+        QPalette.ColorRole.PlaceholderText: tokens.muted,
+    }
+    for role, color in roles.items():
+        palette.setColor(role, QColor(color))
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.Text,
+        QColor(tokens.muted),
+    )
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.ButtonText,
+        QColor(tokens.muted),
+    )
+    return palette
+
+
+class ThemeManager(QObject):
+    """Apply one resolved palette to Qt widgets and embedded HTML readers."""
+
+    theme_changed = Signal(str)
+
+    def __init__(self, app: QApplication, mode: str = "system") -> None:
+        super().__init__(app)
+        self.app = app
+        self.mode = normalize_theme_mode(mode)
+        self.resolved = ""
+        hints = app.styleHints()
+        if hasattr(hints, "colorSchemeChanged"):
+            hints.colorSchemeChanged.connect(self._on_system_theme_changed)
+        self.apply()
+
+    def set_mode(self, mode: str) -> str:
+        self.mode = normalize_theme_mode(mode)
+        self.app.setProperty("yancuoThemeMode", self.mode)
+        return self.apply()
+
+    def apply(self) -> str:
+        hints = self.app.styleHints()
+        scheme = hints.colorScheme() if hasattr(hints, "colorScheme") else None
+        resolved = resolve_theme_mode(self.mode, scheme)
+        tokens = theme_tokens(resolved)
+        self.app.setPalette(_app_palette(tokens))
+        self.app.setStyleSheet(app_stylesheet(resolved))
+        self.app.setProperty("yancuoThemeMode", self.mode)
+        self.app.setProperty("yancuoResolvedTheme", resolved)
+        changed = resolved != self.resolved
+        self.resolved = resolved
+        if changed:
+            self.theme_changed.emit(resolved)
+        return resolved
+
+    def _on_system_theme_changed(self, _scheme: Qt.ColorScheme) -> None:
+        if self.mode == "system":
+            self.apply()
+
+
+def get_theme_manager(app: QApplication | None = None) -> ThemeManager | None:
+    app = app or QApplication.instance()
+    return getattr(app, "_yancuo_theme_manager", None) if app else None
+
+
+def apply_app_theme(
+    app: QApplication,
+    mode: str = "system",
+) -> ThemeManager:
     font = QFont("Microsoft YaHei UI", 10)
     if not font.exactMatch():
         font = QFont("Segoe UI", 10)
     app.setFont(font)
     app.setStyle("Fusion")
-    app.setStyleSheet(app_stylesheet())
+    manager = get_theme_manager(app)
+    if manager is None:
+        manager = ThemeManager(app, mode)
+        app._yancuo_theme_manager = manager
+    else:
+        manager.set_mode(mode)
+    return manager
