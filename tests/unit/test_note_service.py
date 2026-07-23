@@ -76,6 +76,20 @@ def test_note_tags_and_lifecycle_protect_trashed_documents(note_bundle) -> None:
     assert notes.get_note(note.id) is None
 
 
+def test_delete_note_block_compacts_the_remaining_order(note_bundle) -> None:
+    _runtime, _app, notes, _subject, _chapter = note_bundle
+    note = notes.create_note(title="块删除")
+    first = notes.add_block(note.id, block_type="text", content_markdown="第一块")
+    second = notes.add_block(note.id, block_type="text", content_markdown="第二块")
+
+    notes.delete_block(first.id)
+
+    remaining = notes.get_note(note.id)
+    assert remaining is not None
+    assert [block.id for block in remaining.blocks] == [second.id]
+    assert remaining.blocks[0].sort_order == 0
+
+
 def test_note_block_validation_and_reorder_must_be_complete(note_bundle) -> None:
     _runtime, _app, notes, _subject, _chapter = note_bundle
     note = notes.create_note(title="边界")

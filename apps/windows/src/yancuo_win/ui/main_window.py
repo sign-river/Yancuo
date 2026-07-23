@@ -39,6 +39,7 @@ from yancuo_win.application.ai_search_service import (
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.cloud_service import CloudBackupService
 from yancuo_win.application.intake_service import ProblemIntakeService
+from yancuo_win.application.note_service import NoteService
 from yancuo_win.application.search_service import SearchIndexService
 from yancuo_win.application.search_spec import SearchBoundary
 from yancuo_win.application.services import AppServices, ProblemFilter
@@ -53,6 +54,7 @@ from yancuo_win.tasks.worker import AIJobWorker
 from yancuo_win.tasks.search_worker import AiSearchWorker
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.intake_page import IntakePage
+from yancuo_win.ui.note_page import NotePage
 from yancuo_win.ui.problem_detail import ProblemDetailPage
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
@@ -70,9 +72,10 @@ _PAGE_DASHBOARD = 0
 _PAGE_INTAKE = 1
 _PAGE_LIBRARY = 2
 _PAGE_REVIEW = 3
-_PAGE_DATA = 4
-_PAGE_SETTINGS = 5
-_PAGE_PROBLEM_DETAIL = 6
+_PAGE_NOTES = 4
+_PAGE_DATA = 5
+_PAGE_SETTINGS = 6
+_PAGE_PROBLEM_DETAIL = 7
 
 _STATUS_LABELS = {
     "inbox": "收件箱",
@@ -92,6 +95,7 @@ class MainWindow(QMainWindow):
         self.ai_search = AiSearchService(runtime)
         self.ai = AIService(runtime)
         self.intake = ProblemIntakeService(runtime)
+        self.notes = NoteService(runtime)
         self.workspace = WorkspaceService(runtime)
         self.ebpack = EbpackService(runtime)
         self.gmshare = GmshareService(runtime)
@@ -160,6 +164,12 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.intake_page)
         self.stack.addWidget(self._build_library_page())
         self.stack.addWidget(self._build_review_page())
+        self.note_page = NotePage(self.notes)
+        self.note_page.status_message.connect(
+            lambda message: self.statusBar().showMessage(message)
+        )
+        self.note_page.notes_changed.connect(self._refresh_focus_pages)
+        self.stack.addWidget(self.note_page)
         self.stack.addWidget(self._build_data_page())
         self.stack.addWidget(self._build_settings_page())
         self.problem_detail_page = ProblemDetailPage()
@@ -213,6 +223,7 @@ class MainWindow(QMainWindow):
             ("录题", _PAGE_INTAKE),
             ("题库", _PAGE_LIBRARY),
             ("复习", _PAGE_REVIEW),
+            ("笔记", _PAGE_NOTES),
             ("数据与同步", _PAGE_DATA),
             ("设置", _PAGE_SETTINGS),
         ):
@@ -243,6 +254,8 @@ class MainWindow(QMainWindow):
         elif page == _PAGE_REVIEW:
             self.review_page.reload_queue(preserve_current=True)
             self._refresh_focus_pages()
+        elif page == _PAGE_NOTES:
+            self.note_page.reload()
         elif page == _PAGE_SETTINGS:
             self._refresh_focus_pages()
 
@@ -573,6 +586,7 @@ class MainWindow(QMainWindow):
         self.library_nav_stack.setCurrentIndex(0 if view == "browse" else 1)
         self.refresh_nav()
         self.refresh_problems()
+        self.note_page.reload()
 
     def _library_more_menu(self) -> None:
         from PySide6.QtWidgets import QMenu

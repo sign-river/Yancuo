@@ -107,6 +107,7 @@ class NoteService:
                 target = validate_status(str(values["status"]))
                 assert_transition(note.status, target)
                 note.status = target
+                note.deleted_at = utcnow() if target == "trashed" else None
             if "title" in values:
                 title = str(values["title"]).strip()
                 if len(title) > 256:
@@ -211,6 +212,32 @@ class NoteService:
             session.refresh(block)
             session.expunge(block)
             return block
+
+    def delete_block(self, block_id: str) -> None:
+        with self.session() as session:
+            block = session.scalar(
+                select(NoteBlock)
+                .where(NoteBlock.id == block_id)
+                .options(selectinload(NoteBlock.document))
+            )
+            if block is None:
+                return
+            note = block.document
+            self._assert_editable(note)
+            session.delete(block)
+            session.flush()
+            remaining = list(
+                session.scalars(
+                    select(NoteBlock)
+                    .where(NoteBlock.note_document_id == note.id)
+                    .order_by(NoteBlock.sort_order, NoteBlock.created_at)
+                ).all()
+            )
+            for index, item in enumerate(remaining):
+                item.sort_order = index
+            note.revision += 1
+            note.updated_at = utcnow()
+            session.commit()
 
     def reorder_blocks(self, note_id: str, block_ids: list[str]) -> NoteDocument:
         with self.session() as session:
