@@ -16,6 +16,7 @@ from typing import Any
 
 from yancuo_win.ai.base import (
     AIProvider,
+    JsonCompletionResult,
     StructuredCandidate,
     StructuredResult,
     normalize_region,
@@ -242,6 +243,43 @@ class OpenAICompatibleProvider(AIProvider):
                 "request": request_ms,
                 "response_parse": response_parse_ms,
             },
+            diagnostics={"request_attempts": self._last_request_attempts},
+        )
+
+    def complete_json(
+        self,
+        *,
+        request: dict[str, Any],
+        model: str,
+        timeout_seconds: int,
+    ) -> JsonCompletionResult:
+        payload = dict(request)
+        payload["model"] = model
+        body = self._request_json(
+            "/chat/completions",
+            method="POST",
+            timeout_seconds=timeout_seconds,
+            payload=payload,
+        )
+        try:
+            raw_text = body["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise DomainError("AI 结构化文本响应格式无效") from exc
+        if not isinstance(raw_text, str):
+            raise DomainError("AI 结构化文本响应内容必须是 JSON 文本")
+        usage = body.get("usage") or {}
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens = int(
+            usage.get("total_tokens") or prompt_tokens + completion_tokens
+        )
+        return JsonCompletionResult(
+            raw_text=raw_text,
+            model=str(body.get("model") or model),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost_estimate=round(total_tokens * 0.00002, 6),
             diagnostics={"request_attempts": self._last_request_attempts},
         )
 

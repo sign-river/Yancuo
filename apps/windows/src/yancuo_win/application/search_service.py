@@ -417,6 +417,68 @@ class SearchIndexService:
             for row in rows
         )
 
+    def browse(
+        self,
+        *,
+        scope: KnowledgeScope | None = None,
+        statuses: tuple[str, ...] = ("active",),
+        limit: int | None = 200,
+    ) -> tuple[SearchHit, ...]:
+        """Return recent local rows inside a trusted boundary without text matching."""
+
+        if not statuses or (limit is not None and limit < 1):
+            return ()
+        where = ["d.status IN :statuses"]
+        parameters: dict[str, object] = {"statuses": statuses}
+        limit_clause = ""
+        if limit is not None:
+            parameters["limit"] = min(int(limit), 10_000)
+            limit_clause = "LIMIT :limit"
+        if scope is not None:
+            if scope.subject_id:
+                where.append("d.subject_id = :subject_id")
+                parameters["subject_id"] = scope.subject_id
+            if scope.only_uncategorized:
+                where.append("d.chapter_id IS NULL")
+            elif scope.chapter_id:
+                chapter_ids = (
+                    self.app.chapter_subtree_ids(scope.chapter_id)
+                    if scope.include_descendants
+                    else (scope.chapter_id,)
+                )
+                where.append("d.chapter_id IN :chapter_ids")
+                parameters["chapter_ids"] = chapter_ids
+        statement = text(
+            f"""
+            SELECT
+                d.problem_id,
+                d.title,
+                substr(d.body, 1, 160) AS snippet,
+                d.knowledge_path,
+                d.status,
+                0.0 AS score
+            FROM search_documents AS d
+            WHERE {' AND '.join(where)}
+            ORDER BY d.updated_at DESC
+            {limit_clause}
+            """
+        ).bindparams(bindparam("statuses", expanding=True))
+        if "chapter_ids" in parameters:
+            statement = statement.bindparams(bindparam("chapter_ids", expanding=True))
+        with self.runtime.engine.connect() as connection:
+            rows = connection.execute(statement, parameters).mappings().all()
+        return tuple(
+            SearchHit(
+                problem_id=row["problem_id"],
+                title=row["title"],
+                snippet=row["snippet"] or "",
+                knowledge_path=row["knowledge_path"],
+                status=row["status"],
+                score=0.0,
+            )
+            for row in rows
+        )
+
 
 def _capture_search_changes(
     session: Session,

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+from typing import Any
 
-from yancuo_win.ai.base import AIProvider, StructuredResult
+from yancuo_win.ai.base import AIProvider, JsonCompletionResult, StructuredResult
 
 
 class MockProvider(AIProvider):
@@ -44,5 +46,57 @@ class MockProvider(AIProvider):
             uncertain_fields=uncertain,
             raw_text=str(fields),
             cost_estimate=0.0,
+            model=model or "mock-v1",
+        )
+
+    def complete_json(
+        self,
+        *,
+        request: dict[str, Any],
+        model: str,
+        timeout_seconds: int,
+    ) -> JsonCompletionResult:
+        del timeout_seconds
+        response_name = (
+            request.get("response_format", {})
+            .get("json_schema", {})
+            .get("name", "")
+        )
+        messages = request.get("messages") or []
+        user_content = str(messages[-1].get("content") or "") if messages else ""
+        if response_name == "yancuo_search_spec":
+            try:
+                query = str(json.loads(user_content).get("query") or "").strip()
+            except (json.JSONDecodeError, AttributeError):
+                query = user_content.strip()
+            payload = {
+                "keywords": [query] if query else [],
+                "semantic_intent": query,
+                "limit": 10,
+            }
+        elif response_name == "yancuo_search_rerank":
+            ids: list[str] = []
+            for line in user_content.splitlines():
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                candidate_id = item.get("id") if isinstance(item, dict) else None
+                if isinstance(candidate_id, str) and candidate_id.startswith("problem_"):
+                    ids.append(candidate_id)
+            payload = {
+                "matches": [
+                    {
+                        "id": candidate_id,
+                        "score": max(0.1, 1.0 - index * 0.05),
+                        "reason": "Mock：本地候选与搜索描述匹配",
+                    }
+                    for index, candidate_id in enumerate(ids)
+                ]
+            }
+        else:
+            raise NotImplementedError("Mock 不支持该结构化文本请求")
+        return JsonCompletionResult(
+            raw_text=json.dumps(payload, ensure_ascii=False),
             model=model or "mock-v1",
         )

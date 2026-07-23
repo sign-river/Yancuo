@@ -208,6 +208,7 @@ class CompiledSearchPlan:
         problems: tuple[Problem, ...] | list[Problem],
         *,
         now: datetime | None = None,
+        limit: int | None = None,
     ) -> tuple[Problem, ...]:
         """Apply only allowlisted predicates to already loaded local candidates."""
 
@@ -224,7 +225,8 @@ class CompiledSearchPlan:
                 key=lambda item: (item.priority, _aware(item.updated_at)),
                 reverse=True,
             )
-        return tuple(filtered[: self.result_limit])
+        effective_limit = self.result_limit if limit is None else max(0, limit)
+        return tuple(filtered[:effective_limit])
 
 
 class SearchSpecCompiler:

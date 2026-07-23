@@ -1,0 +1,52 @@
+{
+  "$defs": {
+    "RerankMatchSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "reason": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "score",
+        "reason"
+      ],
+      "title": "RerankMatchSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "matches": {
+      "items": {
+        "$ref": "#/$defs/RerankMatchSpec"
+      },
+      "maxItems": 20,
+      "title": "Matches",
+      "type": "array"
+    }
+  },
+  "required": [
+    "matches"
+  ],
+  "title": "RerankResponse",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yancuo.local/schemas/search-rerank-v1.json"
+}

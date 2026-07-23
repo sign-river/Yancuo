@@ -13,6 +13,7 @@ Windows / 安卓 / 云端共享的**唯一规范真相**。
 | `schemas/problem.schema.json`   | 工作区题目元数据 schema             |
 | `schemas/operation.schema.json` | 阶段 J Operation schema              |
 | `schemas/search-spec.schema.json` | AI 搜索意图白名单 schema；不含 SQL、状态或知识范围 |
+| `schemas/search-rerank.schema.json` | AI 候选重排 schema；返回 ID 必须由本地候选再次校验 |
 | `test-vectors/`                 | hash-v1 / ebpack-v1 / sync-v1        |
 
 变更流程：先改文档说明原因与兼容性 → 再改实现。

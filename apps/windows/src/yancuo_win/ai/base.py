@@ -57,6 +57,19 @@ class StructuredResult:
         ]
 
 
+@dataclass(frozen=True)
+class JsonCompletionResult:
+    """Raw structured-chat response plus provider metadata."""
+
+    raw_text: str
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cost_estimate: float = 0.0
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
 class AIProvider(ABC):
     name: str
 
@@ -64,6 +77,17 @@ class AIProvider(ABC):
         """Fail before a workflow creates staging data when setup is incomplete."""
 
         return None
+
+    def complete_json(
+        self,
+        *,
+        request: dict[str, Any],
+        model: str,
+        timeout_seconds: int,
+    ) -> JsonCompletionResult:
+        """Run a schema-constrained text request when the provider supports it."""
+
+        raise NotImplementedError(f"{self.name} 不支持结构化文本请求")
 
     @abstractmethod
     def structure_from_image(
