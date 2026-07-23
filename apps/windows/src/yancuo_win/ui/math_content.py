@@ -20,6 +20,27 @@ _MATH_PATTERN = re.compile(
     re.DOTALL,
 )
 
+# Conservative signal used only for fields that are expected to contain math.
+# It deliberately ignores arbitrary backslashes such as Windows paths.
+_BARE_LATEX_COMMAND_PATTERN = re.compile(
+    r"\\(?:"
+    r"begin|end|frac|dfrac|tfrac|sqrt|lim|sum|prod|int|iint|iiint|"
+    r"sin|cos|tan|cot|ln|log|exp|"
+    r"alpha|beta|gamma|delta|theta|lambda|mu|pi|sigma|phi|omega|infty|"
+    r"to|rightarrow|leftarrow|leftrightarrow|"
+    r"left|right|cdot|times|div|pm|mp|leq|geq|neq|approx|sim|equiv|"
+    r"quad|qquad|text|mathrm|mathbf|mathbb|mathcal|operatorname|"
+    r"overline|underline|hat|bar|vec|partial|nabla"
+    r")\b"
+)
+
+# Keep Chinese prose and common full-width punctuation outside formula chunks.
+# A matching chunk is converted only when it also contains a known command.
+_BARE_LATEX_CHUNK_PATTERN = re.compile(
+    r"[^\u3400-\u9fff，。！？；：“”‘’《》【】（）]+",
+    re.DOTALL,
+)
+
 
 def _plain_html(value: str) -> str:
     """Escape user content while retaining its intentional line layout."""
@@ -38,12 +59,40 @@ def _formula_html(latex: str, *, display: bool) -> str:
         return f'<code class="math-fallback{kind}">{html.escape(latex)}</code>'
 
 
-def render_math_text(value: str | None, *, empty: str = "（空）") -> str:
+def _render_plain_fragment(value: str, *, allow_bare_latex: bool) -> str:
+    if not allow_bare_latex or not _BARE_LATEX_COMMAND_PATTERN.search(value):
+        return _plain_html(value)
+
+    output: list[str] = []
+    cursor = 0
+    for match in _BARE_LATEX_CHUNK_PATTERN.finditer(value):
+        chunk = match.group(0)
+        if not _BARE_LATEX_COMMAND_PATTERN.search(chunk):
+            continue
+        output.append(_plain_html(value[cursor : match.start()]))
+        leading = chunk[: len(chunk) - len(chunk.lstrip())]
+        trailing = chunk[len(chunk.rstrip()) :]
+        formula = chunk.strip()
+        output.append(_plain_html(leading))
+        output.append(_formula_html(formula, display=False))
+        output.append(_plain_html(trailing))
+        cursor = match.end()
+    output.append(_plain_html(value[cursor:]))
+    return "".join(output)
+
+
+def render_math_text(
+    value: str | None,
+    *,
+    empty: str = "（空）",
+    allow_bare_latex: bool = False,
+) -> str:
     """Convert math delimiters to MathML and escape every non-math fragment.
 
     Supported delimiters are ``\\(...\\)``, ``\\[...\\]``, ``$...$`` and
     ``$$...$$``. Invalid formula fragments fall back to readable source text
-    instead of making the whole problem disappear.
+    instead of making the whole problem disappear. Formula-capable fields can
+    opt into conservative bare-LaTeX detection for legacy AI output.
     """
 
     text = str(value or "")
@@ -53,7 +102,12 @@ def render_math_text(value: str | None, *, empty: str = "（空）") -> str:
     output: list[str] = []
     cursor = 0
     for match in _MATH_PATTERN.finditer(text):
-        output.append(_plain_html(text[cursor : match.start()]))
+        output.append(
+            _render_plain_fragment(
+                text[cursor : match.start()],
+                allow_bare_latex=allow_bare_latex,
+            )
+        )
         display = bool(match.group("display_bracket") or match.group("display_dollar"))
         body = next(
             group
@@ -67,19 +121,39 @@ def render_math_text(value: str | None, *, empty: str = "（空）") -> str:
         )
         output.append(_formula_html(body, display=display))
         cursor = match.end()
-    output.append(_plain_html(text[cursor:]))
+    output.append(
+        _render_plain_fragment(
+            text[cursor:],
+            allow_bare_latex=allow_bare_latex,
+        )
+    )
     return "".join(output)
 
 
-def _contains_math(value: str | None) -> bool:
-    return bool(value and _MATH_PATTERN.search(value))
+def _contains_math(value: str | None, *, allow_bare_latex: bool = False) -> bool:
+    return bool(
+        value
+        and (
+            _MATH_PATTERN.search(value)
+            or (
+                allow_bare_latex
+                and _BARE_LATEX_COMMAND_PATTERN.search(value)
+            )
+        )
+    )
 
 
-def _section(title: str, value: str | None, *, empty: str = "（空）") -> str:
+def _section(
+    title: str,
+    value: str | None,
+    *,
+    empty: str = "（空）",
+    allow_bare_latex: bool = True,
+) -> str:
     return (
         '<section class="content-card">'
         f"<h2>{html.escape(title)}</h2>"
-        f'<div class="rich-text">{render_math_text(value, empty=empty)}</div>'
+        f'<div class="rich-text">{render_math_text(value, empty=empty, allow_bare_latex=allow_bare_latex)}</div>'
         "</section>"
     )
 
@@ -131,7 +205,7 @@ def build_problem_html(
     elif meta_parts:
         body.append(f'<div class="reader-meta meta-row">{"".join(meta_parts)}</div>')
     body.append(_section("题目", question))
-    if latex and not _contains_math(question):
+    if latex and not _contains_math(question, allow_bare_latex=True):
         body.append(
             '<section class="content-card formula-card"><h2>题目公式</h2>'
             f'<div class="rich-text">{_formula_html(latex, display=True)}</div></section>'

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -31,6 +31,7 @@ from yancuo_win.application.intake_service import ProblemIntakeService
 from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.application.sync_service import SyncService
 from yancuo_win.cloud.factory import get_cloud_provider
+from yancuo_win.data.models import Problem
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.import_export.gmshare import GmshareService
@@ -41,8 +42,8 @@ from yancuo_win.ui.intake_page import IntakePage
 from yancuo_win.ui.problem_detail import ProblemDetailPage
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
+from yancuo_win.ui.review_page import ReviewPage
 from yancuo_win.ui.settings_dialog import SettingsDialog
-from yancuo_win.ui.today_review import TodayReviewDialog
 from yancuo_win.ui.widgets import (
     CardFrame,
     button_row,
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
         self._selected_problem_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
         self._ctx_buttons: list[QPushButton] = []
+        self._detail_return_page = _PAGE_LIBRARY
 
         self.setWindowTitle("研错库")
         self.resize(1320, 840)
@@ -127,6 +129,25 @@ class MainWindow(QMainWindow):
         self.problem_detail_page = ProblemDetailPage()
         self.problem_detail_page.back_requested.connect(self._close_problem_detail)
         self.problem_detail_page.edit_requested.connect(self._edit_problem_from_detail)
+        self.problem_detail_page.previous_requested.connect(
+            lambda: self._move_problem_detail(-1)
+        )
+        self.problem_detail_page.next_requested.connect(
+            lambda: self._move_problem_detail(1)
+        )
+        self.problem_detail_page.schedule_review_requested.connect(
+            self._schedule_problem_from_detail
+        )
+        self.problem_detail_page.favorite_requested.connect(
+            self._favorite_problem_from_detail
+        )
+        self.problem_detail_page.archive_requested.connect(
+            self._archive_problem_from_detail
+        )
+        self.problem_detail_page.trash_requested.connect(self._trash_problem_from_detail)
+        self.problem_detail_page.restore_requested.connect(
+            self._restore_problem_from_detail
+        )
         self.stack.addWidget(self.problem_detail_page)
         layout.addWidget(self.stack, stretch=1)
 
@@ -183,7 +204,10 @@ class MainWindow(QMainWindow):
             self._refresh_focus_pages()
         elif page == _PAGE_LIBRARY:
             self.refresh_problems()
-        elif page in (_PAGE_REVIEW, _PAGE_SETTINGS):
+        elif page == _PAGE_REVIEW:
+            self.review_page.reload_queue(preserve_current=True)
+            self._refresh_focus_pages()
+        elif page == _PAGE_SETTINGS:
             self._refresh_focus_pages()
 
     def _on_main_nav_clicked(self, item: QListWidgetItem) -> None:
@@ -266,7 +290,7 @@ class MainWindow(QMainWindow):
 
     def _on_intake_committed(self, problem_id: str) -> None:
         self.refresh_nav()
-        self.refresh_problems()
+        self._refresh_problem_item(problem_id)
         self._refresh_focus_pages()
         self.status.showMessage(f"题目已入库：{problem_id}")
 
@@ -274,7 +298,7 @@ class MainWindow(QMainWindow):
         self._nav_mode = "active"
         self.main_nav.setCurrentRow(_PAGE_LIBRARY)
         self.refresh_nav()
-        self.refresh_problems()
+        self._refresh_problem_item(problem_id, select=True)
         for index in range(self.problem_list.count()):
             item = self.problem_list.item(index)
             if item.data(Qt.ItemDataRole.UserRole) == problem_id:
@@ -432,31 +456,13 @@ class MainWindow(QMainWindow):
     # —— 复习 / AI / 数据 / 设置页 ——
 
     def _build_review_page(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("PageRoot")
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(16)
-
-        title = QLabel("复习")
-        title.setObjectName("PageTitle")
-        lay.addWidget(title)
-
-        self.review_hero = QLabel("今日待复习")
-        self.review_hero.setObjectName("HeroBanner")
-        lay.addWidget(self.review_hero)
-
-        card = CardFrame()
-        card.add_title("今日复习")
-        card.add_hint("按计划复习错题，巩固薄弱点。可从题库多选后「加入复习」。")
-        btn_start = primary_button("开始今日复习")
-        btn_start.clicked.connect(self._today_review)
-        btn_due = QPushButton("查看题库中的待复习")
-        btn_due.clicked.connect(self._goto_due_in_library)
-        card.body.addLayout(button_row(btn_start, btn_due))
-        lay.addWidget(card)
-        lay.addStretch(1)
-        return page
+        self.review_page = ReviewPage(self.services)
+        self.review_page.status_message.connect(
+            lambda message: self.statusBar().showMessage(message)
+        )
+        self.review_page.open_problem_requested.connect(self._open_problem_detail)
+        self.review_page.queue_changed.connect(self._refresh_focus_pages)
+        return self.review_page
 
     def _build_data_page(self) -> QWidget:
         page = QWidget()
@@ -565,8 +571,6 @@ class MainWindow(QMainWindow):
             )
         except DomainError:
             due = 0
-        self.review_hero.setText(f"今日待复习  ·  {due} 题")
-
         ai = self.runtime.settings.ai
         active = self.services.count_problems("active")
         pending_changes = len(self.ai.list_open_review_items())
@@ -642,26 +646,127 @@ class MainWindow(QMainWindow):
             return ProblemFilter(status="active", due_for_review=True, query=q)
         return ProblemFilter(status=mode, query=q)
 
-    def refresh_problems(self) -> None:
-        self.problem_list.clear()
+    @staticmethod
+    def _problem_item_text(problem: Problem) -> str:
+        title = problem.title or "(无标题)"
+        status = _STATUS_LABELS.get(problem.status, problem.status)
+        tags = " · ".join(tag.name for tag in (problem.tags or []))
+        line2 = f"{status}  ·  P{problem.priority}"
+        if tags:
+            line2 += f"  ·  {tags}"
+        return f"{title}\n{line2}"
+
+    def _make_problem_item(self, problem: Problem) -> QListWidgetItem:
+        item = QListWidgetItem(self._problem_item_text(problem))
+        item.setData(Qt.ItemDataRole.UserRole, problem.id)
+        return item
+
+    def _find_problem_item(self, problem_id: str) -> tuple[int, QListWidgetItem | None]:
+        for index in range(self.problem_list.count()):
+            item = self.problem_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == problem_id:
+                return index, item
+        return -1, None
+
+    def refresh_problems(self, *, preserve_view: bool = True) -> None:
+        selected_ids = set(self._selected_ids()) if preserve_view else set()
+        current_item = self.problem_list.currentItem() if preserve_view else None
+        current_id = (
+            current_item.data(Qt.ItemDataRole.UserRole) if current_item else None
+        )
+        scroll_value = (
+            self.problem_list.verticalScrollBar().value() if preserve_view else 0
+        )
         try:
             problems = self.services.list_problems(self._filter_from_nav())
         except DomainError as exc:
             QMessageBox.warning(self, "筛选失败", str(exc))
             return
+        self.problem_list.blockSignals(True)
+        self.problem_list.clear()
         for p in problems:
-            title = p.title or "(无标题)"
-            status = _STATUS_LABELS.get(p.status, p.status)
-            tags = " · ".join(t.name for t in (p.tags or []))
-            line1 = f"{title}"
-            line2 = f"{status}  ·  P{p.priority}"
-            if tags:
-                line2 += f"  ·  {tags}"
-            item = QListWidgetItem(f"{line1}\n{line2}")
-            item.setData(Qt.ItemDataRole.UserRole, p.id)
+            item = self._make_problem_item(p)
             self.problem_list.addItem(item)
+            if p.id in selected_ids:
+                item.setSelected(True)
+            if p.id == current_id:
+                self.problem_list.setCurrentItem(item)
+        self.problem_list.blockSignals(False)
+        if preserve_view:
+            scrollbar = self.problem_list.verticalScrollBar()
+            QTimer.singleShot(
+                0,
+                lambda value=scroll_value, bar=scrollbar: bar.setValue(
+                    min(value, bar.maximum())
+                ),
+            )
+        self._on_problem_selected()
         self._update_status()
-        self._update_context_bar(bool(self.problem_list.selectedItems()))
+
+    def _refresh_problem_item(
+        self,
+        problem_id: str,
+        *,
+        select: bool = False,
+        update_summary: bool = True,
+    ) -> None:
+        """Update one visible row without rebuilding the library list."""
+
+        try:
+            matching = next(
+                (
+                    problem
+                    for problem in self.services.list_problems(self._filter_from_nav())
+                    if problem.id == problem_id
+                ),
+                None,
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "刷新失败", str(exc))
+            return
+
+        row, item = self._find_problem_item(problem_id)
+        self.problem_list.blockSignals(True)
+        if matching is None and item is not None:
+            was_current = item is self.problem_list.currentItem()
+            self.problem_list.takeItem(row)
+            if was_current and self.problem_list.count():
+                self.problem_list.setCurrentRow(min(row, self.problem_list.count() - 1))
+        elif matching is not None and item is None:
+            item = self._make_problem_item(matching)
+            self.problem_list.insertItem(0, item)
+        elif matching is not None and item is not None:
+            item.setText(self._problem_item_text(matching))
+        if select and item is not None and matching is not None:
+            self.problem_list.clearSelection()
+            self.problem_list.setCurrentItem(item)
+            item.setSelected(True)
+            self.problem_list.scrollToItem(item)
+        self.problem_list.blockSignals(False)
+        self._on_problem_selected()
+        if update_summary:
+            self._update_status()
+            self._refresh_focus_pages()
+
+    def _remove_problem_items(self, problem_ids: list[str]) -> None:
+        rows = sorted(
+            (
+                row
+                for problem_id in problem_ids
+                for row, item in [self._find_problem_item(problem_id)]
+                if item is not None
+            ),
+            reverse=True,
+        )
+        self.problem_list.blockSignals(True)
+        for row in rows:
+            self.problem_list.takeItem(row)
+        if not self.problem_list.selectedItems() and self.problem_list.count():
+            self.problem_list.setCurrentRow(min(rows[-1] if rows else 0, self.problem_list.count() - 1))
+        self.problem_list.blockSignals(False)
+        self._on_problem_selected()
+        self._update_status()
+        self._refresh_focus_pages()
 
     def _update_status(self) -> None:
         total = self.services.count_problems()
@@ -788,6 +893,22 @@ class MainWindow(QMainWindow):
                     None,
                 )
 
+        current_page = self.stack.currentIndex()
+        if current_page != _PAGE_PROBLEM_DETAIL:
+            self._detail_return_page = (
+                current_page if 0 <= current_page <= _PAGE_SETTINGS else _PAGE_LIBRARY
+            )
+        return_labels = {
+            _PAGE_DASHBOARD: "← 返回工作台",
+            _PAGE_INTAKE: "← 返回录题",
+            _PAGE_LIBRARY: "← 返回题库",
+            _PAGE_REVIEW: "← 返回复习",
+            _PAGE_DATA: "← 返回数据与同步",
+            _PAGE_SETTINGS: "← 返回设置",
+        }
+        self.problem_detail_page.set_back_text(
+            return_labels.get(self._detail_return_page, "← 返回")
+        )
         self._selected_problem_id = problem_id
         self.problem_detail_page.set_problem(
             problem,
@@ -795,12 +916,22 @@ class MainWindow(QMainWindow):
             subject_name=subject_name,
             chapter_name=chapter_name,
         )
+        if self._detail_return_page == _PAGE_REVIEW:
+            self.review_page.select_problem(problem_id)
+        elif self._detail_return_page == _PAGE_LIBRARY:
+            for index in range(self.problem_list.count()):
+                item = self.problem_list.item(index)
+                if item.data(Qt.ItemDataRole.UserRole) == problem_id:
+                    self.problem_list.setCurrentItem(item)
+                    self.problem_list.scrollToItem(item)
+                    break
         self.stack.setCurrentIndex(_PAGE_PROBLEM_DETAIL)
 
     def _close_problem_detail(self) -> None:
-        self.stack.setCurrentIndex(_PAGE_LIBRARY)
-        if self.main_nav.currentRow() != _PAGE_LIBRARY:
-            self.main_nav.setCurrentRow(_PAGE_LIBRARY)
+        target = self._detail_return_page
+        self.stack.setCurrentIndex(target)
+        if self.main_nav.currentRow() != target:
+            self.main_nav.setCurrentRow(target)
 
     def _edit_problem_from_detail(self, problem_id: str) -> None:
         self._open_editor(problem_id)
@@ -809,14 +940,97 @@ class MainWindow(QMainWindow):
         else:
             self._close_problem_detail()
 
+    def _detail_problem_ids(self) -> list[str]:
+        if self._detail_return_page == _PAGE_REVIEW:
+            return self.review_page.problem_ids()
+        return [
+            self.problem_list.item(index).data(Qt.ItemDataRole.UserRole)
+            for index in range(self.problem_list.count())
+        ]
+
+    def _detail_neighbor(self, delta: int) -> str | None:
+        current_id = self.problem_detail_page.problem_id
+        ids = self._detail_problem_ids()
+        if not current_id or current_id not in ids or len(ids) <= 1:
+            return None
+        index = ids.index(current_id)
+        return ids[(index + delta) % len(ids)]
+
+    def _move_problem_detail(self, delta: int) -> None:
+        neighbor = self._detail_neighbor(delta)
+        if neighbor:
+            self._open_problem_detail(neighbor)
+        else:
+            self.statusBar().showMessage("当前筛选中没有其他题目")
+
+    def _schedule_problem_from_detail(self, problem_id: str) -> None:
+        try:
+            self.services.schedule_initial_review(problem_id)
+            self.review_page.reload_queue(preserve_current=True)
+            self._open_problem_detail(problem_id)
+            self._refresh_focus_pages()
+            self.statusBar().showMessage("已加入今日复习")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法加入复习", str(exc))
+
+    def _favorite_problem_from_detail(self, problem_id: str, favorite: bool) -> None:
+        try:
+            self.services.update_problem(problem_id, {"is_favorite": favorite})
+            self._open_problem_detail(problem_id)
+            self.statusBar().showMessage("已收藏" if favorite else "已取消收藏")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法更新收藏", str(exc))
+
+    def _archive_problem_from_detail(self, problem_id: str) -> None:
+        neighbor = self._detail_neighbor(1)
+        try:
+            self.services.set_problem_status(problem_id, "archived")
+            self._after_detail_collection_change(neighbor, "题目已归档")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法归档", str(exc))
+
+    def _trash_problem_from_detail(self, problem_id: str) -> None:
+        if self.runtime.settings.application.confirm_before_delete:
+            if (
+                QMessageBox.question(self, "确认删除", "将当前题目移入回收站？")
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+        neighbor = self._detail_neighbor(1)
+        try:
+            self.services.trash_problem(problem_id)
+            self._after_detail_collection_change(neighbor, "题目已移入回收站")
+        except DomainError as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+
+    def _restore_problem_from_detail(self, problem_id: str) -> None:
+        neighbor = self._detail_neighbor(1)
+        try:
+            self.services.restore_problem(problem_id, to_status="active")
+            self._after_detail_collection_change(neighbor, "题目已恢复到正式题库")
+        except DomainError as exc:
+            QMessageBox.warning(self, "恢复失败", str(exc))
+
+    def _after_detail_collection_change(
+        self, neighbor_id: str | None, message: str
+    ) -> None:
+        changed_id = self.problem_detail_page.problem_id
+        if changed_id:
+            self._refresh_problem_item(changed_id)
+        self.review_page.reload_queue(preserve_current=True)
+        if neighbor_id and self.services.get_problem(neighbor_id):
+            self._open_problem_detail(neighbor_id)
+        else:
+            self._close_problem_detail()
+        self.statusBar().showMessage(message)
+
     def _open_editor(self, problem_id: str) -> None:
         p = self.services.get_problem(problem_id)
         if not p:
             return
         dlg = ProblemEditorDialog(self.services, p, self)
         if dlg.exec():
-            self.refresh_problems()
-            self._on_problem_selected()
+            self._refresh_problem_item(problem_id, select=True)
 
     def _promote_selected(self) -> None:
         pid = self._require_one()
@@ -824,7 +1038,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.services.promote_to_active(pid)
-            self.refresh_problems()
+            self._refresh_problem_item(pid, select=True)
         except DomainError as exc:
             QMessageBox.warning(self, "无法转入正式库", str(exc))
 
@@ -842,7 +1056,8 @@ class MainWindow(QMainWindow):
         try:
             for pid in ids:
                 self.services.trash_problem(pid)
-            self.refresh_all()
+            self._remove_problem_items(ids)
+            self.review_page.reload_queue(preserve_current=True)
         except DomainError as exc:
             QMessageBox.warning(self, "删除失败", str(exc))
 
@@ -852,7 +1067,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.services.restore_problem(pid, "inbox")
-            self.refresh_problems()
+            self._refresh_problem_item(pid)
         except DomainError as exc:
             QMessageBox.warning(self, "恢复失败", str(exc))
 
@@ -888,7 +1103,11 @@ class MainWindow(QMainWindow):
                 f"新建 {len(result['created'])} 题，跳过重复 {len(result['skipped'])} 个"
                 + (f"\n{tip}" if tip else ""),
             )
-            self.refresh_all()
+            self.refresh_nav()
+            for problem_id in result["created"]:
+                self._refresh_problem_item(problem_id, update_summary=False)
+            self._update_status()
+            self._refresh_focus_pages()
         except DomainError as exc:
             QMessageBox.warning(self, "导入失败", str(exc))
 
@@ -903,7 +1122,11 @@ class MainWindow(QMainWindow):
                 "导入完成",
                 f"新建 {len(result['created'])} 题，跳过重复 {len(result['skipped'])} 个",
             )
-            self.refresh_all()
+            self.refresh_nav()
+            for problem_id in result["created"]:
+                self._refresh_problem_item(problem_id, update_summary=False)
+            self._update_status()
+            self._refresh_focus_pages()
         except DomainError as exc:
             QMessageBox.warning(self, "导入失败", str(exc))
 
@@ -1169,14 +1392,15 @@ class MainWindow(QMainWindow):
             "AI 完成",
             f"任务 {job_id} 已完成。结果可从工作台的「待确认变更」继续处理。",
         )
-        self.refresh_all()
+        self._refresh_focus_pages()
 
     def _on_ai_job_fail(self, job_id: str, err: str) -> None:
         QMessageBox.warning(self, "AI 失败", f"{job_id}\n{err}")
 
     def _open_review(self) -> None:
         ReviewDialog(self.ai, self.services, self).exec()
-        self.refresh_all()
+        self.refresh_problems(preserve_view=True)
+        self._refresh_focus_pages()
 
     def _undo_ai(self) -> None:
         pid = self._require_one()
@@ -1185,8 +1409,7 @@ class MainWindow(QMainWindow):
         try:
             self.ai.undo_last_ai_accept(pid)
             QMessageBox.information(self, "已撤销", "已恢复到接受之前的内容。")
-            self.refresh_problems()
-            self._on_problem_selected()
+            self._refresh_problem_item(pid, select=True)
         except DomainError as exc:
             QMessageBox.warning(self, "无法撤销", str(exc))
 
@@ -1228,8 +1451,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导入失败", str(exc))
 
     def _today_review(self) -> None:
-        TodayReviewDialog(self.services, self).exec()
-        self.refresh_all()
+        self.main_nav.setCurrentRow(_PAGE_REVIEW)
+        self.review_page.start_session()
 
     def _schedule_review(self) -> None:
         ids = self._selected_ids()
@@ -1240,7 +1463,11 @@ class MainWindow(QMainWindow):
             for pid in ids:
                 self.services.schedule_initial_review(pid)
             QMessageBox.information(self, "完成", f"已将 {len(ids)} 题加入今日复习")
-            self.refresh_all()
+            self.review_page.reload_queue(preserve_current=True)
+            for pid in ids:
+                self._refresh_problem_item(pid, update_summary=False)
+            self._update_status()
+            self._refresh_focus_pages()
         except DomainError as exc:
             QMessageBox.warning(self, "失败", str(exc))
 
@@ -1259,7 +1486,9 @@ class MainWindow(QMainWindow):
         try:
             n = self.services.batch_update_problems(ids, priority=value)
             QMessageBox.information(self, "完成", f"已更新 {n} 题")
-            self.refresh_problems()
+            for pid in ids:
+                self._refresh_problem_item(pid, update_summary=False)
+            self._update_status()
         except DomainError as exc:
             QMessageBox.warning(self, "失败", str(exc))
 

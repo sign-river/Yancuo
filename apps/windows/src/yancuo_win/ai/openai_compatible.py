@@ -3,17 +3,39 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import re
+import socket
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-from yancuo_win.ai.base import AIProvider, StructuredResult
+from yancuo_win.ai.base import (
+    AIProvider,
+    StructuredCandidate,
+    StructuredResult,
+    normalize_region,
+)
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import get_secret
+
+
+_MAX_REQUEST_ATTEMPTS = 3
+_RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
+_TRANSIENT_NETWORK_ERRORS = (
+    urllib.error.URLError,
+    http.client.RemoteDisconnected,
+    http.client.IncompleteRead,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    TimeoutError,
+    socket.timeout,
+)
 
 
 class OpenAICompatibleProvider(AIProvider):
@@ -75,38 +97,49 @@ class OpenAICompatibleProvider(AIProvider):
     ) -> dict[str, Any]:
         key = self._api_key()
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        request = urllib.request.Request(
-            f"{self.base_url}{endpoint}",
-            data=data,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            },
-            method=method,
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            detail = detail.replace(key, "***")
-            hints = {
-                400: "请检查模型 ID 与请求兼容性",
-                401: "请检查 Faro API Key 是否完整、启用且未过期",
-                404: "请检查 Base URL 是否为 https://faroapi.com/v1",
-                429: "请检查 Faro 余额、令牌额度或稍后重试",
-            }
-            hint = hints.get(exc.code, "请稍后重试")
-            raise DomainError(
-                f"AI 请求失败 HTTP {exc.code}：{hint}。服务返回：{detail[:240]}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise DomainError(f"无法连接 AI 服务：{exc.reason}") from exc
-        except TimeoutError as exc:
-            raise DomainError("连接 AI 服务超时") from exc
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise DomainError("AI 服务返回了无法解析的响应") from exc
+        body: Any = None
+        for attempt in range(1, _MAX_REQUEST_ATTEMPTS + 1):
+            request = urllib.request.Request(
+                f"{self.base_url}{endpoint}",
+                data=data,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {key}",
+                },
+                method=method,
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code in _RETRYABLE_HTTP_CODES and attempt < _MAX_REQUEST_ATTEMPTS:
+                    time.sleep(0.6 * attempt)
+                    continue
+                detail = exc.read().decode("utf-8", errors="replace")
+                detail = detail.replace(key, "***")
+                hints = {
+                    400: "请检查模型 ID 与请求兼容性",
+                    401: "请检查 Faro API Key 是否完整、启用且未过期",
+                    404: "请检查 Base URL 是否为 https://faroapi.com/v1",
+                    429: "请检查 Faro 余额、令牌额度或稍后重试",
+                }
+                hint = hints.get(exc.code, "请稍后重试")
+                raise DomainError(
+                    f"AI 请求失败 HTTP {exc.code}：{hint}。服务返回：{detail[:240]}"
+                ) from exc
+            except _TRANSIENT_NETWORK_ERRORS as exc:
+                if attempt < _MAX_REQUEST_ATTEMPTS:
+                    time.sleep(0.6 * attempt)
+                    continue
+                reason = exc.reason if isinstance(exc, urllib.error.URLError) else str(exc)
+                raise DomainError(
+                    "AI 服务连接中断，程序已自动重试 2 次仍未恢复。"
+                    f"请检查网络后点击“重新尝试失败项”。详情：{reason}"
+                ) from exc
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise DomainError("AI 服务返回了无法解析的响应") from exc
         if not isinstance(body, dict):
             raise DomainError("AI 响应格式无效")
         return body
@@ -159,16 +192,39 @@ class OpenAICompatibleProvider(AIProvider):
             raise DomainError("AI 响应格式无效") from exc
 
         parsed = _extract_json(raw_text)
-        uncertain = parsed.pop("uncertain_fields", []) or []
-        if not isinstance(uncertain, list):
-            uncertain = []
+        candidate_payloads = parsed.get("problems")
+        if isinstance(candidate_payloads, list):
+            raw_candidates = [item for item in candidate_payloads if isinstance(item, dict)]
+        else:
+            raw_candidates = [parsed]
+        if not raw_candidates:
+            raise DomainError("AI 没有返回可用题目")
+
+        candidates: list[StructuredCandidate] = []
+        for raw_candidate in raw_candidates:
+            fields = dict(raw_candidate)
+            uncertain = fields.pop("uncertain_fields", []) or []
+            region = fields.pop("region", {}) or {}
+            if not isinstance(uncertain, list):
+                uncertain = []
+            if not isinstance(region, dict):
+                region = {}
+            candidates.append(
+                StructuredCandidate(
+                    fields=fields,
+                    uncertain_fields=[item for item in uncertain if isinstance(item, dict)],
+                    region=normalize_region(region),
+                )
+            )
+        first = candidates[0]
         usage = body.get("usage") or {}
         # 粗略费用：按 token 估算（可配置化前的占位）
         total_tokens = int(usage.get("total_tokens") or 0)
         cost = round(total_tokens * 0.00002, 6)
         return StructuredResult(
-            fields=parsed,
-            uncertain_fields=[u for u in uncertain if isinstance(u, dict)],
+            fields=first.fields,
+            uncertain_fields=first.uncertain_fields,
+            candidates=candidates,
             raw_text=raw_text,
             cost_estimate=cost,
             model=str(body.get("model") or model),

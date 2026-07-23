@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 from pathlib import Path
 
 import pytest
@@ -145,3 +146,129 @@ def test_structure_from_image_sends_multimodal_chat_completion(
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
     assert result.fields["title"] == "提取结果"
     assert result.model == "vision-model"
+
+
+def test_structure_from_image_accepts_multi_problem_envelope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    image = tmp_path / "multi.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nmulti-problem")
+
+    def fake_urlopen(_request, timeout=None):  # noqa: ANN001, ARG001
+        return _Response(
+            {
+                "model": "vision-model",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "problems": [
+                                        {
+                                            "title": "第一题",
+                                            "question_markdown": "题目一",
+                                            "region": {
+                                                "x": 0.1,
+                                                "y": 0.2,
+                                                "width": 0.8,
+                                                "height": 0.3,
+                                            },
+                                            "uncertain_fields": [],
+                                        },
+                                        {
+                                            "title": "第二题",
+                                            "question_markdown": "题目二",
+                                            "uncertain_fields": [
+                                                {
+                                                    "field": "title",
+                                                    "content": "第二题",
+                                                    "reason": "字迹模糊",
+                                                }
+                                            ],
+                                        },
+                                    ]
+                                },
+                                ensure_ascii=False,
+                            )
+                        }
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1",
+        api_key_env="FARO_API_KEY",
+    )
+
+    result = provider.structure_from_image(
+        image_path=str(image),
+        prompt="提取全部题目",
+        model="vision-model",
+        timeout_seconds=15,
+    )
+
+    assert len(result.candidate_results()) == 2
+    assert result.candidate_results()[0].fields["title"] == "第一题"
+    assert result.candidate_results()[0].region == {
+        "x": 0.1,
+        "y": 0.2,
+        "width": 0.8,
+        "height": 0.3,
+    }
+    assert result.candidate_results()[1].fields["title"] == "第二题"
+    assert result.candidate_results()[1].uncertain_fields[0]["reason"] == "字迹模糊"
+
+
+def test_remote_disconnect_is_retried_before_succeeding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    attempts = 0
+    delays: list[float] = []
+
+    def fake_urlopen(_request, timeout=None):  # noqa: ANN001, ARG001
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise http.client.RemoteDisconnected("remote closed")
+        return _Response({"data": [{"id": "vision-model"}]})
+
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+    )
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.time.sleep", delays.append
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1",
+        api_key_env="FARO_API_KEY",
+    )
+
+    assert provider.list_models() == ["vision-model"]
+    assert attempts == 3
+    assert delays == [0.6, 1.2]
+
+
+def test_remote_disconnect_exhaustion_uses_actionable_chinese_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    def always_disconnect(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise http.client.RemoteDisconnected("remote closed")
+
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", always_disconnect
+    )
+    monkeypatch.setattr("yancuo_win.ai.openai_compatible.time.sleep", lambda _delay: None)
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1",
+        api_key_env="FARO_API_KEY",
+    )
+
+    with pytest.raises(DomainError, match="自动重试 2 次.*重新尝试失败项"):
+        provider.list_models()

@@ -23,6 +23,8 @@ from yancuo_win.data.models import (
     AiJobItem,
     Asset,
     Chapter,
+    IntakeAsset,
+    IntakeCandidateRecord,
     Problem,
     ProblemOrigin,
     Prompt,
@@ -550,6 +552,12 @@ class AppServices:
                         ProblemOrigin.problem_id.in_(problem_ids)
                     )
                 )
+                for candidate in s.scalars(
+                    select(IntakeCandidateRecord).where(
+                        IntakeCandidateRecord.problem_id.in_(problem_ids)
+                    )
+                ).all():
+                    candidate.problem_id = None
                 s.flush()
 
                 for problem in rows:
@@ -586,6 +594,7 @@ class AppServices:
                         )
                         continue
 
+                    surviving_review_items = False
                     for review_session in s.scalars(
                         select(ReviewSession).where(ReviewSession.job_id == job_id)
                     ).all():
@@ -595,9 +604,19 @@ class AppServices:
                             )
                         )
                         if has_items:
-                            review_session.job_id = None
+                            surviving_review_items = True
                         else:
                             s.delete(review_session)
+
+                    if surviving_review_items:
+                        # One image can yield several candidate problems.  The
+                        # original job item may belong to a rejected/trashed
+                        # candidate while sibling review items are still open.
+                        # Keep the job as their stable intake-session anchor.
+                        job.total_items = 0
+                        job.done_items = 0
+                        job.failed_items = 0
+                        continue
 
                     # review_sessions.job_id has no ON DELETE cascade in schema v4;
                     # persist detach/delete decisions before removing the job.
@@ -636,6 +655,11 @@ class AppServices:
                 for path in relative_paths
                 if s.scalar(
                     select(func.count(Asset.id)).where(Asset.relative_path == path)
+                )
+                or s.scalar(
+                    select(func.count(IntakeAsset.id)).where(
+                        IntakeAsset.relative_path == path
+                    )
                 )
             }
 

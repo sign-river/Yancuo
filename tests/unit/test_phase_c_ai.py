@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from yancuo_win.ai.base import StructuredResult
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
@@ -34,7 +35,7 @@ def ai(runtime) -> AIService:
 
 
 def test_schema_v2_tables(runtime) -> None:
-    assert get_schema_version(runtime.engine) == 4
+    assert get_schema_version(runtime.engine) == 6
     assert verify_core_tables(runtime.engine) == []
 
 
@@ -103,3 +104,49 @@ def test_prompt_not_hardcoded_only(ai: AIService) -> None:
     prompt = ai.get_prompt("structure_recognize")
     assert "JSON" in prompt.body
     assert prompt.is_builtin is True
+
+
+def test_failed_ai_item_can_retry_in_same_job_without_duplicate_problem(
+    services: AppServices,
+    ai: AIService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "retry.jpg"
+    image.write_bytes(b"\xff\xd8\xffretry-same-job")
+    problem_id = services.import_images([image])["created"][0]
+    original_count = services.count_problems()
+
+    class FlakyProvider:
+        should_fail = True
+
+        def structure_from_image(self, **_kwargs) -> StructuredResult:
+            if self.should_fail:
+                raise DomainError("temporary disconnect")
+            return StructuredResult(
+                fields={"title": "重试成功", "question_markdown": "题目"},
+                raw_text="{}",
+                model="test-model",
+            )
+
+    provider = FlakyProvider()
+    monkeypatch.setattr(
+        "yancuo_win.application.ai_service.get_provider",
+        lambda _settings: provider,
+    )
+    job = ai.create_structure_job([problem_id])
+
+    ai.run_job(job.id)
+    first = ai.get_job(job.id)
+    assert first is not None
+    assert first.done_items == 0
+    assert first.failed_items == 1
+
+    provider.should_fail = False
+    ai.run_job(job.id)
+    second = ai.get_job(job.id)
+    assert second is not None
+    assert second.done_items == 1
+    assert second.failed_items == 0
+    assert services.count_problems() == original_count
+    assert len(ai.list_review_items_for_job(job.id)) == 1

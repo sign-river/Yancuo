@@ -11,8 +11,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -58,10 +58,17 @@ _PAGE_DONE = 5
 class ImagePreviewLabel(QLabel):
     """Aspect-ratio-preserving preview that follows the available panel size."""
 
+    region_drawn = Signal(dict)
+
     def __init__(self, empty_text: str, parent=None) -> None:
         super().__init__(empty_text, parent)
         self.empty_text = empty_text
         self.source = QPixmap()
+        self.region: dict[str, float] = {}
+        self.editable = False
+        self._drag_start: QPointF | None = None
+        self._drag_mode: str | None = None
+        self._region_before_drag: dict[str, float] = {}
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(QSize(360, 260))
         self.setStyleSheet(
@@ -73,6 +80,23 @@ class ImagePreviewLabel(QLabel):
         self._render()
         return not self.source.isNull()
 
+    def set_region(self, region: dict[str, float] | None) -> None:
+        self.region = dict(region or {})
+        self.update()
+
+    def set_editable(self, editable: bool) -> None:
+        self.editable = editable
+        self.setCursor(
+            Qt.CursorShape.CrossCursor
+            if editable
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.setToolTip(
+            "拖拽空白处重画区域；拖动蓝框内部可移动；拖动边框控制柄可微调"
+            if editable
+            else ""
+        )
+
     def clear_preview(self) -> None:
         self.source = QPixmap()
         self._render()
@@ -80,6 +104,242 @@ class ImagePreviewLabel(QLabel):
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
         self._render()
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().paintEvent(event)
+        if self.source.isNull() or not self.region:
+            return
+        displayed = self.pixmap()
+        if displayed.isNull():
+            return
+        left = (self.width() - displayed.width()) / 2
+        top = (self.height() - displayed.height()) / 2
+        region = QRectF(
+            left + displayed.width() * self.region.get("x", 0.0),
+            top + displayed.height() * self.region.get("y", 0.0),
+            displayed.width() * self.region.get("width", 1.0),
+            displayed.height() * self.region.get("height", 1.0),
+        )
+        image_rect = QRectF(left, top, displayed.width(), displayed.height())
+        painter = QPainter(self)
+        shade = QColor(15, 23, 42, 105)
+        painter.fillRect(
+            QRectF(image_rect.left(), image_rect.top(), image_rect.width(), region.top() - image_rect.top()),
+            shade,
+        )
+        painter.fillRect(
+            QRectF(image_rect.left(), region.bottom(), image_rect.width(), image_rect.bottom() - region.bottom()),
+            shade,
+        )
+        painter.fillRect(
+            QRectF(image_rect.left(), region.top(), region.left() - image_rect.left(), region.height()),
+            shade,
+        )
+        painter.fillRect(
+            QRectF(region.right(), region.top(), image_rect.right() - region.right(), region.height()),
+            shade,
+        )
+        painter.setPen(QPen(QColor("#3478F6"), 3))
+        painter.drawRect(region)
+        if self.editable:
+            painter.setPen(QPen(QColor("white"), 1))
+            painter.setBrush(QColor("#3478F6"))
+            for point in self._handle_points(region).values():
+                painter.drawRect(
+                    QRectF(point.x() - 4, point.y() - 4, 8, 8)
+                )
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001, N802
+        if (
+            not self.editable
+            or event.button() != Qt.MouseButton.LeftButton
+            or not self._displayed_rect().contains(event.position())
+        ):
+            super().mousePressEvent(event)
+            return
+        self._drag_start = event.position()
+        self._region_before_drag = dict(self.region)
+        self._drag_mode = (
+            "draw"
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            else self._hit_test(event.position())
+        )
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001, N802
+        if self._drag_start is None:
+            if self.editable:
+                self._update_hover_cursor(event.position())
+            super().mouseMoveEvent(event)
+            return
+        if self._drag_mode == "draw":
+            self.region = self._normalized_drag_region(
+                self._drag_start, event.position()
+            )
+        else:
+            self.region = self._transformed_region(event.position())
+        self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
+        if self._drag_start is None or event.button() != Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        displayed = self._displayed_rect()
+        region = dict(self.region)
+        width_px = region.get("width", 0.0) * displayed.width()
+        height_px = region.get("height", 0.0) * displayed.height()
+        self._drag_start = None
+        self._drag_mode = None
+        if width_px < 8 or height_px < 8:
+            self.region = self._region_before_drag
+            self.update()
+            event.accept()
+            return
+        self.region = region
+        self.update()
+        if region != self._region_before_drag:
+            self.region_drawn.emit(dict(region))
+        self._update_hover_cursor(event.position())
+        event.accept()
+
+    def _displayed_rect(self) -> QRectF:
+        displayed = self.pixmap()
+        if displayed.isNull():
+            return QRectF()
+        return QRectF(
+            (self.width() - displayed.width()) / 2,
+            (self.height() - displayed.height()) / 2,
+            displayed.width(),
+            displayed.height(),
+        )
+
+    def _normalized_drag_region(
+        self, start: QPointF, end: QPointF
+    ) -> dict[str, float]:
+        displayed = self._displayed_rect()
+        if displayed.isEmpty():
+            return {}
+        x1 = min(displayed.right(), max(displayed.left(), start.x()))
+        y1 = min(displayed.bottom(), max(displayed.top(), start.y()))
+        x2 = min(displayed.right(), max(displayed.left(), end.x()))
+        y2 = min(displayed.bottom(), max(displayed.top(), end.y()))
+        return {
+            "x": (min(x1, x2) - displayed.left()) / displayed.width(),
+            "y": (min(y1, y2) - displayed.top()) / displayed.height(),
+            "width": abs(x2 - x1) / displayed.width(),
+            "height": abs(y2 - y1) / displayed.height(),
+        }
+
+    def _region_rect(self) -> QRectF:
+        displayed = self._displayed_rect()
+        if displayed.isEmpty() or not self.region:
+            return QRectF()
+        return QRectF(
+            displayed.left() + displayed.width() * self.region.get("x", 0.0),
+            displayed.top() + displayed.height() * self.region.get("y", 0.0),
+            displayed.width() * self.region.get("width", 1.0),
+            displayed.height() * self.region.get("height", 1.0),
+        )
+
+    @staticmethod
+    def _handle_points(rect: QRectF) -> dict[str, QPointF]:
+        return {
+            "nw": rect.topLeft(),
+            "n": QPointF(rect.center().x(), rect.top()),
+            "ne": rect.topRight(),
+            "e": QPointF(rect.right(), rect.center().y()),
+            "se": rect.bottomRight(),
+            "s": QPointF(rect.center().x(), rect.bottom()),
+            "sw": rect.bottomLeft(),
+            "w": QPointF(rect.left(), rect.center().y()),
+        }
+
+    def _hit_test(self, position: QPointF) -> str:
+        rect = self._region_rect()
+        if rect.isEmpty():
+            return "draw"
+        for mode, point in self._handle_points(rect).items():
+            if abs(position.x() - point.x()) <= 8 and abs(
+                position.y() - point.y()
+            ) <= 8:
+                return mode
+        if rect.contains(position):
+            return "move"
+        return "draw"
+
+    def _update_hover_cursor(self, position: QPointF) -> None:
+        cursors = {
+            "nw": Qt.CursorShape.SizeFDiagCursor,
+            "se": Qt.CursorShape.SizeFDiagCursor,
+            "ne": Qt.CursorShape.SizeBDiagCursor,
+            "sw": Qt.CursorShape.SizeBDiagCursor,
+            "n": Qt.CursorShape.SizeVerCursor,
+            "s": Qt.CursorShape.SizeVerCursor,
+            "e": Qt.CursorShape.SizeHorCursor,
+            "w": Qt.CursorShape.SizeHorCursor,
+            "move": Qt.CursorShape.SizeAllCursor,
+            "draw": Qt.CursorShape.CrossCursor,
+        }
+        self.setCursor(cursors[self._hit_test(position)])
+
+    def _transformed_region(self, position: QPointF) -> dict[str, float]:
+        displayed = self._displayed_rect()
+        if (
+            displayed.isEmpty()
+            or self._drag_start is None
+            or not self._region_before_drag
+        ):
+            return self._normalized_drag_region(
+                self._drag_start or position, position
+            )
+        mode = self._drag_mode or "move"
+        initial = self._region_before_drag
+        left = initial["x"]
+        top = initial["y"]
+        right = left + initial["width"]
+        bottom = top + initial["height"]
+        dx = (position.x() - self._drag_start.x()) / displayed.width()
+        dy = (position.y() - self._drag_start.y()) / displayed.height()
+        min_width = 8 / displayed.width()
+        min_height = 8 / displayed.height()
+        if mode == "move":
+            width = initial["width"]
+            height = initial["height"]
+            return {
+                "x": min(1.0 - width, max(0.0, left + dx)),
+                "y": min(1.0 - height, max(0.0, top + dy)),
+                "width": width,
+                "height": height,
+            }
+        pointer_x = min(
+            1.0,
+            max(
+                0.0,
+                (position.x() - displayed.left()) / displayed.width(),
+            ),
+        )
+        pointer_y = min(
+            1.0,
+            max(
+                0.0,
+                (position.y() - displayed.top()) / displayed.height(),
+            ),
+        )
+        if "w" in mode:
+            left = min(right - min_width, pointer_x)
+        if "e" in mode:
+            right = max(left + min_width, pointer_x)
+        if "n" in mode:
+            top = min(bottom - min_height, pointer_y)
+        if "s" in mode:
+            bottom = max(top + min_height, pointer_y)
+        return {
+            "x": left,
+            "y": top,
+            "width": right - left,
+            "height": bottom - top,
+        }
 
     def _render(self) -> None:
         if self.source.isNull():
@@ -317,6 +577,12 @@ class IntakePage(QWidget):
         self.ai_candidates: list[IntakeCandidate] = []
         self.candidate_index = 0
         self.last_problem_id: str | None = None
+        self._restoring_manual_draft = False
+
+        self.manual_draft_timer = QTimer(self)
+        self.manual_draft_timer.setSingleShot(True)
+        self.manual_draft_timer.setInterval(700)
+        self.manual_draft_timer.timeout.connect(self._save_manual_draft)
 
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
@@ -337,6 +603,7 @@ class IntakePage(QWidget):
         self.progress_timer = QTimer(self)
         self.progress_timer.setInterval(500)
         self.progress_timer.timeout.connect(self._poll_progress)
+        self._restore_manual_draft()
         self._restore_existing_session()
         self.show_home()
 
@@ -421,7 +688,7 @@ class IntakePage(QWidget):
         layout.addLayout(
             self._header(
                 "手动录题",
-                "表单只在点击“确认入库”时创建正式题目；返回不会产生空白题。",
+                "内容会自动保存为草稿；只有点击“确认入库”才会创建正式题目。",
                 self.show_home,
             )
         )
@@ -429,6 +696,7 @@ class IntakePage(QWidget):
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 8, 0)
         self.manual_form = ProblemForm(self.intake)
+        self.manual_form.changed.connect(self._queue_manual_draft)
         body_layout.addWidget(self.manual_form)
 
         assets = CardFrame()
@@ -450,7 +718,7 @@ class IntakePage(QWidget):
         layout.addWidget(self._scroll(body), stretch=1)
 
         actions = QHBoxLayout()
-        actions.addWidget(QLabel("返回后本次表单仍会保留"))
+        actions.addWidget(QLabel("草稿自动保存，关闭程序后仍可继续"))
         actions.addStretch(1)
         cancel = QPushButton("清空表单")
         cancel.clicked.connect(self._clear_manual)
@@ -472,7 +740,9 @@ class IntakePage(QWidget):
         )
         upload = CardFrame()
         upload.add_title("1. 添加图片")
-        upload.add_hint("当前版本每张图片生成一个候选题；一图多题将在后续数据模型升级中接入。")
+        upload.add_hint(
+            "每张图片可以识别一道或多道候选题；AI 会拆分后逐题进入确认流程。"
+        )
         upload_content = QHBoxLayout()
         self.ai_upload_preview = ImagePreviewLabel("选择图片后将在这里预览")
         upload_content.addWidget(self.ai_upload_preview, stretch=2)
@@ -559,10 +829,14 @@ class IntakePage(QWidget):
         actions = QHBoxLayout()
         cancel = danger_button("取消后台任务")
         cancel.clicked.connect(self._cancel_ai)
+        self.processing_retry = primary_button("重新尝试失败项")
+        self.processing_retry.clicked.connect(self._retry_failed_ai)
+        self.processing_retry.setVisible(False)
         self.processing_back = QPushButton("返回修改上传内容")
         self.processing_back.clicked.connect(self.show_ai_upload)
         self.processing_back.setVisible(False)
         actions.addWidget(cancel)
+        actions.addWidget(self.processing_retry)
         actions.addWidget(self.processing_back)
         actions.addStretch(1)
         card.body.addLayout(actions)
@@ -586,11 +860,23 @@ class IntakePage(QWidget):
 
         left = CardFrame()
         left.add_title("原始图片与识别提示")
-        self.image_preview = QLabel("无原图预览")
+        self.image_preview = ImagePreviewLabel("无原图预览")
         self.image_preview.setMinimumSize(QSize(340, 360))
-        self.image_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_preview.setStyleSheet("background: #F5F7FA; border-radius: 8px;")
+        self.image_preview.set_editable(True)
+        self.image_preview.region_drawn.connect(self._save_drawn_region)
         left.body.addWidget(self.image_preview, stretch=1)
+        self.region_label = QLabel("")
+        self.region_label.setObjectName("PageHint")
+        left.body.addWidget(self.region_label)
+        region_actions = QHBoxLayout()
+        region_hint = QLabel("空白处重画 · 框内移动 · 控制柄微调")
+        region_hint.setObjectName("PageHint")
+        reset_region = QPushButton("恢复整图")
+        reset_region.clicked.connect(self._reset_candidate_region)
+        region_actions.addWidget(region_hint)
+        region_actions.addStretch(1)
+        region_actions.addWidget(reset_region)
+        left.body.addLayout(region_actions)
         self.uncertain_label = QLabel("")
         self.uncertain_label.setWordWrap(True)
         self.uncertain_label.setObjectName("PageHint")
@@ -626,12 +912,18 @@ class IntakePage(QWidget):
         previous.clicked.connect(lambda: self._move_candidate(-1))
         next_button = QPushButton("下一题")
         next_button.clicked.connect(lambda: self._move_candidate(1))
-        skip = danger_button("跳过此题")
+        split = QPushButton("拆分当前候选")
+        split.clicked.connect(self._split_candidate)
+        merge = QPushButton("与下一题合并")
+        merge.clicked.connect(self._merge_with_next_candidate)
+        skip = danger_button("删除错误候选")
         skip.clicked.connect(self._reject_candidate)
         confirm = primary_button("确认入库")
         confirm.clicked.connect(self._commit_candidate)
         actions.addWidget(previous)
         actions.addWidget(next_button)
+        actions.addWidget(split)
+        actions.addWidget(merge)
         actions.addStretch(1)
         actions.addWidget(skip)
         actions.addWidget(confirm)
@@ -725,6 +1017,48 @@ class IntakePage(QWidget):
         except DomainError:
             self.ai_candidates = []
 
+    def _restore_manual_draft(self) -> None:
+        draft = self.intake.load_manual_draft()
+        if draft is None:
+            return
+        self._restoring_manual_draft = True
+        values = dict(draft.fields)
+        values["tags"] = draft.tag_names
+        self.manual_form.set_values(values)
+        self.manual_images = list(draft.image_paths)
+        self.manual_asset_list.clear()
+        for path in self.manual_images:
+            self.manual_asset_list.addItem(str(path))
+        self._restoring_manual_draft = False
+
+    def _queue_manual_draft(self) -> None:
+        if not self._restoring_manual_draft:
+            self.manual_draft_timer.start()
+
+    def _save_manual_draft(self) -> None:
+        if self._restoring_manual_draft:
+            return
+        fields = self.manual_form.values()
+        tags = self.manual_form.tag_names()
+        has_content = bool(
+            fields.get("title")
+            or str(fields.get("question_markdown") or "").strip()
+            or str(fields.get("question_latex") or "").strip()
+            or tags
+            or self.manual_images
+        )
+        if not has_content:
+            self.intake.clear_manual_draft()
+            return
+        try:
+            self.intake.save_manual_draft(
+                fields,
+                tag_names=tags,
+                image_paths=self.manual_images,
+            )
+        except (DomainError, OSError) as exc:
+            self.status_message.emit(f"手动草稿保存失败：{exc}")
+
     def _add_manual_images(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
             self,
@@ -737,12 +1071,14 @@ class IntakePage(QWidget):
             if path not in self.manual_images:
                 self.manual_images.append(path)
                 self.manual_asset_list.addItem(str(path))
+        self._queue_manual_draft()
 
     def _remove_manual_images(self) -> None:
         rows = sorted({self.manual_asset_list.row(item) for item in self.manual_asset_list.selectedItems()}, reverse=True)
         for row in rows:
             self.manual_asset_list.takeItem(row)
             self.manual_images.pop(row)
+        self._queue_manual_draft()
 
     def _clear_manual(self) -> None:
         if (
@@ -753,6 +1089,8 @@ class IntakePage(QWidget):
         self.manual_form.clear()
         self.manual_images.clear()
         self.manual_asset_list.clear()
+        self.manual_draft_timer.stop()
+        self.intake.clear_manual_draft()
 
     def _commit_manual(self) -> None:
         try:
@@ -769,6 +1107,8 @@ class IntakePage(QWidget):
         self.manual_form.clear()
         self.manual_images.clear()
         self.manual_asset_list.clear()
+        self.manual_draft_timer.stop()
+        self.intake.clear_manual_draft()
         self.problem_committed.emit(problem.id)
         self._show_done(f"“{problem.title or '无标题题目'}”已进入正式题库。")
 
@@ -847,6 +1187,7 @@ class IntakePage(QWidget):
         self.ai_job_id = started.job_id
         self.ai_candidates.clear()
         self.processing_error.clear()
+        self.processing_retry.setVisible(False)
         self.processing_back.setVisible(False)
         self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
         self._start_worker(started.job_id)
@@ -889,6 +1230,18 @@ class IntakePage(QWidget):
             self.ai_worker.cancel()
             self.processing_status.setText("正在取消任务…")
 
+    def _retry_failed_ai(self) -> None:
+        if not self.ai_job_id:
+            return
+        if self.ai_worker and self.ai_worker.isRunning():
+            return
+        self.processing_error.clear()
+        self.processing_retry.setVisible(False)
+        self.processing_back.setVisible(False)
+        self.processing_status.setText("正在重新连接 AI 服务并重试失败图片…")
+        self._start_worker(self.ai_job_id)
+        self.status_message.emit("正在重新尝试失败的 AI 录题项")
+
     def _on_ai_done(self, job_id: str) -> None:
         if job_id != self.ai_job_id:
             return
@@ -903,10 +1256,12 @@ class IntakePage(QWidget):
         if not self.ai_candidates:
             detail = "\n".join(failures[:5]) or "AI 没有生成可确认的题目。"
             self.processing_error.setText(detail)
+            self.processing_retry.setVisible(bool(failures))
             self.processing_back.setVisible(True)
             self.status_message.emit("AI 识别未生成候选题")
             return
         self.candidate_index = 0
+        self.processing_retry.setVisible(False)
         self._load_candidate()
         self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
         self.status_message.emit(
@@ -918,6 +1273,7 @@ class IntakePage(QWidget):
             return
         self.progress_timer.stop()
         self.processing_error.setText(error)
+        self.processing_retry.setVisible(True)
         self.processing_back.setVisible(True)
         self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
         self.status_message.emit(f"AI 录题失败：{error}")
@@ -932,21 +1288,9 @@ class IntakePage(QWidget):
         )
         self.ai_form.set_values(candidate.fields)
         self._refresh_ai_preview()
-        if candidate.original_image and candidate.original_image.is_file():
-            pixmap = QPixmap(str(candidate.original_image))
-            if pixmap.isNull():
-                self.image_preview.setText(str(candidate.original_image))
-            else:
-                self.image_preview.setPixmap(
-                    pixmap.scaled(
-                        QSize(420, 500),
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-        else:
-            self.image_preview.setPixmap(QPixmap())
-            self.image_preview.setText("无原图预览")
+        self.image_preview.set_path(candidate.original_image)
+        self.image_preview.set_region(candidate.region)
+        self._show_region_label(candidate.region)
         if candidate.uncertain:
             self.uncertain_label.setText(
                 "AI 不确定字段：\n"
@@ -984,6 +1328,131 @@ class IntakePage(QWidget):
         self.candidate_index = (self.candidate_index + delta) % len(self.ai_candidates)
         self._load_candidate()
 
+    def _show_region_label(self, region: dict[str, float]) -> None:
+        if region:
+            self.region_label.setText(
+                "当前题目区域："
+                f"x {region['x']:.1%} · y {region['y']:.1%} · "
+                f"宽 {region['width']:.1%} · 高 {region['height']:.1%}"
+            )
+        else:
+            self.region_label.setText("当前题目区域：整张原图")
+
+    def _save_drawn_region(self, region: dict[str, float]) -> None:
+        if not self.ai_candidates:
+            return
+        candidate = self.ai_candidates[self.candidate_index]
+        try:
+            normalized = self.intake.update_ai_candidate_region(
+                candidate.review_item_id, region
+            )
+        except DomainError as exc:
+            self.image_preview.set_region(candidate.region)
+            QMessageBox.warning(self, "无法保存区域", str(exc))
+            return
+        candidate.region.clear()
+        candidate.region.update(normalized)
+        self.image_preview.set_region(normalized)
+        self._show_region_label(normalized)
+        self.status_message.emit("当前题目区域已保存")
+
+    def _reset_candidate_region(self) -> None:
+        if not self.ai_candidates:
+            return
+        candidate = self.ai_candidates[self.candidate_index]
+        try:
+            self.intake.update_ai_candidate_region(candidate.review_item_id, {})
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法恢复整图", str(exc))
+            return
+        candidate.region.clear()
+        self.image_preview.set_region({})
+        self._show_region_label({})
+        self.status_message.emit("当前候选已恢复使用整张原图")
+
+    def _split_candidate(self) -> None:
+        if not self.ai_candidates:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "拆分候选题",
+                "把当前高亮区域沿较长方向等分为两道候选题？\n"
+                "两道题会保留当前表单内容，之后可分别修改。",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        candidate = self.ai_candidates[self.candidate_index]
+        try:
+            self.intake.split_ai_candidate(
+                candidate.review_item_id,
+                self.ai_form.values(),
+                tag_names=self.ai_form.tag_names(),
+            )
+            self.ai_candidates = [
+                item
+                for item in self.intake.list_candidates(self.ai_job_id or "")
+                if item.status in {"pending", "conflict"}
+            ]
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法拆分", str(exc))
+            return
+        self.candidate_index = next(
+            (
+                index
+                for index, item in enumerate(self.ai_candidates)
+                if item.review_item_id == candidate.review_item_id
+            ),
+            0,
+        )
+        self._load_candidate()
+        self.status_message.emit("当前候选已拆成两个独立题目区域")
+
+    def _merge_with_next_candidate(self) -> None:
+        if len(self.ai_candidates) < 2:
+            QMessageBox.information(self, "无法合并", "当前没有其他待确认候选题。")
+            return
+        primary = self.ai_candidates[self.candidate_index]
+        secondary_index = (self.candidate_index + 1) % len(self.ai_candidates)
+        secondary = self.ai_candidates[secondary_index]
+        if (
+            QMessageBox.question(
+                self,
+                "合并候选题",
+                f"把当前第 {self.candidate_index + 1} 题与第 "
+                f"{secondary_index + 1} 题合并？\n"
+                "题干、答案和解析会依次拼接，原有两块区域会合并为一个范围。",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            self.intake.merge_ai_candidates(
+                primary.review_item_id,
+                secondary.review_item_id,
+                self.ai_form.values(),
+                tag_names=self.ai_form.tag_names(),
+            )
+            self.ai_candidates = [
+                item
+                for item in self.intake.list_candidates(self.ai_job_id or "")
+                if item.status in {"pending", "conflict"}
+            ]
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法合并", str(exc))
+            return
+        self.candidate_index = next(
+            (
+                index
+                for index, item in enumerate(self.ai_candidates)
+                if item.review_item_id == primary.review_item_id
+            ),
+            0,
+        )
+        self._load_candidate()
+        self.status_message.emit("两个候选题已合并，可继续编辑后入库")
+
     def _commit_candidate(self) -> None:
         if not self.ai_candidates:
             return
@@ -1016,7 +1485,12 @@ class IntakePage(QWidget):
         if not self.ai_candidates:
             return
         if (
-            QMessageBox.question(self, "跳过候选题", "跳过并移除此候选题？")
+            QMessageBox.question(
+                self,
+                "删除错误候选",
+                "确认删除这道错误候选？\n"
+                "它的暂存题会移入回收站，不影响同图的其他候选。",
+            )
             != QMessageBox.StandardButton.Yes
         ):
             return
@@ -1024,7 +1498,7 @@ class IntakePage(QWidget):
         try:
             self.intake.reject_ai_candidate(candidate.review_item_id)
         except DomainError as exc:
-            QMessageBox.warning(self, "无法跳过", str(exc))
+            QMessageBox.warning(self, "无法删除", str(exc))
             return
         self.ai_candidates.pop(self.candidate_index)
         if self.ai_candidates:
@@ -1060,6 +1534,8 @@ class IntakePage(QWidget):
     def shutdown(self) -> None:
         """Stop the page-owned worker before the application destroys Qt objects."""
 
+        self.manual_draft_timer.stop()
+        self._save_manual_draft()
         self.progress_timer.stop()
         if self.ai_worker and self.ai_worker.isRunning():
             self.ai_worker.cancel()

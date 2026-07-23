@@ -231,6 +231,9 @@ class AiJobItem(Base):
     job_id: Mapped[str] = mapped_column(ForeignKey("ai_jobs.id"), nullable=False, index=True)
     problem_id: Mapped[str | None] = mapped_column(ForeignKey("problems.id"), nullable=True)
     asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id"), nullable=True)
+    intake_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("intake_assets.id"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     raw_response: Mapped[str] = mapped_column(Text, default="", nullable=False)
     structured_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
@@ -242,6 +245,75 @@ class AiJobItem(Base):
     )
 
     job: Mapped[AiJob] = relationship(back_populates="items")
+
+
+class IntakeSession(Base):
+    """Task-scoped manual/AI intake state, separate from the formal library."""
+
+    __tablename__ = "intake_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)  # manual | ai
+    status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("ai_jobs.id"), nullable=True)
+    user_instruction: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    draft_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class IntakeAsset(Base):
+    """Immutable source image owned by an intake session."""
+
+    __tablename__ = "intake_assets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("intake_sessions.id"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(32), default="original", nullable=False)
+    original_name: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    relative_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IntakeCandidateRecord(Base):
+    """AI/new-problem candidate that does not exist in the formal library yet."""
+
+    __tablename__ = "intake_candidates"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("intake_sessions.id"), nullable=False, index=True
+    )
+    intake_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("intake_assets.id"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    fields_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    uncertain_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    region_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    problem_id: Mapped[str | None] = mapped_column(
+        ForeignKey("problems.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ReviewSession(Base):
@@ -273,6 +345,9 @@ class ReviewItem(Base):
     before_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     proposed_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     uncertain_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    # Normalized image coordinates: {"x": 0..1, "y": 0..1, "width": 0..1, "height": 0..1}.
+    # An empty object means the candidate uses the whole original image.
+    region_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     applied_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

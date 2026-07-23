@@ -29,6 +29,7 @@ STRUCTURE_PROMPT = """你是考研错题结构化助手。根据题目图片输�
   "tags": ["可选标签"],
   "uncertain_fields": [{"field": "字段名", "content": "存疑内容", "reason": "原因"}]
 }
+question_markdown、user_answer、correct_answer、solution_markdown、error_analysis 等 Markdown 字段中的公式必须使用 $...$ 或 $$...$$ 定界；question_latex 只写裸 LaTeX，不要添加公式定界符。
 只填写允许修改的字段语义；不要建议删除题目；不要编造不存在的原图路径。
 """
 
@@ -112,11 +113,58 @@ def _migrate_to_v4(engine: Engine) -> None:
     logger.info("migrated database to schema_version=4")
 
 
+def _migrate_to_v5(engine: Engine) -> None:
+    """Persist normalized source-image regions for AI intake candidates."""
+
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(review_items)")).fetchall()
+        }
+        if "region_json" not in columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE review_items "
+                    "ADD COLUMN region_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            )
+    with Session(engine) as session:
+        set_schema_version(session, 5)
+        session.commit()
+    logger.info("migrated database to schema_version=5")
+
+
+def _migrate_to_v6(engine: Engine) -> None:
+    """Add dedicated intake sessions/assets/candidates and AI item linkage."""
+
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(ai_job_items)")).fetchall()
+        }
+        if "intake_asset_id" not in columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE ai_job_items "
+                    "ADD COLUMN intake_asset_id VARCHAR(64) "
+                    "REFERENCES intake_assets(id)"
+                )
+            )
+    with Session(engine) as session:
+        set_schema_version(session, 6)
+        session.commit()
+    logger.info("migrated database to schema_version=6")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
+    5: _migrate_to_v5,
+    6: _migrate_to_v6,
 }
 
 
@@ -159,6 +207,9 @@ def verify_core_tables(engine: Engine) -> list[str]:
         "audit_logs",
         "sync_operations",
         "problem_origins",
+        "intake_sessions",
+        "intake_assets",
+        "intake_candidates",
     }
     with engine.connect() as conn:
         rows = conn.execute(

@@ -2,7 +2,7 @@
 
 > 状态：跨端字段语义 v1 稳定基线。变更前须说明原因与兼容性影响。
 > 权威实现：Windows `yancuo_win.data.models` 与 Android `cn.yancuo.android.data.db`。
-> 当前版本：数据库 `schema_version=4`；跨端字段语义 `data_format_version=1`。两者含义不同，不能互换。
+> 当前版本：数据库 `schema_version=6`；跨端字段语义 `data_format_version=1`。两者含义不同，不能互换。
 
 ---
 

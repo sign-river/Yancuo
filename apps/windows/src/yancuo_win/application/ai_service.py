@@ -7,10 +7,10 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, selectinload
 
-from yancuo_win.ai.base import AIProvider
+from yancuo_win.ai.base import AIProvider, normalize_region
 from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.assets.object_store import ObjectStore
@@ -20,6 +20,9 @@ from yancuo_win.data.models import (
     AiJobItem,
     Asset,
     AuditLog,
+    IntakeAsset,
+    IntakeCandidateRecord,
+    IntakeSession,
     Problem,
     Prompt,
     ReviewItem,
@@ -233,7 +236,7 @@ class AIService:
                 select(ReviewItem)
                 .join(ReviewSession, ReviewSession.id == ReviewItem.session_id)
                 .where(ReviewSession.job_id == job_id)
-                .order_by(ReviewItem.id)
+                .order_by(text("review_items.rowid"))
             ).all()
             s.expunge_all()
             return list(rows)
@@ -284,8 +287,8 @@ class AIService:
                     f"{base_prompt.body.rstrip()}\n\n"
                     "## 本次录题补充要求\n"
                     f"{instruction}\n\n"
-                    "补充要求只用于定位和理解图片内容，不得改变输出 JSON 结构、"
-                    "字段权限或原图保护规则。"
+                    "补充要求用于定位和理解图片内容；如其中明确要求 problems 数组，"
+                    "按该根结构输出。不得改变字段权限或原图保护规则。"
                 )
                 s.add(
                     Prompt(
@@ -344,6 +347,98 @@ class AIService:
                     "provider": provider_name,
                     "has_user_instruction": bool(instruction),
                 },
+            )
+            s.commit()
+            s.refresh(job)
+            s.expunge(job)
+            return job
+
+    def create_intake_structure_job(
+        self,
+        intake_session_id: str,
+        intake_asset_ids: list[str],
+        *,
+        user_instruction: str = "",
+        allowed_fields: set[str] | frozenset[str] | None = None,
+    ) -> AiJob:
+        """Create a new-problem AI job without creating staging Problems."""
+
+        if not self.runtime.settings.ai.enabled:
+            raise DomainError("AI 功能未启用（config [ai].enabled）")
+        if not intake_asset_ids:
+            raise DomainError("未选择图片")
+        max_n = self.runtime.settings.ai.max_images_per_job
+        if len(intake_asset_ids) > max_n:
+            raise DomainError(f"单次最多 {max_n} 张图片")
+        if self.today_cost() >= self.runtime.settings.ai.max_daily_cost_yuan:
+            raise DomainError("已达每日 AI 费用上限")
+        base_prompt = self.get_prompt("structure_recognize")
+        provider_name = self.runtime.settings.ai.default_provider
+        allowed = sorted(allowed_fields or DEFAULT_ALLOWED_FIELDS)
+        with self.session() as s:
+            intake_session = s.get(IntakeSession, intake_session_id)
+            if intake_session is None or intake_session.mode != "ai":
+                raise DomainError("AI 录题会话不存在")
+            job_id = new_id("job")
+            prompt_key = f"intake_{job_id}"
+            instruction = user_instruction.strip()
+            body = base_prompt.body.rstrip()
+            if instruction:
+                body += (
+                    "\n\n## 本次录题补充要求\n"
+                    f"{instruction}\n\n"
+                    "补充要求用于定位和理解图片内容；如其中明确要求 problems 数组，"
+                    "按该根结构输出。不得改变字段权限或原图保护规则。"
+                )
+            s.add(
+                Prompt(
+                    id=new_id("prompt"),
+                    key=prompt_key,
+                    name="AI 录题临时提示词",
+                    body=body,
+                    version=1,
+                    is_builtin=False,
+                )
+            )
+            job = AiJob(
+                id=job_id,
+                job_type="intake_structure",
+                status="pending",
+                provider=provider_name,
+                model=self.runtime.settings.ai.default_vision_model or "mock-v1",
+                prompt_key=prompt_key,
+                total_items=0,
+                allowed_fields_json=json.dumps(allowed, ensure_ascii=False),
+            )
+            s.add(job)
+            s.flush()
+            assets = s.scalars(
+                select(IntakeAsset).where(
+                    IntakeAsset.session_id == intake_session_id,
+                    IntakeAsset.id.in_(intake_asset_ids),
+                )
+            ).all()
+            for asset in assets:
+                s.add(
+                    AiJobItem(
+                        id=new_id("jitem"),
+                        job_id=job.id,
+                        intake_asset_id=asset.id,
+                        status="pending",
+                    )
+                )
+            if not assets:
+                raise DomainError("录题会话中没有可识别的图片")
+            job.total_items = len(assets)
+            intake_session.job_id = job.id
+            intake_session.status = "processing"
+            intake_session.user_instruction = instruction
+            self._audit(
+                s,
+                "intake_ai_job_created",
+                "intake_session",
+                intake_session.id,
+                {"job_id": job.id, "asset_count": len(assets)},
             )
             s.commit()
             s.refresh(job)
@@ -418,6 +513,15 @@ class AIService:
                         "cost": job.estimated_cost,
                     },
                 )
+            else:
+                intake_session = s.scalar(
+                    select(IntakeSession).where(
+                        IntakeSession.job_id == job.id
+                    )
+                )
+                if intake_session:
+                    intake_session.status = "cancelled"
+                    intake_session.completed_at = utcnow()
             s.commit()
             s.expunge_all()
             return job
@@ -433,15 +537,28 @@ class AIService:
         with self.session() as s:
             job = s.get(AiJob, job_id)
             item = s.get(AiJobItem, item_id)
-            if not job or not item or not item.problem_id or not item.asset_id:
+            if not job or not item:
                 return
-            asset = s.get(Asset, item.asset_id)
-            problem = s.scalars(
-                select(Problem)
-                .where(Problem.id == item.problem_id)
-                .options(selectinload(Problem.tags))
-            ).first()
-            if not asset or not problem:
+            intake_session: IntakeSession | None = None
+            problem: Problem | None = None
+            if item.intake_asset_id:
+                asset = s.get(IntakeAsset, item.intake_asset_id)
+                if asset:
+                    intake_session = s.get(IntakeSession, asset.session_id)
+            else:
+                asset = s.get(Asset, item.asset_id) if item.asset_id else None
+                problem = (
+                    s.scalars(
+                        select(Problem)
+                        .where(Problem.id == item.problem_id)
+                        .options(selectinload(Problem.tags))
+                    ).first()
+                    if item.problem_id
+                    else None
+                )
+            if not asset or (item.intake_asset_id and not intake_session) or (
+                not item.intake_asset_id and not problem
+            ):
                 item.status = "failed"
                 item.error_message = "题目或资源缺失"
                 s.commit()
@@ -476,52 +593,177 @@ class AIService:
                     timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
                 )
                 allowed = set(json.loads(job.allowed_fields_json) or list(DEFAULT_ALLOWED_FIELDS))
-                filtered, uncertain = validate_and_filter_proposal(
-                    result.fields,
-                    allowed_fields=allowed,
-                    allow_delete=self.runtime.settings.ai.allow_delete,
-                )
+                proposals: list[
+                    tuple[dict[str, Any], list[dict[str, Any]], dict[str, float]]
+                ] = []
+                for candidate in result.candidate_results():
+                    filtered, validation_uncertain = validate_and_filter_proposal(
+                        candidate.fields,
+                        allowed_fields=allowed,
+                        allow_delete=self.runtime.settings.ai.allow_delete,
+                    )
+                    uncertain = [
+                        *validation_uncertain,
+                        *candidate.uncertain_fields,
+                    ]
+                    proposals.append(
+                        (filtered, uncertain, normalize_region(candidate.region))
+                    )
+                if not proposals:
+                    raise DomainError("AI 没有返回可确认的候选题")
+
                 if self.runtime.settings.ai.save_raw_responses:
                     item.raw_response = result.raw_text
-                item.structured_json = json.dumps(filtered, ensure_ascii=False)
+                structured: dict[str, Any]
+                if len(proposals) == 1:
+                    structured = {
+                        **proposals[0][0],
+                        "region": proposals[0][2],
+                    }
+                else:
+                    structured = {
+                        "problems": [
+                            {**proposal, "region": region}
+                            for proposal, _uncertain, region in proposals
+                        ]
+                    }
+                item.structured_json = json.dumps(structured, ensure_ascii=False)
                 item.cost_estimate = float(result.cost_estimate)
+
+                with s.begin_nested():
+                    if intake_session and isinstance(asset, IntakeAsset):
+                        current_order = s.scalar(
+                            select(
+                                func.coalesce(
+                                    func.max(IntakeCandidateRecord.sort_order), -1
+                                )
+                            ).where(
+                                IntakeCandidateRecord.session_id
+                                == intake_session.id
+                            )
+                        )
+                        for offset, (filtered, uncertain, region) in enumerate(
+                            proposals, start=1
+                        ):
+                            s.add(
+                                IntakeCandidateRecord(
+                                    id=new_id("icand"),
+                                    session_id=intake_session.id,
+                                    intake_asset_id=asset.id,
+                                    status="pending",
+                                    fields_json=json.dumps(
+                                        filtered, ensure_ascii=False
+                                    ),
+                                    uncertain_json=json.dumps(
+                                        uncertain, ensure_ascii=False
+                                    ),
+                                    region_json=json.dumps(
+                                        region, ensure_ascii=False
+                                    ),
+                                    sort_order=int(
+                                        -1
+                                        if current_order is None
+                                        else current_order
+                                    )
+                                    + offset,
+                                )
+                            )
+                        intake_session.status = "review"
+                        if not session_holder:
+                            session_holder.append(intake_session.id)
+                    else:
+                        assert problem is not None
+                        assert isinstance(asset, Asset)
+                        review_session = s.scalar(
+                            select(ReviewSession).where(
+                                ReviewSession.job_id == job_id,
+                                ReviewSession.status == "open",
+                            )
+                        )
+                        if not review_session:
+                            review_session = ReviewSession(
+                                id=new_id("rsess"),
+                                source="ai",
+                                job_id=job_id,
+                                status="open",
+                                summary=f"AI 结构化审核 · {job_id}",
+                            )
+                            s.add(review_session)
+                            s.flush()
+                        if not session_holder:
+                            session_holder.append(review_session.id)
+
+                        from yancuo_win.application.sync_service import sync_snapshot
+
+                        candidate_problems = [problem]
+                        for _index in range(1, len(proposals)):
+                            clone = Problem(
+                                id=new_id("problem"),
+                                status="inbox",
+                                revision=1,
+                                human_confirmed=False,
+                            )
+                            clone.assets.append(
+                                Asset(
+                                    id=new_id("asset"),
+                                    role=asset.role,
+                                    sha256=asset.sha256,
+                                    relative_path=asset.relative_path,
+                                    mime_type=asset.mime_type,
+                                    size_bytes=asset.size_bytes,
+                                    width=asset.width,
+                                    height=asset.height,
+                                    is_immutable=asset.is_immutable,
+                                )
+                            )
+                            s.add(clone)
+                            s.flush()
+                            clone_snapshot = sync_snapshot(clone, [])
+                            s.add(
+                                Version(
+                                    id=new_id("ver"),
+                                    problem_id=clone.id,
+                                    revision=1,
+                                    source="ai_staging",
+                                    summary="一图多题候选暂存",
+                                    snapshot_json=json.dumps(
+                                        clone_snapshot, ensure_ascii=False
+                                    ),
+                                    created_by=self.runtime.identity.user_id,
+                                )
+                            )
+                            candidate_problems.append(clone)
+
+                        for candidate_problem, (
+                            filtered,
+                            uncertain,
+                            region,
+                        ) in zip(candidate_problems, proposals, strict=True):
+                            before = sync_snapshot(candidate_problem)
+                            s.add(
+                                ReviewItem(
+                                    id=new_id("ritem"),
+                                    session_id=review_session.id,
+                                    problem_id=candidate_problem.id,
+                                    status="pending",
+                                    base_revision=candidate_problem.revision,
+                                    before_json=json.dumps(
+                                        before, ensure_ascii=False
+                                    ),
+                                    proposed_json=json.dumps(
+                                        filtered, ensure_ascii=False
+                                    ),
+                                    uncertain_json=json.dumps(
+                                        uncertain, ensure_ascii=False
+                                    ),
+                                    region_json=json.dumps(
+                                        region, ensure_ascii=False
+                                    ),
+                                )
+                            )
+
                 item.status = "done"
                 item.error_message = ""
-
-                # 确保有审核会话
-                review_session = s.scalar(
-                    select(ReviewSession).where(
-                        ReviewSession.job_id == job_id, ReviewSession.status == "open"
-                    )
-                )
-                if not review_session:
-                    review_session = ReviewSession(
-                        id=new_id("rsess"),
-                        source="ai",
-                        job_id=job_id,
-                        status="open",
-                        summary=f"AI 结构化审核 · {job_id}",
-                    )
-                    s.add(review_session)
-                    s.flush()
-                if not session_holder:
-                    session_holder.append(review_session.id)
-
-                from yancuo_win.application.sync_service import sync_snapshot
-
-                before = sync_snapshot(problem)
-                s.add(
-                    ReviewItem(
-                        id=new_id("ritem"),
-                        session_id=review_session.id,
-                        problem_id=problem.id,
-                        status="pending",
-                        base_revision=problem.revision,
-                        before_json=json.dumps(before, ensure_ascii=False),
-                        proposed_json=json.dumps(filtered, ensure_ascii=False),
-                        uncertain_json=json.dumps(uncertain, ensure_ascii=False),
-                    )
-                )
                 job.done_items += 1
                 job.updated_at = utcnow()
                 self._audit(
@@ -529,7 +771,14 @@ class AIService:
                     "ai_item_done",
                     "ai_job_item",
                     item.id,
-                    {"problem_id": problem.id, "cost": item.cost_estimate},
+                    {
+                        "problem_id": problem.id if problem else None,
+                        "intake_session_id": (
+                            intake_session.id if intake_session else None
+                        ),
+                        "candidate_count": len(proposals),
+                        "cost": item.cost_estimate,
+                    },
                 )
                 s.commit()
             except Exception as exc:  # noqa: BLE001
