@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from time import perf_counter
 from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 from pydantic import (
     BaseModel,
@@ -119,6 +121,23 @@ class AiSearchResult:
     rejected_matches: tuple[RejectedAiMatch, ...]
     intent_completion: JsonCompletionResult
     rerank_completion: JsonCompletionResult | None
+    diagnostics: AiSearchDiagnostics
+
+
+@dataclass(frozen=True)
+class AiSearchDiagnostics:
+    provider: str
+    model: str
+    stages_ms: dict[str, float]
+    candidates_considered: int
+    candidates_sent: int
+    disclosed_fields: tuple[str, ...]
+    payload_bytes: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_estimate: float
+    request_attempts: int
 
 
 RERANK_SYSTEM_PROMPT = """\
@@ -181,7 +200,12 @@ class AiSearchService:
         boundary: SearchBoundary,
         disclosure: AiSearchDisclosure | None = None,
         model: str | None = None,
+        progress: Callable[[str], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> AiSearchResult:
+        total_started = perf_counter()
+        stages_ms: dict[str, float] = {}
+        policy = disclosure or AiSearchDisclosure()
         provider = self.provider or get_provider(self.runtime.settings)
         provider.validate_configuration()
         selected_model = (
@@ -192,6 +216,9 @@ class AiSearchService:
         if not selected_model:
             raise DomainError("未配置 AI 文本模型")
         timeout_seconds = self.runtime.settings.ai.request_timeout_seconds
+        _check_cancel(should_cancel)
+        _emit_progress(progress, "intent")
+        stage_started = perf_counter()
         intent_request = build_search_spec_request(
             query,
             available_tags=tuple(tag.name for tag in self.app.list_tags())[:100],
@@ -202,17 +229,41 @@ class AiSearchService:
             model=selected_model,
             timeout_seconds=timeout_seconds,
         )
+        stages_ms["intent"] = (perf_counter() - stage_started) * 1000
         spec = parse_search_spec(intent_completion.raw_text)
         plan = SearchSpecCompiler.compile(spec, boundary)
+        _check_cancel(should_cancel)
+        _emit_progress(progress, "local_recall")
+        stage_started = perf_counter()
         candidates = self.recall(plan)
-        policy = disclosure or AiSearchDisclosure()
+        stages_ms["local_recall"] = (perf_counter() - stage_started) * 1000
         rerank_request, sent_candidates = build_rerank_request(
             query,
             plan=plan,
             candidates=candidates,
             disclosure=policy,
         )
+        payload_bytes = (
+            len(
+                str(rerank_request["messages"][1]["content"]).encode("utf-8")
+            )
+            if sent_candidates
+            else 0
+        )
         if not sent_candidates:
+            stages_ms["total"] = (perf_counter() - total_started) * 1000
+            diagnostics = _build_diagnostics(
+                provider=provider,
+                selected_model=selected_model,
+                stages_ms=stages_ms,
+                candidates_considered=len(candidates),
+                candidates_sent=0,
+                policy=policy,
+                payload_bytes=0,
+                intent=intent_completion,
+                rerank=None,
+            )
+            _emit_progress(progress, "complete")
             return AiSearchResult(
                 query=query.strip(),
                 spec=spec,
@@ -223,19 +274,37 @@ class AiSearchService:
                 rejected_matches=(),
                 intent_completion=intent_completion,
                 rerank_completion=None,
+                diagnostics=diagnostics,
             )
+        _check_cancel(should_cancel)
+        _emit_progress(progress, "rerank")
+        stage_started = perf_counter()
         rerank_completion = self._complete(
             provider,
             request=rerank_request,
             model=selected_model,
             timeout_seconds=timeout_seconds,
         )
+        stages_ms["rerank"] = (perf_counter() - stage_started) * 1000
         response = parse_rerank_response(rerank_completion.raw_text)
         matches, rejected = validate_rerank_matches(
             response,
             candidates=sent_candidates,
             result_limit=plan.result_limit,
         )
+        stages_ms["total"] = (perf_counter() - total_started) * 1000
+        diagnostics = _build_diagnostics(
+            provider=provider,
+            selected_model=selected_model,
+            stages_ms=stages_ms,
+            candidates_considered=len(candidates),
+            candidates_sent=len(sent_candidates),
+            policy=policy,
+            payload_bytes=payload_bytes,
+            intent=intent_completion,
+            rerank=rerank_completion,
+        )
+        _emit_progress(progress, "complete")
         return AiSearchResult(
             query=query.strip(),
             spec=spec,
@@ -246,6 +315,7 @@ class AiSearchService:
             rejected_matches=rejected,
             intent_completion=intent_completion,
             rerank_completion=rerank_completion,
+            diagnostics=diagnostics,
         )
 
     @staticmethod
@@ -288,6 +358,14 @@ class AiSearchService:
                 limit=None,
             )
             matched = {hit.problem_id: () for hit in hits}
+        if not hits:
+            return ()
+        if plan.allowed_problem_ids is not None:
+            hits = tuple(
+                hit
+                for hit in hits
+                if hit.problem_id in plan.allowed_problem_ids
+            )
         if not hits:
             return ()
         problems = self.app.list_problems_by_ids(hit.problem_id for hit in hits)
@@ -467,3 +545,58 @@ def _candidate_payload(
 
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"JSON 不允许常量 {value}")
+
+
+def _emit_progress(callback: Callable[[str], None] | None, stage: str) -> None:
+    if callback is not None:
+        callback(stage)
+
+
+def _check_cancel(callback: Callable[[], bool] | None) -> None:
+    if callback is not None and callback():
+        raise DomainError("AI 搜索已取消")
+
+
+def _build_diagnostics(
+    *,
+    provider: AIProvider,
+    selected_model: str,
+    stages_ms: dict[str, float],
+    candidates_considered: int,
+    candidates_sent: int,
+    policy: AiSearchDisclosure,
+    payload_bytes: int,
+    intent: JsonCompletionResult,
+    rerank: JsonCompletionResult | None,
+) -> AiSearchDiagnostics:
+    completions = (intent,) if rerank is None else (intent, rerank)
+    model = next(
+        (completion.model for completion in reversed(completions) if completion.model),
+        selected_model,
+    )
+    return AiSearchDiagnostics(
+        provider=provider.name,
+        model=model,
+        stages_ms={name: round(value, 2) for name, value in stages_ms.items()},
+        candidates_considered=candidates_considered,
+        candidates_sent=candidates_sent,
+        disclosed_fields=_disclosed_fields(policy),
+        payload_bytes=payload_bytes,
+        prompt_tokens=sum(item.prompt_tokens for item in completions),
+        completion_tokens=sum(item.completion_tokens for item in completions),
+        total_tokens=sum(item.total_tokens for item in completions),
+        cost_estimate=round(sum(item.cost_estimate for item in completions), 6),
+        request_attempts=sum(
+            int(item.diagnostics.get("request_attempts") or 1)
+            for item in completions
+        ),
+    )
+
+
+def _disclosed_fields(policy: AiSearchDisclosure) -> tuple[str, ...]:
+    fields = ["ID", "标题", "题干", "知识路径", "标签", "更新时间"]
+    if policy.include_answers:
+        fields.extend(("正确答案", "解析"))
+    if policy.include_personal_content:
+        fields.extend(("我的作答", "错因", "备注"))
+    return tuple(fields)

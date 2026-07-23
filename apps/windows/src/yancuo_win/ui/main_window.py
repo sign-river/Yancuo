@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
@@ -30,10 +31,16 @@ from PySide6.QtWidgets import (
 )
 
 from yancuo_win.application.ai_service import AIService
+from yancuo_win.application.ai_search_service import (
+    AiSearchDisclosure,
+    AiSearchResult,
+    AiSearchService,
+)
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.cloud_service import CloudBackupService
 from yancuo_win.application.intake_service import ProblemIntakeService
 from yancuo_win.application.search_service import SearchIndexService
+from yancuo_win.application.search_spec import SearchBoundary
 from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.application.sync_service import SyncService
 from yancuo_win.cloud.factory import get_cloud_provider
@@ -43,6 +50,7 @@ from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.import_export.gmshare import GmshareService
 from yancuo_win.import_export.workspace import WorkspaceService
 from yancuo_win.tasks.worker import AIJobWorker
+from yancuo_win.tasks.search_worker import AiSearchWorker
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.intake_page import IntakePage
 from yancuo_win.ui.problem_detail import ProblemDetailPage
@@ -81,6 +89,7 @@ class MainWindow(QMainWindow):
         self.runtime = runtime
         self.services = AppServices(runtime)
         self.search = SearchIndexService(runtime)
+        self.ai_search = AiSearchService(runtime)
         self.ai = AIService(runtime)
         self.intake = ProblemIntakeService(runtime)
         self.workspace = WorkspaceService(runtime)
@@ -98,6 +107,11 @@ class MainWindow(QMainWindow):
         self._nav_mode = "active"
         self._selected_problem_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
+        self._ai_search_worker: AiSearchWorker | None = None
+        self._ai_search_query = ""
+        self._ai_search_problem_ids: list[str] | None = None
+        self._ai_search_matches = {}
+        self._ai_search_result: AiSearchResult | None = None
         self._ctx_buttons: list[QPushButton] = []
         self._detail_return_page = _PAGE_LIBRARY
 
@@ -114,6 +128,13 @@ class MainWindow(QMainWindow):
         if self._ai_worker and self._ai_worker.isRunning():
             self._ai_worker.cancel()
             self._ai_worker.wait(3000)
+        if self._ai_search_worker and self._ai_search_worker.isRunning():
+            worker = self._ai_search_worker
+            worker.cancel()
+            if not worker.wait(3000):
+                worker.setParent(None)
+                worker.finished.connect(worker.deleteLater)
+            self._ai_search_worker = None
         super().closeEvent(event)
 
     # —— 壳布局 ——
@@ -364,14 +385,14 @@ class MainWindow(QMainWindow):
         self.local_search_button.setChecked(True)
         self.ai_search_button = QPushButton("AI 搜索")
         self.ai_search_button.setCheckable(True)
-        self.ai_search_button.setEnabled(False)
         self.ai_search_button.setToolTip(
-            "将在安全查询规范完成后开放；当前不会上传题目内容"
+            "只向当前范围内的有限候选发送标题、题干、路径、标签和更新时间"
         )
         for button in (self.local_search_button, self.ai_search_button):
             button.setObjectName("SearchModeButton")
             self.search_mode_group.addButton(button)
             search_row.addWidget(button)
+            button.clicked.connect(self._on_search_mode_changed)
 
         self.search_scope_combo = QComboBox()
         self.search_scope_combo.setObjectName("SearchScopeCombo")
@@ -386,13 +407,14 @@ class MainWindow(QMainWindow):
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("SearchEdit")
         self.search_edit.setPlaceholderText("搜索题目、答案、解析、标签、备注或来源…")
-        self.search_edit.returnPressed.connect(self.refresh_problems)
+        self.search_edit.returnPressed.connect(self._submit_library_search)
+        self.search_edit.textEdited.connect(self._on_search_text_edited)
         search_row.addWidget(self.search_edit, stretch=1)
-        search_button = primary_button("搜索")
-        search_button.clicked.connect(self.refresh_problems)
+        self.search_button = primary_button("搜索")
+        self.search_button.clicked.connect(self._submit_library_search)
         clear_search = ghost_button("清除")
         clear_search.clicked.connect(self._clear_library_search)
-        search_row.addWidget(search_button)
+        search_row.addWidget(self.search_button)
         search_row.addWidget(clear_search)
         outer.addWidget(search_bar)
 
@@ -540,6 +562,7 @@ class MainWindow(QMainWindow):
             raise ValueError(f"unknown library view: {view}")
         if view == self._library_view:
             return
+        self._invalidate_ai_search(cancel=True)
         if self._library_view == "browse":
             self._capture_knowledge_tree_state()
         self._library_modes[self._library_view] = self._nav_mode
@@ -1012,14 +1035,214 @@ class MainWindow(QMainWindow):
         self.search_scope_combo.blockSignals(False)
 
     def _on_search_scope_changed(self, _index: int) -> None:
-        if self.search_edit.text().strip():
+        if self._is_ai_search_mode():
+            self._invalidate_ai_search(cancel=True)
+            self.search_privacy_hint.setText(
+                "AI 搜索范围已变化，请再次点击搜索；普通搜索仍可随时切换。"
+            )
+            self.refresh_problems()
+        elif self.search_edit.text().strip():
             self.refresh_problems()
 
     def _clear_library_search(self) -> None:
-        if not self.search_edit.text():
+        if not self.search_edit.text() and self._ai_search_problem_ids is None:
             return
+        self._invalidate_ai_search(cancel=True)
         self.search_edit.clear()
         self.refresh_problems()
+
+    def _is_ai_search_mode(self) -> bool:
+        return self.ai_search_button.isChecked()
+
+    def _on_search_mode_changed(self, _checked: bool = False) -> None:
+        if self._is_ai_search_mode():
+            self._invalidate_ai_search(cancel=False)
+            self.search_edit.setPlaceholderText(
+                "描述想找的题目，例如：最近用泰勒展开判断等价阶数的高数题"
+            )
+            self.search_privacy_hint.setText(
+                "AI 会先解析意图并在本机召回；默认仅发送最多 20 条候选的"
+                "标题、题干、知识路径、标签和更新时间。"
+            )
+        else:
+            self._invalidate_ai_search(cancel=True)
+            self.search_edit.setPlaceholderText(
+                "搜索题目、答案、解析、标签、备注或来源…"
+            )
+            self.search_privacy_hint.setText(
+                "普通搜索完全离线，只查询本机索引，不产生 AI 请求或费用。"
+            )
+        self.refresh_problems()
+
+    def _on_search_text_edited(self, _text: str) -> None:
+        if self._is_ai_search_mode():
+            self._invalidate_ai_search(cancel=True)
+            self.search_privacy_hint.setText(
+                "描述已修改，请点击搜索；默认不会发送答案、作答、错因、备注或原图。"
+            )
+
+    def _submit_library_search(self) -> None:
+        query = self.search_edit.text().strip()
+        if not query:
+            self._invalidate_ai_search(cancel=True)
+            self.refresh_problems()
+            return
+        if not self._is_ai_search_mode():
+            self._invalidate_ai_search(cancel=True)
+            self.refresh_problems()
+            return
+        self._start_ai_search(query)
+
+    def _current_ai_search_boundary(self) -> SearchBoundary:
+        use_all_active = (
+            self._library_view == "browse"
+            and self.search_scope_combo.currentData() == "all_active"
+        )
+        allowed_problem_ids: frozenset[str] | None = None
+        if self._library_view == "process":
+            statuses = (self._nav_mode,)
+            scope = None
+        elif use_all_active:
+            statuses = ("active",)
+            scope = None
+        else:
+            statuses = ("active",)
+            scope = self._knowledge_scope_from_nav()
+            if self._nav_mode in {"due", "favorite", "recent"}:
+                allowed_problem_ids = frozenset(
+                    problem.id
+                    for problem in self.services.list_problems(
+                        self._filter_from_nav(include_query=False)
+                    )
+                )
+        return SearchBoundary(
+            scope=scope,
+            statuses=statuses,
+            allowed_problem_ids=allowed_problem_ids,
+            max_candidates=50,
+            max_results=10,
+        )
+
+    def _start_ai_search(self, query: str) -> None:
+        if self._ai_search_worker and self._ai_search_worker.isRunning():
+            self.status.showMessage("上一轮 AI 搜索正在结束，请稍候", 3000)
+            return
+        self._invalidate_ai_search(cancel=False)
+        try:
+            boundary = self._current_ai_search_boundary()
+            worker = AiSearchWorker(
+                self.ai_search,
+                query=query,
+                boundary=boundary,
+                disclosure=AiSearchDisclosure(),
+                parent=self,
+            )
+        except DomainError as exc:
+            self._on_ai_search_failed(str(exc))
+            return
+        self._ai_search_worker = worker
+        worker.progress.connect(self._on_ai_search_progress)
+        worker.finished_ok.connect(self._on_ai_search_done)
+        worker.failed.connect(self._on_ai_search_failed)
+        worker.finished.connect(self._on_ai_search_worker_finished)
+        self._set_ai_search_busy(True)
+        self.library_list_hint.setText("AI 搜索 · 正在解析搜索意图…")
+        self.search_privacy_hint.setText(
+            "阶段 1/3：只发送当前搜索描述以生成安全 SearchSpec。"
+        )
+        worker.start()
+
+    def _on_ai_search_progress(self, stage: str) -> None:
+        if self.sender() is not self._ai_search_worker:
+            return
+        labels = {
+            "intent": (
+                "AI 搜索 · 正在解析搜索意图…",
+                "阶段 1/3：只发送当前搜索描述以生成安全 SearchSpec。",
+            ),
+            "local_recall": (
+                "AI 搜索 · 正在本机召回候选…",
+                "阶段 2/3：正在本机执行目录、状态、关键词和结构化筛选。",
+            ),
+            "rerank": (
+                "AI 搜索 · 正在重排有限候选…",
+                "阶段 3/3：默认只发送标题、题干、知识路径、标签和更新时间。",
+            ),
+        }
+        if stage in labels:
+            hint, privacy = labels[stage]
+            self.library_list_hint.setText(hint)
+            self.search_privacy_hint.setText(privacy)
+
+    def _on_ai_search_done(self, result: AiSearchResult) -> None:
+        if self.sender() is not self._ai_search_worker:
+            return
+        self._set_ai_search_busy(False)
+        self._ai_search_result = result
+        self._ai_search_query = result.query
+        self._ai_search_problem_ids = [
+            match.problem.id for match in result.matches
+        ]
+        self._ai_search_matches = {
+            match.problem.id: match for match in result.matches
+        }
+        diagnostics = result.diagnostics
+        fields = "、".join(diagnostics.disclosed_fields)
+        stages = diagnostics.stages_ms
+        self.search_privacy_hint.setText(
+            f"本次向 {diagnostics.provider}/{diagnostics.model} 发送 "
+            f"{diagnostics.candidates_sent} 条候选（{diagnostics.payload_bytes} 字节）；"
+            f"字段：{fields}。耗时：意图 {stages.get('intent', 0.0) / 1000:.2f}s、"
+            f"本地 {stages.get('local_recall', 0.0) / 1000:.2f}s、"
+            f"重排 {stages.get('rerank', 0.0) / 1000:.2f}s、"
+            f"总计 {stages.get('total', 0.0) / 1000:.2f}s；"
+            f"{diagnostics.total_tokens} tokens，估算费用 "
+            f"{diagnostics.cost_estimate:.6f}，请求尝试 {diagnostics.request_attempts} 次。"
+        )
+        self.refresh_problems()
+        self.status.showMessage(
+            f"AI 搜索完成：{len(result.matches)} 条推荐，"
+            f"{diagnostics.total_tokens} tokens，估算费用 "
+            f"{diagnostics.cost_estimate:.6f}",
+            8000,
+        )
+
+    def _on_ai_search_failed(self, error: str) -> None:
+        if self.sender() is not None and self.sender() is not self._ai_search_worker:
+            return
+        self._set_ai_search_busy(False)
+        self._ai_search_problem_ids = None
+        self._ai_search_matches = {}
+        self._ai_search_result = None
+        self.library_list_hint.setText("AI 搜索失败 · 查询内容已保留")
+        self.search_privacy_hint.setText(
+            f"AI 搜索失败：{error}。可修改后重试，或切换“普通搜索”离线查询。"
+        )
+        self.status.showMessage("AI 搜索失败；普通搜索仍可使用", 8000)
+
+    def _on_ai_search_worker_finished(self) -> None:
+        worker = self.sender()
+        if worker is self._ai_search_worker:
+            self._ai_search_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def _set_ai_search_busy(self, busy: bool) -> None:
+        self.search_button.setEnabled(not busy)
+        self.search_button.setText("AI 搜索中…" if busy else "搜索")
+        self.ai_search_button.setEnabled(not busy)
+        self.search_scope_combo.setEnabled(
+            not busy and self._library_view != "process"
+        )
+
+    def _invalidate_ai_search(self, *, cancel: bool) -> None:
+        if cancel and self._ai_search_worker and self._ai_search_worker.isRunning():
+            self._ai_search_worker.cancel()
+        self._ai_search_query = ""
+        self._ai_search_problem_ids = None
+        self._ai_search_matches = {}
+        self._ai_search_result = None
+        self._set_ai_search_busy(False)
 
     def _filter_from_nav(self, *, include_query: bool = True) -> ProblemFilter:
         mode = self._nav_mode
@@ -1099,6 +1322,17 @@ class MainWindow(QMainWindow):
     def _problems_for_current_view(self) -> list[Problem]:
         query = self.search_edit.text().strip()
         if query:
+            if self._is_ai_search_mode():
+                if (
+                    self._ai_search_problem_ids is not None
+                    and self._ai_search_query == query
+                ):
+                    return self.services.list_problems_by_ids(
+                        self._ai_search_problem_ids
+                    )
+                return self.services.list_problems(
+                    self._filter_from_nav(include_query=False)
+                )
             return self._search_current_view(query)
         return self.services.list_problems(
             self._filter_from_nav(include_query=False)
@@ -1108,9 +1342,27 @@ class MainWindow(QMainWindow):
         query = self.search_edit.text().strip()
         if query and result_count is not None:
             scope = self.search_scope_combo.currentText()
-            self.library_list_hint.setText(
-                f"普通搜索 · {result_count} 条结果 · {scope} · 最多显示 200 条"
-            )
+            if (
+                self._is_ai_search_mode()
+                and self._ai_search_result is not None
+                and self._ai_search_query == query
+            ):
+                diagnostics = self._ai_search_result.diagnostics
+                total_seconds = diagnostics.stages_ms.get("total", 0.0) / 1000
+                self.library_list_hint.setText(
+                    f"AI 推荐 · {result_count} 条 · {scope} · "
+                    f"本地候选 {diagnostics.candidates_considered} / "
+                    f"发送 {diagnostics.candidates_sent} · "
+                    f"{total_seconds:.2f}s · {diagnostics.total_tokens} tokens"
+                )
+            elif self._is_ai_search_mode():
+                self.library_list_hint.setText(
+                    f"AI 搜索 · {scope} · 输入描述后点击搜索"
+                )
+            else:
+                self.library_list_hint.setText(
+                    f"普通搜索 · {result_count} 条结果 · {scope} · 最多显示 200 条"
+                )
         elif self._library_view == "browse":
             self.library_list_hint.setText("正式题目 · 双击打开详情")
         else:
@@ -1127,7 +1379,11 @@ class MainWindow(QMainWindow):
         return f"{title}\n{line2}"
 
     def _make_problem_item(self, problem: Problem) -> QListWidgetItem:
-        item = QListWidgetItem(self._problem_item_text(problem))
+        text = self._problem_item_text(problem)
+        match = self._ai_search_matches.get(problem.id)
+        if match is not None and self._is_ai_search_mode():
+            text += f"\nAI {match.score:.0%} · {match.reason}"
+        item = QListWidgetItem(text)
         item.setData(Qt.ItemDataRole.UserRole, problem.id)
         return item
 
@@ -1207,7 +1463,11 @@ class MainWindow(QMainWindow):
             item = self._make_problem_item(matching)
             self.problem_list.insertItem(0, item)
         elif matching is not None and item is not None:
-            item.setText(self._problem_item_text(matching))
+            text = self._problem_item_text(matching)
+            match = self._ai_search_matches.get(matching.id)
+            if match is not None and self._is_ai_search_mode():
+                text += f"\nAI {match.score:.0%} · {match.reason}"
+            item.setText(text)
         if select and item is not None and matching is not None:
             self.problem_list.clearSelection()
             self.problem_list.setCurrentItem(item)
@@ -1251,6 +1511,7 @@ class MainWindow(QMainWindow):
         self.sidebar_stats.setText(summary)
 
     def _apply_nav_mode(self, mode: str) -> None:
+        self._invalidate_ai_search(cancel=True)
         self._nav_mode = mode
         self._library_modes[self._library_view] = mode
         self._update_library_breadcrumb()
@@ -1301,10 +1562,18 @@ class MainWindow(QMainWindow):
         ) or "（无）"
         tags = ", ".join(t.name for t in (p.tags or [])) or "（无）"
         status = _STATUS_LABELS.get(p.status, p.status)
+        match = self._ai_search_matches.get(p.id)
+        ai_reason = (
+            f"<b>AI 匹配原因</b><br>{escape(match.reason)}"
+            f"<br><small>推荐分数 {match.score:.0%}</small><br><br>"
+            if match is not None and self._is_ai_search_mode()
+            else ""
+        )
         self.detail.setObjectName("")
         self.detail.setText(
             f"<b>{p.title or '（无标题）'}</b><br>"
             f"<small>{status} · P{p.priority} · r{p.revision}</small><br><br>"
+            f"{ai_reason}"
             f"<b>标签</b><br>{tags}<br><br>"
             f"<b>原题预览</b><br>"
             f"{(p.question_markdown or '（空）')[:300]}<br><br>"

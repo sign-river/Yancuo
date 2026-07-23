@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ import yancuo_win.ui.review_page as review_page_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
+from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
 
@@ -107,6 +109,16 @@ def _problem_titles(window: MainWindow) -> list[str]:
         window.problem_list.item(index).text().splitlines()[0]
         for index in range(window.problem_list.count())
     ]
+
+
+def _wait_for_ai_search(window: MainWindow, timeout: float = 3.0) -> None:
+    app = QApplication.instance()
+    deadline = time.monotonic() + timeout
+    while window._ai_search_worker is not None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+    assert window._ai_search_worker is None
 
 
 def test_library_views_separate_knowledge_and_lifecycle_navigation(
@@ -262,8 +274,8 @@ def test_local_search_controls_explain_mode_and_privacy(
 ) -> None:
     assert window.local_search_button.isChecked()
     assert window.local_search_button.isEnabled()
-    assert not window.ai_search_button.isEnabled()
-    assert "安全查询规范" in window.ai_search_button.toolTip()
+    assert window.ai_search_button.isEnabled()
+    assert "有限候选" in window.ai_search_button.toolTip()
     assert "完全离线" in window.search_privacy_hint.text()
     assert window.search_scope_combo.currentData() == "current"
 
@@ -309,3 +321,52 @@ def test_processing_search_stays_in_current_lifecycle_status(
     assert window.search_edit.text() == ""
     assert _problem_titles(window) == ["归档题"]
     assert window.library_list_hint.text() == "待处理题目 · 双击打开详情"
+
+
+def test_ai_search_runs_in_background_and_displays_reason(
+    window: MainWindow,
+) -> None:
+    window.ai_search_button.click()
+    assert window.ai_search_button.isChecked()
+    assert "描述想找的题目" in window.search_edit.placeholderText()
+
+    window.search_edit.setText("二重积分题")
+    window._submit_library_search()
+    assert window._ai_search_worker is not None
+    assert not window.search_button.isEnabled()
+    _wait_for_ai_search(window)
+
+    assert _problem_titles(window) == ["二重积分题"]
+    assert "AI 推荐" in window.library_list_hint.text()
+    assert "Mock：本地候选" in window.problem_list.item(0).text()
+    assert "字段：" in window.search_privacy_hint.text()
+    assert "正确答案" not in window.search_privacy_hint.text()
+
+    window.local_search_button.click()
+    window.search_edit.setText("格林公式")
+    window._submit_library_search()
+    assert _problem_titles(window) == ["二重积分题"]
+    assert "普通搜索" in window.library_list_hint.text()
+
+
+def test_ai_search_failure_keeps_query_and_offline_fallback(
+    window: MainWindow,
+) -> None:
+    class FailingSearch:
+        def search(self, *_args, progress=None, **_kwargs):
+            if progress is not None:
+                progress("intent")
+            raise DomainError("模拟网络中断")
+
+    window.ai_search = FailingSearch()
+    window.ai_search_button.click()
+    window.search_edit.setText("保留这段查询")
+    window._submit_library_search()
+    _wait_for_ai_search(window)
+
+    assert window.search_edit.text() == "保留这段查询"
+    assert "模拟网络中断" in window.search_privacy_hint.text()
+    assert window.local_search_button.isEnabled()
+    window.local_search_button.click()
+    assert window.local_search_button.isChecked()
+    assert "完全离线" in window.search_privacy_hint.text()

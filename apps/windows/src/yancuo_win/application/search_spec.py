@@ -175,6 +175,7 @@ class SearchBoundary:
 
     scope: KnowledgeScope | None
     statuses: tuple[str, ...] = ("active",)
+    allowed_problem_ids: frozenset[str] | None = None
     max_candidates: int = 50
     max_results: int = 20
 
@@ -183,6 +184,11 @@ class SearchBoundary:
             raise DomainError("搜索状态范围不能为空")
         for status in self.statuses:
             validate_status(status)
+        if self.allowed_problem_ids is not None:
+            if len(self.allowed_problem_ids) > 100_000:
+                raise DomainError("AI 搜索本地允许 ID 集合超出安全上限")
+            if any(not item or len(item) > 64 for item in self.allowed_problem_ids):
+                raise DomainError("AI 搜索本地允许 ID 无效")
         if not 1 <= self.max_candidates <= 200:
             raise DomainError("本地候选上限必须在 1 到 200 之间")
         if not 1 <= self.max_results <= MAX_RESULTS:
@@ -200,6 +206,7 @@ class CompiledSearchPlan:
     semantic_intent: str
     scope: KnowledgeScope | None
     statuses: tuple[str, ...]
+    allowed_problem_ids: frozenset[str] | None
     candidate_limit: int
     result_limit: int
 
@@ -242,6 +249,7 @@ class SearchSpecCompiler:
             semantic_intent=spec.semantic_intent,
             scope=boundary.scope,
             statuses=boundary.statuses,
+            allowed_problem_ids=boundary.allowed_problem_ids,
             candidate_limit=boundary.max_candidates,
             result_limit=min(spec.limit, boundary.max_results),
         )

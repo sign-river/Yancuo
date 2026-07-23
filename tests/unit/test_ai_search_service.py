@@ -176,6 +176,7 @@ def test_ai_search_only_sends_bounded_local_candidates(ai_search_bundle) -> None
             ),
         ]
     )
+    stages: list[str] = []
     result = AiSearchService(runtime, provider=provider).search(
         "找出用泰勒展开判断等价无穷小的题",
         boundary=SearchBoundary(
@@ -184,6 +185,7 @@ def test_ai_search_only_sends_bounded_local_candidates(ai_search_bundle) -> None
             max_candidates=10,
             max_results=5,
         ),
+        progress=stages.append,
     )
 
     assert provider.validated is True
@@ -204,6 +206,25 @@ def test_ai_search_only_sends_bounded_local_candidates(ai_search_bundle) -> None
     assert "我的敏感错因" not in rerank_user
     assert "我的私人备注" not in rerank_user
     assert "原图" not in rerank_user
+    assert stages == ["intent", "local_recall", "rerank", "complete"]
+    assert set(result.diagnostics.stages_ms) == {
+        "intent",
+        "local_recall",
+        "rerank",
+        "total",
+    }
+    assert result.diagnostics.candidates_sent == 1
+    assert result.diagnostics.total_tokens == 24
+    assert result.diagnostics.request_attempts == 2
+    assert result.diagnostics.disclosed_fields == (
+        "ID",
+        "标题",
+        "题干",
+        "知识路径",
+        "标签",
+        "更新时间",
+    )
+    assert result.diagnostics.payload_bytes == len(rerank_user.encode("utf-8"))
 
 
 def test_keyword_all_any_and_boundary_recall(ai_search_bundle) -> None:
@@ -260,6 +281,25 @@ def test_filter_only_intent_uses_local_scope_browse(ai_search_bundle) -> None:
         provider=QueueProvider([]),
     ).recall(plan)
     assert [item.problem.id for item in candidates] == [target.id]
+
+
+def test_program_owned_allowed_ids_limit_recall(ai_search_bundle) -> None:
+    runtime, _app, target, partial, scope = ai_search_bundle
+    plan = SearchSpecCompiler.compile(
+        parse_search_spec({"keywords": ["泰勒展开"], "match_mode": "any"}),
+        SearchBoundary(
+            scope=scope,
+            statuses=("active",),
+            allowed_problem_ids=frozenset({partial.id}),
+        ),
+    )
+
+    candidates = AiSearchService(
+        runtime,
+        provider=QueueProvider([]),
+    ).recall(plan)
+    assert [item.problem.id for item in candidates] == [partial.id]
+    assert target.id not in {item.problem.id for item in candidates}
 
 
 def test_no_local_candidates_skips_second_ai_request(ai_search_bundle) -> None:
@@ -428,6 +468,27 @@ def test_provider_network_error_is_not_replaced_with_unbounded_fallback(
         AiSearchService(runtime, provider=provider).search(
             "泰勒展开",
             boundary=SearchBoundary(scope=scope, statuses=("active",)),
+        )
+    assert len(provider.requests) == 1
+
+
+def test_cancellation_stops_before_candidate_rerank(ai_search_bundle) -> None:
+    runtime, _app, _target, _partial, scope = ai_search_bundle
+    provider = QueueProvider(
+        [json.dumps({"keywords": ["泰勒展开"]}, ensure_ascii=False)]
+    )
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    with pytest.raises(DomainError, match="已取消"):
+        AiSearchService(runtime, provider=provider).search(
+            "泰勒展开",
+            boundary=SearchBoundary(scope=scope, statuses=("active",)),
+            should_cancel=should_cancel,
         )
     assert len(provider.requests) == 1
 
