@@ -1,7 +1,7 @@
 package cn.yancuo.android.domain
 
 /** 与 protocol/data-format-v1.md、Windows SCHEMA_VERSION 一致。 */
-const val SCHEMA_VERSION: Int = 6
+const val SCHEMA_VERSION: Int = 7
 
 /** 跨端题目字段语义版本。 */
 const val DATA_FORMAT_VERSION: Int = 1

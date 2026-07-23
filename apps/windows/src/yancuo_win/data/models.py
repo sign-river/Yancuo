@@ -34,6 +34,22 @@ class MetaKV(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class SearchDocument(Base):
+    __tablename__ = "search_documents"
+
+    problem_id: Mapped[str] = mapped_column(
+        ForeignKey("problems.id"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chapter_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    knowledge_path: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    title: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    body: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    tags_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Subject(Base):
     __tablename__ = "subjects"
 

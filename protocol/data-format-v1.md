@@ -2,7 +2,7 @@
 
 > 状态：跨端字段语义 v1 稳定基线。变更前须说明原因与兼容性影响。
 > 权威实现：Windows `yancuo_win.data.models` 与 Android `cn.yancuo.android.data.db`。
-> 当前版本：数据库 `schema_version=6`；跨端字段语义 `data_format_version=1`。两者含义不同，不能互换。
+> 当前版本：数据库 `schema_version=7`；跨端字段语义 `data_format_version=1`。两者含义不同，不能互换。
 
 ---
 
@@ -144,10 +144,10 @@
 
 | key | 示例 value |
 |-----|------------|
-| schema_version | `4`（当前迁移目标；历史版本依次为 1、2、3） |
+| schema_version | `7`（当前迁移目标；历史版本依次为 1—6） |
 | data_format_version | `1` |
 
-程序打开库时：若 `schema_version` 高于软件支持版本（当前为 4），应拒绝并提示升级。各次加法迁移见 [`docs/05_schema_v2_变更说明.md`](../docs/05_schema_v2_变更说明.md)、[`docs/06_schema_v3_变更说明.md`](../docs/06_schema_v3_变更说明.md)、[`docs/07_schema_v4_变更说明.md`](../docs/07_schema_v4_变更说明.md)。
+程序打开库时：若 `schema_version` 高于软件支持版本（当前为 7），应拒绝并提示升级。各次加法迁移见 `docs/05`—`docs/07`、[`docs/10_schema_v5_变更说明.md`](../docs/10_schema_v5_变更说明.md)、[`docs/11_schema_v6_变更说明.md`](../docs/11_schema_v6_变更说明.md) 和 [`docs/13_schema_v7_变更说明.md`](../docs/13_schema_v7_变更说明.md)。
 
 ---
 

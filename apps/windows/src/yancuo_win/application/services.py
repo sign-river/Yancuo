@@ -530,6 +530,12 @@ class AppServices:
             pending.extend(child.id for child in children_by_parent.get(current_id, []))
         return tuple(result)
 
+    def chapter_subtree_ids(self, chapter_id: str) -> tuple[str, ...]:
+        """Return a validated chapter subtree for read-side projections."""
+
+        with self.session() as session:
+            return self._chapter_subtree_ids(session, chapter_id)
+
     def list_chapter_tree(
         self,
         subject_id: str,

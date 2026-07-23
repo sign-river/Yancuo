@@ -26,7 +26,7 @@ def test_default_toml_exists() -> None:
 
 def test_load_default_settings() -> None:
     settings = load_settings(default_toml_path())
-    assert settings.application.schema_version == 6
+    assert settings.application.schema_version == 7
     assert settings.ai.enabled is True
     assert settings.ai.default_provider == "openai_compatible"
     assert settings.cloud.enabled is True

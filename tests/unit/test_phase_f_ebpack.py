@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 import zipfile
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -39,15 +41,45 @@ def test_ebpack_roundtrip_consistent(
     assert manifest["format_version"] == 1
     assert manifest["encrypted"] is False
     assert manifest["authoritative_payload"] == "database/snapshot.sqlite"
+    portable_snapshot = tmp_path / "portable-snapshot.sqlite"
+    with zipfile.ZipFile(pack, "r") as archive:
+        portable_snapshot.write_bytes(
+            archive.read("database/snapshot.sqlite")
+        )
+    with closing(sqlite3.connect(portable_snapshot)) as connection:
+        portable_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "search_documents" in portable_tables
+    assert "search_documents_fts" not in portable_tables
 
     target = tmp_path / "restored"
     result = eb.restore_ebpack(pack, target)
     assert result["schema_version"] == SCHEMA_VERSION
     assert (target / "error_book.db").is_file()
     assert any((target / "assets").rglob("*"))
+    with closing(sqlite3.connect(target / "error_book.db")) as connection:
+        exported_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert {"search_documents", "search_documents_fts"} <= exported_tables
 
     monkeypatch.setenv("YANCUO_DATA_ROOT", str(target))
     restored_rt = bootstrap_runtime()
+    with restored_rt.engine.connect() as connection:
+        restored_tables = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "search_documents_fts" in restored_tables
     restored = AppServices(restored_rt)
     got = restored.get_problem(pid)
     assert got is not None

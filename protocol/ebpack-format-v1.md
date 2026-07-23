@@ -1,7 +1,7 @@
 # `.ebpack` 可移植包格式 v1
 
 > 状态：阶段 F 定稿；Windows 支持导出/导入，Android 支持导入 v1 包。变更前须说明原因与兼容性影响。
-> 当前包版本：`schema_version=6`、`data_format_version=1`。
+> 当前包版本：`schema_version=7`、`data_format_version=1`。
 > 实现：Windows `yancuo_win.import_export.ebpack`；Android `EbpackImporter`。
 > 测试向量：`protocol/test-vectors/ebpack-v1/`
 
@@ -15,6 +15,7 @@
 | 原因 | 与本地工作库同构，迁移后直接 `migrate()`；避免双轨漂移 |
 | jsonl | **v1 不写入、不读取**；若未来需要增量交换另开 format_version |
 | 加密 | v1 **不实现**；`manifest.encrypted` 必须为 `false`，加密规范仍待定 |
+| 派生搜索索引 | `search_documents_fts` 不进入快照；Windows 恢复后按投影重建，避免依赖 Android 系统 SQLite 的 trigram tokenizer |
 
 阶段 B 的 `yancuo-local-backup` zip **仍可恢复**，但新备份应优先生成 `.ebpack`。
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 # 与 protocol/data-format-v1.md、迁移目标版本一致
 DATA_FORMAT_VERSION = 1
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)

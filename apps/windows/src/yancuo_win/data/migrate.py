@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import closing
+from datetime import datetime, timezone
 import logging
+import os
+from pathlib import Path
+import shutil
+import sqlite3
 from collections.abc import Callable
 
 from sqlalchemy import text
@@ -49,6 +55,90 @@ def get_schema_version(engine: Engine) -> int:
         if not row:
             return 0
         return int(row[0])
+
+
+def verify_sqlite_database(
+    database_path: Path,
+    *,
+    expected_schema_version: int | None = None,
+) -> None:
+    """Verify that a SQLite database is readable, intact, and at the expected version."""
+
+    with closing(sqlite3.connect(database_path)) as connection:
+        with closing(connection.execute("PRAGMA integrity_check")) as cursor:
+            integrity = cursor.fetchone()
+        if integrity is None or integrity[0] != "ok":
+            detail = integrity[0] if integrity else "no result"
+            raise RuntimeError(f"SQLite 完整性检查失败：{detail}")
+        if expected_schema_version is None:
+            return
+        with closing(
+            connection.execute(
+                "SELECT value FROM meta_kv WHERE key='schema_version'"
+            )
+        ) as cursor:
+            row = cursor.fetchone()
+        actual = int(row[0]) if row else 0
+        if actual != expected_schema_version:
+            raise RuntimeError(
+                "SQLite schema 版本校验失败："
+                f"期望 {expected_schema_version}，实际 {actual}"
+            )
+
+
+def create_pre_migration_backup(
+    database_path: Path,
+    backup_dir: Path,
+    *,
+    from_version: int,
+    target_version: int,
+) -> Path:
+    """Create and verify an online SQLite backup before a schema upgrade."""
+
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup_path = (
+        backup_dir
+        / f"pre-migration-v{from_version}-to-v{target_version}-{timestamp}.sqlite"
+    )
+    with closing(sqlite3.connect(database_path)) as source:
+        with closing(sqlite3.connect(backup_path)) as destination:
+            source.backup(destination)
+    verify_sqlite_database(
+        backup_path,
+        expected_schema_version=from_version,
+    )
+    logger.info("created pre-migration backup: %s", backup_path)
+    return backup_path
+
+
+def restore_pre_migration_backup(
+    backup_path: Path,
+    database_path: Path,
+    *,
+    expected_schema_version: int,
+) -> None:
+    """Atomically restore a verified pre-migration backup."""
+
+    verify_sqlite_database(
+        backup_path,
+        expected_schema_version=expected_schema_version,
+    )
+    restore_path = database_path.with_suffix(database_path.suffix + ".restore")
+    try:
+        shutil.copy2(backup_path, restore_path)
+        verify_sqlite_database(
+            restore_path,
+            expected_schema_version=expected_schema_version,
+        )
+        os.replace(restore_path, database_path)
+    finally:
+        restore_path.unlink(missing_ok=True)
+    verify_sqlite_database(
+        database_path,
+        expected_schema_version=expected_schema_version,
+    )
+    logger.warning("restored database from pre-migration backup: %s", backup_path)
 
 
 def set_schema_version(session: Session, version: int) -> None:
@@ -158,6 +248,60 @@ def _migrate_to_v6(engine: Engine) -> None:
     logger.info("migrated database to schema_version=6")
 
 
+def _migrate_to_v7(engine: Engine) -> None:
+    """Add local search projection and trigram FTS5 index."""
+
+    Base.metadata.create_all(engine)
+    ensure_search_index_schema(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 7)
+        session.commit()
+    logger.info("migrated database to schema_version=7")
+
+
+def ensure_search_index_schema(engine: Engine) -> None:
+    """Create the platform-local FTS table and repair it from the projection."""
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS search_documents_fts
+                USING fts5(
+                    problem_id UNINDEXED,
+                    title,
+                    body,
+                    tags_text,
+                    knowledge_path,
+                    tokenize='trigram'
+                )
+                """
+            )
+        )
+        projection_count = int(
+            conn.execute(text("SELECT count(*) FROM search_documents")).scalar_one()
+        )
+        fts_count = int(
+            conn.execute(
+                text("SELECT count(*) FROM search_documents_fts")
+            ).scalar_one()
+        )
+        if projection_count != fts_count:
+            conn.execute(text("DELETE FROM search_documents_fts"))
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO search_documents_fts(
+                        problem_id, title, body, tags_text, knowledge_path
+                    )
+                    SELECT
+                        problem_id, title, body, tags_text, knowledge_path
+                    FROM search_documents
+                    """
+                )
+            )
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
@@ -165,6 +309,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     4: _migrate_to_v4,
     5: _migrate_to_v5,
     6: _migrate_to_v6,
+    7: _migrate_to_v7,
 }
 
 
@@ -211,6 +356,8 @@ def verify_core_tables(engine: Engine) -> list[str]:
         "intake_assets",
         "intake_candidates",
     }
+    if get_schema_version(engine) >= 7:
+        required.update({"search_documents", "search_documents_fts"})
     with engine.connect() as conn:
         rows = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table'")

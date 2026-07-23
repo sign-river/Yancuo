@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sqlite3
 import zipfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -69,11 +71,21 @@ class EbpackService:
             (staging / "database").mkdir()
             snapshot = staging / "database" / "snapshot.sqlite"
             shutil.copy2(db_src, snapshot)
+            # FTS5 trigram is a Windows-side disposable index. Older Android
+            # SQLite builds may not provide that tokenizer, so portable
+            # snapshots carry the canonical projection but omit the virtual
+            # table. Windows recreates it on the next bootstrap.
+            with closing(sqlite3.connect(snapshot)) as connection:
+                connection.execute("DROP TABLE IF EXISTS search_documents_fts")
+                connection.commit()
 
             migrations = {
                 "schema_version_at_export": self.runtime.schema_version,
                 "data_format_version": DATA_FORMAT_VERSION,
-                "note": "Restore uses snapshot.sqlite then app migrate().",
+                "note": (
+                    "Restore uses snapshot.sqlite then app migrate(); "
+                    "platform-local FTS is rebuilt on startup."
+                ),
             }
             (staging / "database" / "migrations.json").write_text(
                 json.dumps(migrations, ensure_ascii=False, indent=2) + "\n",
@@ -337,12 +349,18 @@ class EbpackService:
                     moved_new.append(identity_dest)
 
                 from yancuo_win.data.db import make_engine
-                from yancuo_win.data.migrate import migrate, verify_core_tables
+                from yancuo_win.data.migrate import (
+                    ensure_search_index_schema,
+                    migrate,
+                    verify_core_tables,
+                )
 
                 try:
                     engine = make_engine(db_dest)
                     try:
                         version = migrate(engine)
+                        if version >= 7:
+                            ensure_search_index_schema(engine)
                         missing = verify_core_tables(engine)
                     finally:
                         engine.dispose()

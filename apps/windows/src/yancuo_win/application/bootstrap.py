@@ -15,7 +15,14 @@ from yancuo_win.config.settings import (
     load_settings,
 )
 from yancuo_win.data.db import make_engine, make_session_factory
-from yancuo_win.data.migrate import migrate, verify_core_tables
+from yancuo_win.data.migrate import (
+    create_pre_migration_backup,
+    ensure_search_index_schema,
+    get_schema_version,
+    migrate,
+    restore_pre_migration_backup,
+    verify_core_tables,
+)
 from yancuo_win.domain.identity import LocalIdentity, load_or_create_identity
 from yancuo_win.infrastructure.paths import (
     DataPaths,
@@ -62,19 +69,38 @@ def bootstrap_runtime(*, run_migrate: bool = True) -> RuntimeContext:
     )
 
     engine = make_engine(paths.database)
-    session_factory = make_session_factory(engine)
-
     schema_version = 0
     if run_migrate:
-        schema_version = migrate(engine, target_version=settings.application.schema_version)
-        missing = verify_core_tables(engine)
-        if missing:
-            raise RuntimeError(f"数据库缺少核心表：{', '.join(missing)}")
+        target_version = settings.application.schema_version
+        current_version = get_schema_version(engine)
+        backup_path = None
+        if 0 < current_version < target_version:
+            backup_path = create_pre_migration_backup(
+                paths.database,
+                paths.backup_dir,
+                from_version=current_version,
+                target_version=target_version,
+            )
+        try:
+            schema_version = migrate(engine, target_version=target_version)
+            if schema_version >= 7:
+                ensure_search_index_schema(engine)
+            missing = verify_core_tables(engine)
+            if missing:
+                raise RuntimeError(f"数据库缺少核心表：{', '.join(missing)}")
+        except Exception:
+            if backup_path is not None:
+                engine.dispose()
+                restore_pre_migration_backup(
+                    backup_path,
+                    paths.database,
+                    expected_schema_version=current_version,
+                )
+            raise
         logger.info("schema_version=%s", schema_version)
     else:
-        from yancuo_win.data.migrate import get_schema_version
-
         schema_version = get_schema_version(engine)
+    session_factory = make_session_factory(engine)
 
     return RuntimeContext(
         settings=settings,
