@@ -282,6 +282,143 @@ def build_problem_html(
 </html>"""
 
 
+def build_note_html(
+    fields: Mapping[str, Any],
+    *,
+    blocks: Iterable[Mapping[str, Any]] = (),
+    tag_names: Iterable[str] = (),
+    theme: str = "light",
+) -> str:
+    """Build an offline note document with independently rendered content blocks."""
+
+    colors = theme_tokens(theme)
+    title = str(fields.get("title") or "未命名笔记")
+    summary = str(fields.get("summary") or "")
+    tags = [str(tag).strip() for tag in tag_names if str(tag).strip()]
+    meta_parts: list[str] = []
+    for label, key in (("科目", "subject_name"), ("章节", "chapter_name")):
+        value = fields.get(key)
+        if value:
+            meta_parts.append(
+                f'<span class="meta-chip"><b>{html.escape(label)}</b> '
+                f"{html.escape(str(value))}</span>"
+            )
+    meta_parts.extend(f'<span class="tag">{html.escape(tag)}</span>' for tag in tags)
+
+    rendered_blocks: list[str] = []
+    for raw in blocks:
+        block_type = str(raw.get("block_type") or "text")
+        markdown = str(raw.get("content_markdown") or "")
+        latex = str(raw.get("content_latex") or "")
+        region = raw.get("source_region")
+        source = ""
+        if isinstance(region, Mapping) and region:
+            try:
+                x = round(float(region.get("x", 0)) * 100)
+                y = round(float(region.get("y", 0)) * 100)
+                width = round(float(region.get("width", 0)) * 100)
+                height = round(float(region.get("height", 0)) * 100)
+                source = (
+                    '<span class="source-chip">'
+                    f"原图区域 {x}% / {y}% / {width}% × {height}%"
+                    "</span>"
+                )
+            except (TypeError, ValueError):
+                source = ""
+        if block_type == "heading":
+            rendered_blocks.append(
+                '<section class="note-heading">'
+                f"<h2>{render_math_text(markdown, allow_bare_latex=True)}</h2>{source}"
+                "</section>"
+            )
+            continue
+        if block_type == "formula":
+            content = _formula_html(latex or markdown, display=True)
+            label = "公式"
+        elif block_type == "concept":
+            content = render_math_text(markdown, allow_bare_latex=True)
+            label = "概念"
+        elif block_type == "callout":
+            content = render_math_text(markdown, allow_bare_latex=True)
+            rendered_blocks.append(
+                '<section class="callout-card"><div class="block-label">重点提示</div>'
+                f'<div class="rich-text">{content}</div>{source}</section>'
+            )
+            continue
+        elif block_type == "image":
+            content = render_math_text(markdown, empty="图片块", allow_bare_latex=False)
+            label = "图片说明"
+        else:
+            content = render_math_text(markdown, allow_bare_latex=True)
+            label = "内容"
+        rendered_blocks.append(
+            '<section class="content-card">'
+            f'<div class="block-label">{label}</div>'
+            f'<div class="rich-text">{content}</div>{source}</section>'
+        )
+
+    if not rendered_blocks:
+        rendered_blocks.append(
+            '<section class="empty-note">尚未添加内容块。</section>'
+        )
+    summary_html = (
+        f'<p class="summary">{render_math_text(summary, empty="", allow_bare_latex=True)}</p>'
+        if summary.strip()
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="{colors.name}">
+<style>
+  :root {{ color-scheme: {colors.name}; }}
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; min-height: 100%; background: {colors.bg}; color: {colors.text}; }}
+  body {{
+    padding: 24px;
+    font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    font-size: 16px; line-height: 1.8;
+  }}
+  header {{ margin: 0 0 18px; }}
+  .eyebrow, .block-label {{ color: {colors.primary}; font-size: 13px; font-weight: 700; letter-spacing: .06em; }}
+  h1 {{ margin: 4px 0 8px; font-size: 28px; line-height: 1.35; }}
+  h2 {{ margin: 0; font-size: 21px; line-height: 1.5; }}
+  .summary {{ margin: 0 0 12px; color: {colors.muted}; white-space: pre-wrap; }}
+  .meta-row {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+  .meta-chip, .tag, .source-chip {{
+    display: inline-block; padding: 3px 9px; border-radius: 999px;
+    background: {colors.chip_bg}; color: {colors.chip_text}; font-size: 12px;
+  }}
+  .tag {{ background: {colors.tag_bg}; color: {colors.tag_text}; }}
+  .source-chip {{ margin-top: 12px; color: {colors.muted}; }}
+  .content-card, .note-heading, .callout-card {{
+    margin: 0 0 14px; padding: 18px 20px; background: {colors.card};
+    border: 1px solid {colors.border}; border-radius: 12px;
+  }}
+  .note-heading {{ padding: 14px 18px; }}
+  .callout-card {{ border-left: 4px solid {colors.primary}; background: {colors.hidden_bg}; }}
+  .rich-text {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
+  .rich-text math {{ font-family: "Cambria Math", "STIX Two Math", serif; font-size: 1.18em; }}
+  .rich-text math[display="block"] {{ margin: .85em 0; text-align: left; }}
+  .empty-note {{ padding: 28px; color: {colors.muted}; text-align: center; }}
+  .empty {{ color: {colors.muted}; }}
+  .math-fallback {{ padding: 2px 5px; border-radius: 4px; background: {colors.fallback_bg}; color: {colors.fallback_text}; }}
+  .math-fallback-block {{ display: block; padding: 10px; overflow-x: auto; }}
+</style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">笔记阅读</div>
+  <h1>{html.escape(title)}</h1>
+  {summary_html}
+  <div class="meta-row">{''.join(meta_parts)}</div>
+</header>
+{''.join(rendered_blocks)}
+</body>
+</html>"""
+
+
 class MathContentView(QWebEngineView):
     """Read-only embedded browser used by every formula-bearing UI."""
 
@@ -289,6 +426,7 @@ class MathContentView(QWebEngineView):
         super().__init__(parent)
         self.last_html = ""
         self._last_render: dict[str, Any] | None = None
+        self._last_note_render: dict[str, Any] | None = None
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.page().setBackgroundColor(Qt.GlobalColor.transparent)
         manager = get_theme_manager(QApplication.instance())
@@ -304,6 +442,7 @@ class MathContentView(QWebEngineView):
         show_header: bool = True,
         show_answer_notice: bool = True,
     ) -> None:
+        self._last_note_render = None
         self._last_render = {
             "fields": dict(fields),
             "tag_names": tuple(tag_names),
@@ -313,7 +452,31 @@ class MathContentView(QWebEngineView):
         }
         self._render_last()
 
+    def set_note(
+        self,
+        fields: Mapping[str, Any],
+        *,
+        blocks: Iterable[Mapping[str, Any]] = (),
+        tag_names: Iterable[str] = (),
+    ) -> None:
+        self._last_render = None
+        self._last_note_render = {
+            "fields": dict(fields),
+            "blocks": tuple(dict(block) for block in blocks),
+            "tag_names": tuple(tag_names),
+        }
+        self._render_last()
+
     def _render_last(self) -> None:
+        if self._last_note_render is not None:
+            self.last_html = build_note_html(
+                self._last_note_render["fields"],
+                blocks=self._last_note_render["blocks"],
+                tag_names=self._last_note_render["tag_names"],
+                theme=current_theme_name(),
+            )
+            self.setHtml(self.last_html)
+            return
         if self._last_render is None:
             return
         self.last_html = build_problem_html(

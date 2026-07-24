@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QWidget
 
 import yancuo_win.ui.intake_page as intake_page_module
+import yancuo_win.ui.note_page as note_page_module
 import yancuo_win.ui.problem_detail as problem_detail_module
 import yancuo_win.ui.review_page as review_page_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
@@ -27,6 +28,9 @@ class _ReaderStub(QWidget):
     def set_message(self, *_args, **_kwargs) -> None:
         pass
 
+    def set_note(self, *_args, **_kwargs) -> None:
+        pass
+
 
 @pytest.fixture()
 def window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
@@ -34,6 +38,7 @@ def window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
     monkeypatch.setenv("YANCUO_AI__DEFAULT_PROVIDER", "mock")
     monkeypatch.setattr(intake_page_module, "MathContentView", _ReaderStub)
+    monkeypatch.setattr(note_page_module, "MathContentView", _ReaderStub)
     monkeypatch.setattr(problem_detail_module, "MathContentView", _ReaderStub)
     monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
     app = QApplication.instance() or QApplication([])

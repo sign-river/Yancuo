@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from yancuo_win.ui.math_content import build_problem_html, render_math_text
+from yancuo_win.ui.math_content import (
+    build_note_html,
+    build_problem_html,
+    render_math_text,
+)
 
 
 def test_render_math_text_converts_inline_and_display_latex_to_mathml() -> None:
@@ -126,3 +130,34 @@ def test_problem_document_uses_dark_theme_tokens() -> None:
     assert "background: #11151C" in rendered
     assert "color: #E8EDF5" in rendered
     assert "<mfrac>" in rendered
+
+
+def test_note_document_renders_formula_concept_and_source_region() -> None:
+    rendered = build_note_html(
+        {"title": "积分公式", "summary": r"记住 \(\int x\,dx\)"},
+        blocks=(
+            {
+                "block_type": "formula",
+                "content_latex": r"\int x\,dx=\frac{x^2}{2}+C",
+                "source_region": {
+                    "x": 0.1,
+                    "y": 0.2,
+                    "width": 0.5,
+                    "height": 0.25,
+                },
+            },
+            {
+                "block_type": "concept",
+                "content_markdown": r"常数 \(C\) 表示任意积分常数。",
+            },
+        ),
+        tag_names=("不定积分",),
+    )
+
+    assert "积分公式" in rendered
+    assert "概念" in rendered
+    assert "原图区域 10% / 20% / 50% × 25%" in rendered
+    assert "不定积分" in rendered
+    assert rendered.count("<math") >= 3
+    assert "<mfrac>" in rendered
+    assert r"\frac" not in rendered

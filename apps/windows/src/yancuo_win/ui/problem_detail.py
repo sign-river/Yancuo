@@ -8,88 +8,18 @@ from typing import Any
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from yancuo_win.data.models import Problem
+from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import CardFrame, ghost_button, primary_button
-
-
-class _ImageViewerDialog(QDialog):
-    def __init__(self, pixmap: QPixmap, parent=None) -> None:
-        super().__init__(parent)
-        self._source = pixmap
-        self._scale = 1.0
-        self.setWindowTitle("查看原始图片")
-        self.resize(1000, 760)
-
-        root = QVBoxLayout(self)
-        controls = QHBoxLayout()
-        zoom_out = QPushButton("－")
-        zoom_out.clicked.connect(lambda: self._zoom(0.8))
-        reset = QPushButton("100%")
-        reset.clicked.connect(self._reset)
-        zoom_in = QPushButton("＋")
-        zoom_in.clicked.connect(lambda: self._zoom(1.25))
-        fit = QPushButton("适应窗口")
-        fit.clicked.connect(self._fit)
-        self.scale_label = QLabel("")
-        for button in (zoom_out, reset, zoom_in, fit):
-            controls.addWidget(button)
-        controls.addWidget(self.scale_label)
-        controls.addStretch(1)
-        root.addLayout(controls)
-
-        self.image = QLabel()
-        self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.scroll = QScrollArea()
-        self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.scroll.setWidget(self.image)
-        self.scroll.setWidgetResizable(False)
-        root.addWidget(self.scroll, stretch=1)
-        self._render()
-
-    def showEvent(self, event) -> None:  # noqa: ANN001, N802
-        super().showEvent(event)
-        self._fit()
-
-    def _zoom(self, factor: float) -> None:
-        self._scale = max(0.1, min(5.0, self._scale * factor))
-        self._render()
-
-    def _reset(self) -> None:
-        self._scale = 1.0
-        self._render()
-
-    def _fit(self) -> None:
-        viewport = self.scroll.viewport().size() - QSize(24, 24)
-        if self._source.width() and self._source.height():
-            self._scale = min(
-                viewport.width() / self._source.width(),
-                viewport.height() / self._source.height(),
-                1.0,
-            )
-        self._render()
-
-    def _render(self) -> None:
-        size = self._source.size() * self._scale
-        self.image.setPixmap(
-            self._source.scaled(
-                size,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
-        self.image.resize(size)
-        self.scale_label.setText(f"{round(self._scale * 100)}%")
 
 
 class _DetailImage(QLabel):
@@ -113,7 +43,7 @@ class _DetailImage(QLabel):
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001, N802
         if not self._source.isNull():
-            _ImageViewerDialog(self._source, self).exec()
+            ImageViewerDialog(self._source, self).exec()
         super().mouseDoubleClickEvent(event)
 
     def _render(self) -> None:

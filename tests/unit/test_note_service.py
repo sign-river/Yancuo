@@ -40,8 +40,9 @@ def test_note_documents_keep_independent_fields_and_ordered_blocks(note_bundle) 
     )
     second = notes.add_block(
         note.id,
-        block_type="text",
+        block_type="concept",
         content_markdown="小角近似的适用条件。",
+        source_region={"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
     )
     notes.reorder_blocks(note.id, [second.id, first.id])
     loaded = notes.get_note(note.id)
@@ -50,6 +51,8 @@ def test_note_documents_keep_independent_fields_and_ordered_blocks(note_bundle) 
     assert [block.sort_order for block in loaded.blocks] == [0, 1]
     assert loaded.subject_id == subject.id
     assert loaded.chapter_id == chapter.id
+    assert loaded.blocks[0].block_type == "concept"
+    assert '"width":0.3' in loaded.blocks[0].source_region_json
     assert app.get_problem(problem.id).title == "题目不能被笔记影响"
     assert not hasattr(loaded, "correct_answer")
     assert not hasattr(loaded, "review_count")

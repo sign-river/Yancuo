@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -54,7 +56,11 @@ def test_confirmed_draft_stores_immutable_source_asset(note_ai) -> None:
 def test_confirmed_draft_can_use_user_edited_blocks(note_ai) -> None:
     service, image = note_ai
     draft = service.extract_from_image(image)
-    edited = NoteBlockDraft(block_type="text", content_markdown="用户确认后的概念")
+    edited = NoteBlockDraft(
+        block_type="concept",
+        content_markdown="用户确认后的概念",
+        source_region={"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+    )
     confirmed = type(draft)(
         source_path=draft.source_path,
         title=draft.title,
@@ -71,3 +77,36 @@ def test_confirmed_draft_can_use_user_edited_blocks(note_ai) -> None:
     note = service.commit_draft(confirmed)
 
     assert [block.content_markdown for block in note.blocks] == ["用户确认后的概念"]
+    assert note.blocks[0].block_type == "concept"
+    assert json.loads(note.blocks[0].source_region_json) == edited.source_region
+
+
+def test_note_ai_normalizes_block_source_regions(note_ai) -> None:
+    service, image = note_ai
+
+    draft = service._normalize_draft(
+        image,
+        {
+            "blocks": [
+                {
+                    "type": "concept",
+                    "markdown": "定义域",
+                    "region": {
+                        "x": -0.2,
+                        "y": 0.25,
+                        "width": 0.6,
+                        "height": 2,
+                    },
+                }
+            ]
+        },
+        [],
+        SimpleNamespace(model="test", cost_estimate=0),
+    )
+
+    assert draft.blocks[0].source_region == {
+        "x": 0.0,
+        "y": 0.25,
+        "width": 0.6,
+        "height": 0.75,
+    }

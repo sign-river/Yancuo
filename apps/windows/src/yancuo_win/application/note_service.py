@@ -23,7 +23,9 @@ from yancuo_win.domain.rules import (
     validate_status,
 )
 
-NOTE_BLOCK_TYPES = frozenset({"heading", "text", "formula", "image", "callout"})
+NOTE_BLOCK_TYPES = frozenset(
+    {"heading", "text", "concept", "formula", "image", "callout"}
+)
 _EDITABLE_STATUSES = frozenset({"inbox", "active", "archived"})
 
 

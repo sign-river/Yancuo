@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from html import escape
+import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -22,12 +22,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
-    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from yancuo_win.ai.base import normalize_region
 from yancuo_win.application.note_ai_service import (
     NoteAiService,
     NoteBlockDraft,
@@ -37,6 +37,8 @@ from yancuo_win.application.note_service import NoteService
 from yancuo_win.data.models import NoteBlock, NoteDocument
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.note_worker import NoteExtractionWorker
+from yancuo_win.ui.image_viewer import ImageViewerDialog
+from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import CardFrame, danger_button, ghost_button, primary_button
 
 _STATUS_LABELS = {
@@ -48,6 +50,7 @@ _STATUS_LABELS = {
 _BLOCK_LABELS = {
     "heading": "标题",
     "text": "文本",
+    "concept": "概念",
     "formula": "公式",
     "callout": "提示",
     "image": "图片",
@@ -150,6 +153,7 @@ class NoteExtractionDialog(QDialog):
             block_type=block.block_type,
             content_markdown="" if block.block_type == "formula" else value,
             content_latex=value if block.block_type == "formula" else block.content_latex,
+            source_region=block.source_region,
             uncertain_fields=block.uncertain_fields,
         )
 
@@ -173,6 +177,7 @@ class NotePage(QWidget):
         self._notes: list[NoteDocument] = []
         self._note: NoteDocument | None = None
         self._block: NoteBlock | None = None
+        self._original_path: Path | None = None
         self._loading = False
         self.note_ai = NoteAiService(notes.runtime)
         self.note_worker: NoteExtractionWorker | None = None
@@ -258,10 +263,14 @@ class NotePage(QWidget):
         self.note_status.setObjectName("MutedLabel")
         header.addWidget(self.note_status)
         header.addStretch(1)
+        self.original_button = ghost_button("查看原图")
+        self.original_button.setToolTip("按需打开录入时保存的不可变原图")
+        self.original_button.clicked.connect(self._open_original)
         self.read_button = ghost_button("阅读预览")
         self.read_button.clicked.connect(lambda: self._set_mode("read"))
         self.edit_button = primary_button("编辑内容")
         self.edit_button.clicked.connect(lambda: self._set_mode("edit"))
+        header.addWidget(self.original_button)
         header.addWidget(self.read_button)
         header.addWidget(self.edit_button)
         layout.addLayout(header)
@@ -304,7 +313,7 @@ class NotePage(QWidget):
         block_card = CardFrame()
         block_card.add_title("内容块")
         block_actions = QHBoxLayout()
-        for block_type in ("heading", "text", "formula", "callout"):
+        for block_type in ("heading", "concept", "text", "formula", "callout"):
             button = QPushButton(f"+ {_BLOCK_LABELS[block_type]}")
             button.clicked.connect(
                 lambda _checked=False, value=block_type: self._add_block(value)
@@ -345,9 +354,8 @@ class NotePage(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.reader = QTextBrowser()
+        self.reader = MathContentView()
         self.reader.setObjectName("NoteReader")
-        self.reader.setOpenExternalLinks(False)
         layout.addWidget(self.reader)
         return page
 
@@ -428,6 +436,26 @@ class NotePage(QWidget):
         self.save_note_button.setEnabled(editable)
         self.trash_button.setVisible(editable)
         self.restore_button.setVisible(note.status == "trashed")
+        original_asset = next(
+            (asset for asset in note.assets if asset.role == "original"),
+            None,
+        )
+        self._original_path = (
+            self.note_ai.store.resolve(original_asset.relative_path)
+            if original_asset is not None
+            else None
+        )
+        has_original = original_asset is not None
+        original_available = bool(
+            self._original_path is not None and self._original_path.is_file()
+        )
+        self.original_button.setVisible(has_original)
+        self.original_button.setEnabled(original_available)
+        self.original_button.setToolTip(
+            "按需打开录入时保存的不可变原图"
+            if original_available
+            else "原图文件已丢失，请从备份恢复"
+        )
         self.block_list.clear()
         for index, block in enumerate(note.blocks, start=1):
             value = block.content_latex if block.block_type == "formula" else block.content_markdown
@@ -665,28 +693,45 @@ class NotePage(QWidget):
     def _render_reader(self) -> None:
         note = self._note
         if note is None:
-            self.reader.setHtml("")
+            self.reader.set_note({}, blocks=())
             return
-        blocks: list[str] = []
-        for block in note.blocks:
-            value = block.content_latex if block.block_type == "formula" else block.content_markdown
-            if block.block_type == "heading":
-                blocks.append(f"<h2>{escape(value or '（未命名标题）')}</h2>")
-            elif block.block_type == "formula":
-                blocks.append(f"<pre class='formula'>{escape(value or '（空公式）')}</pre>")
-            elif block.block_type == "callout":
-                blocks.append(f"<aside>{escape(value or '（空提示）')}</aside>")
-            else:
-                blocks.append(f"<p>{escape(value or '（空内容）').replace(chr(10), '<br>')}</p>")
-        body = "".join(blocks) or "<p class='muted'>尚未添加内容块。</p>"
-        self.reader.setHtml(
-            "<html><head><style>"
-            "body{font-family:'Microsoft YaHei UI';font-size:16px;line-height:1.8;padding:18px;}"
-            "h1{font-size:28px;}h2{margin-top:26px;}p{white-space:normal;}"
-            ".formula{padding:14px;background:#f4f6fa;border-radius:8px;white-space:pre-wrap;}"
-            "aside{padding:12px 16px;background:#edf4ff;border-left:4px solid #3772ff;border-radius:6px;}"
-            ".muted{color:#768399;}"
-            "</style></head><body>"
-            f"<h1>{escape(note.title or '未命名笔记')}</h1>"
-            f"<p class='muted'>{escape(note.summary)}</p>{body}</body></html>"
+        self.reader.set_note(
+            {"title": note.title, "summary": note.summary},
+            blocks=(
+                {
+                    "block_type": block.block_type,
+                    "content_markdown": block.content_markdown,
+                    "content_latex": block.content_latex,
+                    "source_region": self._decode_source_region(
+                        block.source_region_json
+                    ),
+                }
+                for block in note.blocks
+            ),
+            tag_names=(tag.name for tag in note.tags),
         )
+
+    def _open_original(self) -> None:
+        if self._original_path is None or not self._original_path.is_file():
+            self.status_message.emit("原图文件不存在，请从备份恢复")
+            return
+        pixmap = QPixmap(str(self._original_path))
+        if pixmap.isNull():
+            self.status_message.emit("原图格式无法读取")
+            return
+        regions = (
+            self._decode_source_region(block.source_region_json)
+            for block in (self._note.blocks if self._note is not None else ())
+        )
+        ImageViewerDialog(
+            pixmap,
+            self,
+            source_regions=(region for region in regions if region),
+        ).exec()
+
+    @staticmethod
+    def _decode_source_region(value: str) -> dict[str, float]:
+        try:
+            return normalize_region(json.loads(value or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}

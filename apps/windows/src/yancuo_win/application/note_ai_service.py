@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from yancuo_win.ai.base import normalize_region
 from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.note_service import NoteService
@@ -21,6 +22,7 @@ class NoteBlockDraft:
     block_type: str
     content_markdown: str = ""
     content_latex: str = ""
+    source_region: dict[str, float] = field(default_factory=dict)
     uncertain_fields: list[dict[str, str]] = field(default_factory=list)
 
 
@@ -108,6 +110,11 @@ class NoteAiService:
                         block_type=block.block_type,
                         content_markdown=block.content_markdown,
                         content_latex=block.content_latex,
+                        source_region_json=json.dumps(
+                            block.source_region,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                         uncertain_json=json.dumps(
                             block.uncertain_fields,
                             ensure_ascii=False,
@@ -130,9 +137,11 @@ class NoteAiService:
             "只返回 JSON，不要 Markdown 代码围栏。格式为："
             '{"title":"", "summary":"", "subject_suggestion":"", '
             '"chapter_suggestion":"", "tags":[], "blocks":['
-            '{"type":"heading|text|formula|callout", "markdown":"", '
-            '"latex":"", "uncertain_fields":[]}], "uncertain_fields":[]}. '
-            "一个独立公式使用 formula 块，普通概念使用 text 块，重点提醒使用 callout 块；"
+            '{"type":"heading|text|concept|formula|callout", "markdown":"", '
+            '"latex":"", "region":{"x":0.0,"y":0.0,"width":1.0,"height":1.0},'
+            '"uncertain_fields":[]}], "uncertain_fields":[]}. '
+            "一个独立公式使用 formula 块，独立知识点使用 concept 块，普通说明使用 text 块，"
+            "重点提醒使用 callout 块；每个内容块尽量返回其在原图中的归一化 region；"
             "无法确认的字词放入对应 uncertain_fields。不要输出题目答案结构。"
             + extra
         )
@@ -151,13 +160,22 @@ class NoteAiService:
                 if not isinstance(raw, dict):
                     continue
                 block_type = str(raw.get("type") or raw.get("block_type") or "text")
-                if block_type not in {"heading", "text", "formula", "callout"}:
+                if block_type not in {
+                    "heading",
+                    "text",
+                    "concept",
+                    "formula",
+                    "callout",
+                }:
                     block_type = "text"
                 blocks.append(
                     NoteBlockDraft(
                         block_type=block_type,
                         content_markdown=str(raw.get("markdown") or raw.get("content_markdown") or ""),
                         content_latex=str(raw.get("latex") or raw.get("content_latex") or ""),
+                        source_region=normalize_region(
+                            raw.get("region") or raw.get("source_region")
+                        ),
                         uncertain_fields=[item for item in raw.get("uncertain_fields", []) if isinstance(item, dict)],
                     )
                 )
