@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 from html import escape
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QInputDialog,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -22,9 +28,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yancuo_win.application.note_ai_service import (
+    NoteAiService,
+    NoteBlockDraft,
+    NoteExtractionDraft,
+)
 from yancuo_win.application.note_service import NoteService
 from yancuo_win.data.models import NoteBlock, NoteDocument
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.tasks.note_worker import NoteExtractionWorker
 from yancuo_win.ui.widgets import CardFrame, danger_button, ghost_button, primary_button
 
 _STATUS_LABELS = {
@@ -42,6 +54,113 @@ _BLOCK_LABELS = {
 }
 
 
+class NoteExtractionDialog(QDialog):
+    """Review the AI draft before it becomes a note document."""
+
+    def __init__(self, draft: NoteExtractionDraft, parent=None) -> None:
+        super().__init__(parent)
+        self.draft = draft
+        self.blocks = list(draft.blocks)
+        self.setWindowTitle("AI 笔记 · 确认结果")
+        self.resize(760, 680)
+
+        root = QVBoxLayout(self)
+        title = QLabel("AI 已完成笔记整理，请确认后入库")
+        title.setObjectName("PageTitle")
+        root.addWidget(title)
+        preview = QLabel()
+        preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview.setMinimumHeight(160)
+        preview.setMaximumHeight(240)
+        pixmap = QPixmap(str(draft.source_path))
+        if pixmap.isNull():
+            preview.setText("原图无法预览")
+        else:
+            preview.setPixmap(
+                pixmap.scaled(
+                    700,
+                    220,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        root.addWidget(preview)
+        hint = QLabel(
+            f"模型：{draft.model or '未返回'} · 建议科目：{draft.subject_suggestion or '未指定'} · "
+            f"建议章节：{draft.chapter_suggestion or '未指定'}"
+        )
+        hint.setObjectName("PageHint")
+        root.addWidget(hint)
+
+        form = CardFrame()
+        form.add_title("笔记信息")
+        self.title_edit = QLineEdit(draft.title)
+        self.summary_edit = QTextEdit()
+        self.summary_edit.setPlainText(draft.summary)
+        self.summary_edit.setFixedHeight(70)
+        form.body.addWidget(self.title_edit)
+        form.body.addWidget(self.summary_edit)
+        root.addWidget(form)
+
+        blocks = CardFrame()
+        blocks.add_title("AI 提取的内容块")
+        self.block_list = QListWidget()
+        self.block_editor = QTextEdit()
+        self.block_list.currentRowChanged.connect(self._select_block)
+        blocks.body.addWidget(self.block_list, stretch=1)
+        blocks.body.addWidget(self.block_editor, stretch=1)
+        root.addWidget(blocks, stretch=1)
+        self._refresh_blocks()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Save
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("确认入库")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _refresh_blocks(self) -> None:
+        self.block_list.clear()
+        for index, block in enumerate(self.blocks, start=1):
+            value = block.content_latex if block.block_type == "formula" else block.content_markdown
+            self.block_list.addItem(
+                f"{index}. {_BLOCK_LABELS[block.block_type]} · {value[:50] or '（空）'}"
+            )
+        if self.blocks:
+            self.block_list.setCurrentRow(0)
+
+    def _select_block(self, row: int) -> None:
+        if not 0 <= row < len(self.blocks):
+            self.block_editor.clear()
+            return
+        block = self.blocks[row]
+        self.block_editor.setPlainText(
+            block.content_latex if block.block_type == "formula" else block.content_markdown
+        )
+
+    def _save_current_block(self) -> None:
+        row = self.block_list.currentRow()
+        if not 0 <= row < len(self.blocks):
+            return
+        block = self.blocks[row]
+        value = self.block_editor.toPlainText()
+        self.blocks[row] = NoteBlockDraft(
+            block_type=block.block_type,
+            content_markdown="" if block.block_type == "formula" else value,
+            content_latex=value if block.block_type == "formula" else block.content_latex,
+            uncertain_fields=block.uncertain_fields,
+        )
+
+    def accept(self) -> None:
+        self._save_current_block()
+        super().accept()
+
+    def values(self) -> tuple[str, str, list[NoteBlockDraft]]:
+        return self.title_edit.text(), self.summary_edit.toPlainText(), self.blocks
+
+
 class NotePage(QWidget):
     """A local-first editor; image assets and AI intake are added in later slices."""
 
@@ -55,6 +174,8 @@ class NotePage(QWidget):
         self._note: NoteDocument | None = None
         self._block: NoteBlock | None = None
         self._loading = False
+        self.note_ai = NoteAiService(notes.runtime)
+        self.note_worker: NoteExtractionWorker | None = None
         self._build()
         self.reload()
 
@@ -77,6 +198,9 @@ class NotePage(QWidget):
         self.new_note_button = primary_button("新建笔记")
         self.new_note_button.clicked.connect(self._create_note)
         header.addWidget(self.new_note_button)
+        ai_note_button = primary_button("AI 图片录入")
+        ai_note_button.clicked.connect(self._start_ai_extraction)
+        header.addWidget(ai_note_button)
         root.addLayout(header)
 
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -117,6 +241,11 @@ class NotePage(QWidget):
         split.setStretchFactor(1, 3)
         split.setSizes([300, 900])
         root.addWidget(split, stretch=1)
+
+    def closeEvent(self, event) -> None:  # noqa: ANN001, N802
+        if self.note_worker and self.note_worker.isRunning():
+            self.note_worker.wait(3000)
+        super().closeEvent(event)
 
     def _build_detail(self) -> QWidget:
         page = QWidget()
@@ -353,6 +482,71 @@ class NotePage(QWidget):
         self.reload(select_note_id=note.id)
         self.status_message.emit("已新建笔记，可以开始添加内容块")
         self.notes_changed.emit()
+
+    def _start_ai_extraction(self) -> None:
+        if self.note_worker and self.note_worker.isRunning():
+            self.status_message.emit("AI 笔记录入正在处理中，请稍候")
+            return
+        path_text, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择笔记图片",
+            "",
+            "图片 (*.jpg *.jpeg *.png *.webp)",
+        )
+        if not path_text:
+            return
+        instruction, accepted = QInputDialog.getMultiLineText(
+            self,
+            "告诉 AI 如何整理",
+            "补充要求（可选）",
+            "例如：把红笔标注整理成提示块；每个独立公式单独作为公式块。",
+        )
+        if not accepted:
+            return
+        self.status_message.emit("正在整理笔记图片…")
+        self.note_worker = NoteExtractionWorker(
+            self.note_ai,
+            Path(path_text),
+            instruction,
+            self,
+        )
+        self.note_worker.finished_ok.connect(self._on_ai_extraction_ready)
+        self.note_worker.failed.connect(self._on_ai_extraction_failed)
+        self.note_worker.finished.connect(self._on_ai_worker_finished)
+        self.note_worker.start()
+
+    def _on_ai_extraction_ready(self, draft: NoteExtractionDraft) -> None:
+        dialog = NoteExtractionDialog(draft, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.status_message.emit("已取消 AI 笔记确认，原图未入库")
+            return
+        title, summary, blocks = dialog.values()
+        confirmed = NoteExtractionDraft(
+            source_path=draft.source_path,
+            title=title,
+            summary=summary,
+            blocks=blocks,
+            subject_suggestion=draft.subject_suggestion,
+            chapter_suggestion=draft.chapter_suggestion,
+            tags=draft.tags,
+            uncertain_fields=draft.uncertain_fields,
+            model=draft.model,
+            cost_estimate=draft.cost_estimate,
+        )
+        try:
+            note = self.note_ai.commit_draft(confirmed)
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
+        self.reload(select_note_id=note.id)
+        self.status_message.emit("AI 笔记已确认入库")
+        self.notes_changed.emit()
+
+    def _on_ai_extraction_failed(self, message: str) -> None:
+        self.status_message.emit(f"AI 笔记录入失败：{message}")
+
+    def _on_ai_worker_finished(self) -> None:
+        self.note_worker = None
 
     def _save_note(self) -> None:
         if self._note is None:
