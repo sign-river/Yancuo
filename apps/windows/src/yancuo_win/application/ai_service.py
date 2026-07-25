@@ -13,12 +13,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from yancuo_win.ai.base import AIProvider, normalize_region
 from yancuo_win.ai.factory import get_provider
+from yancuo_win.application.ai_result_cache import recognition_cache_key
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
     AiJob,
     AiJobItem,
+    AiRecognitionCache,
     Asset,
     AuditLog,
     IntakeAsset,
@@ -561,7 +563,9 @@ class AIService:
                         job.finished_at = utcnow()
                         s.commit()
                 break
-            self._process_item(job_id, item_id, prompt.body, provider, session_holder := [])
+            self._process_item(
+                job_id, item_id, prompt.body, prompt.version, provider, session_holder := []
+            )
             if session_holder and session_id is None:
                 session_id = session_holder[0]
 
@@ -606,6 +610,7 @@ class AIService:
         job_id: str,
         item_id: str,
         prompt_body: str,
+        prompt_version: int,
         provider: AIProvider,
         session_holder: list[str],
     ) -> None:
@@ -862,6 +867,21 @@ class AIService:
                 ) * 1000
                 item.status = "done"
                 item.error_message = ""
+                s.merge(
+                    AiRecognitionCache(
+                        cache_key=recognition_cache_key(
+                            asset_sha256=asset.sha256,
+                            prompt_body=prompt_body,
+                            prompt_version=prompt_version,
+                            provider=job.provider,
+                            model=job.model,
+                            allowed_fields=sorted(allowed),
+                        ),
+                        structured_json=item.structured_json,
+                        raw_response=item.raw_response,
+                        source_job_item_id=item.id,
+                    )
+                )
                 job.done_items += 1
                 job.updated_at = utcnow()
                 timings_ms["total"] = (perf_counter() - item_started) * 1000
