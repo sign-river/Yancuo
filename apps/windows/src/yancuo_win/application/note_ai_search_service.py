@@ -61,7 +61,7 @@ class NoteAiSearchService:
             return ()
         payload = "\n".join(
             json.dumps(
-                {"id": row["entity_id"], "type": "note", "title": row["title"], "snippet": row["snippet"]},
+                {"id": row["entity_id"], "type": "note", "title": row["title"]},
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
