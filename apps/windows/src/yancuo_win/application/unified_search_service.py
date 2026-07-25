@@ -53,6 +53,27 @@ class UnifiedSearchIndexService:
             session.commit()
             return len(documents)
 
+    def repair_notes_if_needed(self) -> int:
+        """Repair the disposable note projection when its two local copies diverge."""
+
+        with self.runtime.engine.connect() as connection:
+            projection_count = int(
+                connection.execute(
+                    text("SELECT count(*) FROM unified_search_documents WHERE entity_type='note'")
+                ).scalar_one()
+            )
+            fts_count = int(
+                connection.execute(
+                    text("SELECT count(*) FROM unified_search_documents_fts WHERE entity_type='note'")
+                ).scalar_one()
+            )
+            canonical_count = int(
+                connection.execute(text("SELECT count(*) FROM note_documents")).scalar_one()
+            )
+        if projection_count != canonical_count or fts_count != canonical_count:
+            return self.rebuild_notes()
+        return canonical_count
+
     def upsert_note(self, note_id: str) -> bool:
         with self.runtime.session_factory() as session:
             note = session.scalar(select(NoteDocument).where(NoteDocument.id == note_id).options(
