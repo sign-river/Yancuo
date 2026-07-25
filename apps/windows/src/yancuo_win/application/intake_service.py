@@ -124,6 +124,7 @@ class IntakeProgress:
     timings_ms: dict[str, float] = field(default_factory=dict)
     timing_samples: int = 0
     retry_count: int = 0
+    cache_hits: int = 0
 
 
 @dataclass(frozen=True)
@@ -652,6 +653,7 @@ class ProblemIntakeService:
             timings_ms=dict(diagnostics["timings_ms"]),
             timing_samples=int(diagnostics["timing_samples"]),
             retry_count=int(diagnostics["retry_count"]),
+            cache_hits=int(diagnostics["cache_hits"]),
         )
 
     def list_resumable_ai_batches(self) -> list[ResumableIntakeBatch]:

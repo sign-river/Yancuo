@@ -1439,10 +1439,16 @@ class IntakePage(QWidget):
                 if progress.retry_count
                 else ""
             )
+            cache_text = (
+                f" · 本地缓存命中 {progress.cache_hits} 次"
+                if progress.cache_hits
+                else ""
+            )
             self.processing_steps.setText(
                 f"已完成 {progress.timing_samples} 张的实测平均："
                 + " · ".join(measured)
                 + retry_text
+                + cache_text
             )
         else:
             self.processing_steps.setText(
