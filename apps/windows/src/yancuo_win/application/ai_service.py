@@ -393,7 +393,7 @@ class AIService:
                 s.scalars(
                     select(AuditLog).where(
                         AuditLog.action.in_(
-                            {"ai_item_done", "ai_item_failed"}
+                            {"ai_item_done", "ai_item_failed", "ai_item_cache_hit"}
                         ),
                         AuditLog.entity_type == "ai_job_item",
                         AuditLog.entity_id.in_(item_ids),
@@ -405,10 +405,14 @@ class AIService:
             totals: dict[str, float] = {}
             samples = 0
             retry_count = 0
+            cache_hits = 0
             for log in logs:
                 try:
                     detail = json.loads(log.detail_json)
                 except json.JSONDecodeError:
+                    continue
+                if log.action == "ai_item_cache_hit":
+                    cache_hits += 1
                     continue
                 provider_diagnostics = detail.get("provider_diagnostics")
                 if isinstance(provider_diagnostics, dict):
@@ -432,6 +436,7 @@ class AIService:
                 "timings_ms": averages,
                 "timing_samples": samples,
                 "retry_count": retry_count,
+                "cache_hits": cache_hits,
             }
 
     def create_intake_structure_job(
