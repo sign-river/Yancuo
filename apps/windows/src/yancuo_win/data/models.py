@@ -52,6 +52,26 @@ class SearchDocument(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class UnifiedSearchDocument(Base):
+    """Rebuildable cross-entity search projection; never authoritative data."""
+
+    __tablename__ = "unified_search_documents"
+
+    entity_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chapter_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    knowledge_path: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    title: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    body: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    tags_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    collections_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Subject(Base):
     __tablename__ = "subjects"
 
@@ -157,6 +177,25 @@ note_tags = Table(
 )
 
 
+note_collection_documents = Table(
+    "note_collection_documents",
+    Base.metadata,
+    Column(
+        "collection_id",
+        String(64),
+        ForeignKey("note_collections.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "note_document_id",
+        String(64),
+        ForeignKey("note_documents.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("sort_order", Integer, default=0, nullable=False),
+)
+
+
 class NoteDocument(Base):
     """独立笔记文档；不复用题目的答案、作答或复习字段。"""
 
@@ -187,6 +226,30 @@ class NoteDocument(Base):
     tags: Mapped[list[Tag]] = relationship(
         secondary=note_tags,
         back_populates="note_documents",
+    )
+    collections: Mapped[list[NoteCollection]] = relationship(
+        secondary=note_collection_documents,
+        back_populates="notes",
+    )
+
+
+class NoteCollection(Base):
+    """Personal note collection, intentionally separate from the knowledge tree."""
+
+    __tablename__ = "note_collections"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    notes: Mapped[list[NoteDocument]] = relationship(
+        secondary=note_collection_documents,
+        back_populates="collections",
     )
 
 
@@ -233,6 +296,141 @@ class NoteAsset(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     document: Mapped[NoteDocument] = relationship(back_populates="assets")
+
+
+class NoteIntakeSession(Base):
+    """Recoverable note-extraction draft, separate from formal notes."""
+
+    __tablename__ = "note_intake_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    classification_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
+    user_instruction: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    draft_meta_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    assets: Mapped[list[NoteIntakeAsset]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="NoteIntakeAsset.sort_order",
+    )
+    groups: Mapped[list[NoteDraftGroup]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="NoteDraftGroup.sort_order",
+    )
+
+
+class NoteIntakeAsset(Base):
+    """Content-addressed source image retained while a note draft is pending."""
+
+    __tablename__ = "note_intake_assets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("note_intake_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="original", nullable=False)
+    original_name: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    relative_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_immutable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    session: Mapped[NoteIntakeSession] = relationship(back_populates="assets")
+
+
+class NoteDraftGroup(Base):
+    """Temporary category container used only by note-intake confirmation."""
+
+    __tablename__ = "note_draft_groups"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("note_intake_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    title: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    category_resolution: Mapped[str] = mapped_column(
+        String(32), default="unresolved", nullable=False
+    )
+    # Draft references must not block catalog maintenance. The service validates
+    # these stable IDs again before saving or promoting the draft.
+    subject_id: Mapped[str | None] = mapped_column(
+        ForeignKey("subjects.id", ondelete="SET NULL"), nullable=True
+    )
+    chapter_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True
+    )
+    proposed_subject: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    proposed_chapter: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    proposal_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    tag_ids_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    proposed_tags_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    target_status: Mapped[str] = mapped_column(String(32), default="inbox", nullable=False)
+    note_document_id: Mapped[str | None] = mapped_column(
+        ForeignKey("note_documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    session: Mapped[NoteIntakeSession] = relationship(back_populates="groups")
+    blocks: Mapped[list[NoteDraftBlock]] = relationship(
+        back_populates="group",
+        cascade="all, delete-orphan",
+        order_by="NoteDraftBlock.sort_order",
+    )
+
+
+class NoteDraftBlock(Base):
+    """Editable block inside a temporary note classification group."""
+
+    __tablename__ = "note_draft_blocks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("note_draft_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("note_intake_assets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    block_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    content_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    content_latex: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    source_region_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    uncertain_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    group: Mapped[NoteDraftGroup] = relationship(back_populates="blocks")
 
 
 class Asset(Base):

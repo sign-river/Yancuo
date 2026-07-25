@@ -23,7 +23,11 @@ from yancuo_win.data.migrate import (
     restore_pre_migration_backup,
     verify_core_tables,
 )
-from yancuo_win.domain.identity import LocalIdentity, load_or_create_identity
+from yancuo_win.domain.identity import (
+    SCHEMA_VERSION,
+    LocalIdentity,
+    load_or_create_identity,
+)
 from yancuo_win.infrastructure.paths import (
     DataPaths,
     build_data_paths,
@@ -71,7 +75,14 @@ def bootstrap_runtime(*, run_migrate: bool = True) -> RuntimeContext:
     engine = make_engine(paths.database)
     schema_version = 0
     if run_migrate:
-        target_version = settings.application.schema_version
+        target_version = SCHEMA_VERSION
+        if settings.application.schema_version != target_version:
+            logger.warning(
+                "configured schema target %s is stale; using application target %s",
+                settings.application.schema_version,
+                target_version,
+            )
+            settings.application.schema_version = target_version
         current_version = get_schema_version(engine)
         backup_path = None
         if 0 < current_version < target_version:
@@ -120,4 +131,10 @@ def bootstrap_runtime(*, run_migrate: bool = True) -> RuntimeContext:
         install_search_index_hooks(session_factory)
         search_health = SearchIndexService(runtime).repair_if_needed()
         logger.info("search index: %s", search_health.summary)
+    if run_migrate and schema_version >= 9:
+        from yancuo_win.application.note_intake_service import NoteIntakeService
+
+        interrupted = NoteIntakeService(runtime).recover_interrupted_sessions()
+        if interrupted:
+            logger.warning("recovered %s interrupted note intake session(s)", interrupted)
     return runtime

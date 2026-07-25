@@ -1,0 +1,87 @@
+"""Generic local projection used by the note-search slice."""
+
+from __future__ import annotations
+
+import hashlib
+
+from sqlalchemy import delete, select, text
+from sqlalchemy.orm import selectinload
+
+from yancuo_win.data.models import NoteDocument, UnifiedSearchDocument
+
+
+class UnifiedSearchIndexService:
+    def __init__(self, runtime) -> None:
+        self.runtime = runtime
+
+    @staticmethod
+    def _document(note: NoteDocument) -> dict[str, object]:
+        body = "\n".join(
+            value
+            for block in note.blocks
+            for value in (
+                block.content_latex if block.block_type == "formula" else block.content_markdown,
+            )
+            if value.strip()
+        )
+        tags = " ".join(sorted(tag.name for tag in note.tags))
+        collections = " ".join(sorted(item.title for item in note.collections))
+        payload = "\n".join((note.title, note.summary, body, tags, collections))
+        return {
+            "entity_type": "note", "entity_id": note.id, "entity_revision": note.revision,
+            "status": note.status, "subject_id": note.subject_id, "chapter_id": note.chapter_id,
+            "knowledge_path": "", "title": note.title, "body": payload,
+            "tags_text": tags, "collections_text": collections,
+            "content_hash": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            "updated_at": note.updated_at,
+        }
+
+    def rebuild_notes(self) -> int:
+        with self.runtime.session_factory() as session:
+            notes = list(session.scalars(select(NoteDocument).options(
+                selectinload(NoteDocument.blocks), selectinload(NoteDocument.tags),
+                selectinload(NoteDocument.collections),
+            )).all())
+            session.execute(delete(UnifiedSearchDocument).where(UnifiedSearchDocument.entity_type == "note"))
+            session.execute(text("DELETE FROM unified_search_documents_fts WHERE entity_type='note'"))
+            documents = [self._document(note) for note in notes]
+            if documents:
+                session.execute(UnifiedSearchDocument.__table__.insert(), documents)
+                session.execute(text("""INSERT INTO unified_search_documents_fts
+                    (entity_type, entity_id, title, body, tags_text, collections_text, knowledge_path)
+                    VALUES (:entity_type, :entity_id, :title, :body, :tags_text, :collections_text, :knowledge_path)"""), documents)
+            session.commit()
+            return len(documents)
+
+    def upsert_note(self, note_id: str) -> bool:
+        with self.runtime.session_factory() as session:
+            note = session.scalar(select(NoteDocument).where(NoteDocument.id == note_id).options(
+                selectinload(NoteDocument.blocks), selectinload(NoteDocument.tags),
+                selectinload(NoteDocument.collections),
+            ))
+            session.execute(delete(UnifiedSearchDocument).where(
+                UnifiedSearchDocument.entity_type == "note", UnifiedSearchDocument.entity_id == note_id
+            ))
+            session.execute(text("DELETE FROM unified_search_documents_fts WHERE entity_type='note' AND entity_id=:id"), {"id": note_id})
+            if note is None:
+                session.commit()
+                return False
+            document = self._document(note)
+            session.execute(UnifiedSearchDocument.__table__.insert(), [document])
+            session.execute(text("""INSERT INTO unified_search_documents_fts
+                (entity_type, entity_id, title, body, tags_text, collections_text, knowledge_path)
+                VALUES (:entity_type, :entity_id, :title, :body, :tags_text, :collections_text, :knowledge_path)"""), [document])
+            session.commit()
+            return True
+
+    def search_notes(self, query: str, *, statuses: tuple[str, ...] = ("active",), limit: int = 50):
+        query = query.strip()
+        if not query or not statuses:
+            return ()
+        with self.runtime.engine.connect() as connection:
+            rows = connection.execute(text("""SELECT entity_id, title, substr(body, 1, 160) AS snippet, status
+                FROM unified_search_documents WHERE entity_type='note' AND status IN :statuses
+                AND (title LIKE :query OR body LIKE :query OR tags_text LIKE :query OR collections_text LIKE :query)
+                ORDER BY updated_at DESC LIMIT :limit""").bindparams(__import__("sqlalchemy").bindparam("statuses", expanding=True)),
+                {"statuses": statuses, "query": f"%{query}%", "limit": min(limit, 200)}).mappings().all()
+        return tuple(rows)

@@ -18,6 +18,7 @@ from yancuo_win.data.migrate import (
     verify_core_tables,
     verify_sqlite_database,
 )
+from yancuo_win.domain.identity import SCHEMA_VERSION
 from sqlalchemy import text
 
 migrate_module = importlib.import_module("yancuo_win.data.migrate")
@@ -41,7 +42,7 @@ def test_bootstrap_creates_layout(
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
 
     runtime = bootstrap_runtime()
-    assert runtime.schema_version == 8
+    assert runtime.schema_version == SCHEMA_VERSION
     assert runtime.paths.database.is_file()
     assert runtime.paths.asset_objects_dir.is_dir()
     assert runtime.paths.identity_file.is_file()
@@ -161,6 +162,71 @@ def test_migrate_v7_to_v8_adds_independent_note_tables(tmp_path: Path) -> None:
     assert verify_core_tables(engine) == []
 
 
+def test_migrate_v8_to_v9_adds_recoverable_note_intake_tables(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path / "note-intake-upgrade.db")
+    assert migrate(engine, target_version=8) == 8
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO note_documents"
+                "(id, status, title, summary, revision, created_at, updated_at) "
+                "VALUES ("
+                "'note_existing', 'active', '保留的笔记', '', 1, "
+                "'2026-07-24T00:00:00Z', '2026-07-24T00:00:00Z'"
+                ")"
+            )
+        )
+        # Current ORM metadata includes v9 tables even when constructing an
+        # older test database. Remove them to reproduce a real schema-v8 file.
+        connection.execute(text("DROP TABLE note_draft_blocks"))
+        connection.execute(text("DROP TABLE note_draft_groups"))
+        connection.execute(text("DROP TABLE note_intake_assets"))
+        connection.execute(text("DROP TABLE note_intake_sessions"))
+
+    assert migrate(engine, target_version=9) == 9
+    with engine.connect() as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            )
+        }
+        title = connection.execute(
+            text("SELECT title FROM note_documents WHERE id='note_existing'")
+        ).scalar_one()
+        foreign_key_errors = connection.execute(text("PRAGMA foreign_key_check")).fetchall()
+    assert {
+        "note_intake_sessions",
+        "note_intake_assets",
+        "note_draft_groups",
+        "note_draft_blocks",
+    } <= tables
+    assert title == "保留的笔记"
+    assert foreign_key_errors == []
+    assert verify_core_tables(engine) == []
+    assert migrate(engine, target_version=9) == 9
+
+
+def test_migrate_v9_to_v10_adds_independent_note_collections(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path / "note-collections-upgrade.db")
+    assert migrate(engine, target_version=9) == 9
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE note_collection_documents"))
+        connection.execute(text("DROP TABLE note_collections"))
+
+    assert migrate(engine, target_version=10) == 10
+    with engine.connect() as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            )
+        }
+    assert {"note_collections", "note_collection_documents"} <= tables
+    assert verify_core_tables(engine) == []
+    assert migrate(engine, target_version=10) == 10
+
+
 def test_pre_migration_backup_can_restore_original_database(tmp_path: Path) -> None:
     database = tmp_path / "restore.db"
     engine = make_engine(database)
@@ -239,6 +305,27 @@ def test_bootstrap_restores_backup_when_migration_fails(
         ).scalar_one()
     restored.dispose()
     assert marker == "original"
-    backups = list((data_root / "backups").glob("pre-migration-v6-to-v8-*.sqlite"))
+    backups = list((data_root / "backups").glob("pre-migration-v6-to-v11-*.sqlite"))
     assert len(backups) == 1
     verify_sqlite_database(backups[0], expected_schema_version=6)
+
+
+def test_bootstrap_uses_internal_schema_target_when_config_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_config = tmp_path / "stale.toml"
+    stale_config.write_text(
+        default_toml_path().read_text(encoding="utf-8").replace(
+            "schema_version = 11", "schema_version = 10"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "stale-config-data"))
+    monkeypatch.setenv("YANCUO_CONFIG_FILE", str(stale_config))
+
+    runtime = bootstrap_runtime()
+
+    assert runtime.schema_version == SCHEMA_VERSION
+    assert get_schema_version(runtime.engine) == SCHEMA_VERSION
+    assert runtime.settings.application.schema_version == SCHEMA_VERSION

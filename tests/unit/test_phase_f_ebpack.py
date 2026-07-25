@@ -10,6 +10,11 @@ from pathlib import Path
 import pytest
 
 from yancuo_win.application.bootstrap import bootstrap_runtime
+from yancuo_win.application.note_intake_service import (
+    NoteDraftBlockInput,
+    NoteDraftGroupInput,
+    NoteIntakeService,
+)
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.identity import SCHEMA_VERSION
@@ -33,12 +38,37 @@ def test_ebpack_roundtrip_consistent(
     img.write_bytes(b"\xff\xd8\xff" + b"ebpack-bytes")
     pid = services.import_images([img])["created"][0]
     services.update_problem(pid, {"question_markdown": "ebpack题目内容"})
+    note_img = tmp_path / "note.jpg"
+    note_img.write_bytes(b"\xff\xd8\xff" + b"ebpack-note-draft")
+    note_intake = NoteIntakeService(runtime)
+    draft = note_intake.start_session(
+        [note_img],
+        classification_mode="custom",
+    )
+    note_intake.save_extraction(
+        draft.id,
+        metadata={"title": "可恢复草稿"},
+        groups=[
+            NoteDraftGroupInput(
+                title="未分类",
+                blocks=(
+                    NoteDraftBlockInput(
+                        block_type="concept",
+                        content_markdown="包内保留的概念块",
+                        source_asset_id=draft.assets[0].id,
+                    ),
+                ),
+            )
+        ],
+    )
 
     pack = eb.export_ebpack(tmp_path / "out.ebpack")
     assert pack.suffix == ".ebpack"
     manifest = eb.verify_ebpack(pack)
     assert manifest["format"] == "graduate-mistake-book-ebpack"
     assert manifest["format_version"] == 1
+    assert manifest["schema_version"] == SCHEMA_VERSION
+    assert manifest["asset_count"] == 2
     assert manifest["encrypted"] is False
     assert manifest["authoritative_payload"] == "database/snapshot.sqlite"
     portable_snapshot = tmp_path / "portable-snapshot.sqlite"
@@ -55,6 +85,12 @@ def test_ebpack_roundtrip_consistent(
         }
     assert "search_documents" in portable_tables
     assert "search_documents_fts" not in portable_tables
+    assert {
+        "note_intake_sessions",
+        "note_intake_assets",
+        "note_draft_groups",
+        "note_draft_blocks",
+    } <= portable_tables
 
     target = tmp_path / "restored"
     result = eb.restore_ebpack(pack, target)
@@ -84,6 +120,12 @@ def test_ebpack_roundtrip_consistent(
     got = restored.get_problem(pid)
     assert got is not None
     assert "ebpack题目内容" in (got.question_markdown or "")
+    restored_draft = NoteIntakeService(restored_rt).get_session(draft.id)
+    assert restored_draft is not None
+    assert restored_draft.groups[0].blocks[0].content_markdown == "包内保留的概念块"
+    assert NoteIntakeService(restored_rt).resolve_source_path(
+        restored_draft.assets[0]
+    ).is_file()
 
 
 def test_corrupt_ebpack_rejected(runtime, tmp_path: Path) -> None:
@@ -107,6 +149,26 @@ def test_corrupt_ebpack_rejected(runtime, tmp_path: Path) -> None:
         eb.restore_ebpack(bad, tmp_path / "should_not")
 
 
+def test_incomplete_checksum_table_is_rejected(runtime, tmp_path: Path) -> None:
+    services = AppServices(runtime)
+    eb = EbpackService(runtime)
+    services.create_problem(title="checksum coverage")
+    pack = eb.export_ebpack(tmp_path / "checksums.ebpack")
+    incomplete = tmp_path / "checksums-incomplete.ebpack"
+
+    with zipfile.ZipFile(pack, "r") as source, zipfile.ZipFile(
+        incomplete, "w"
+    ) as target:
+        for item in source.infolist():
+            payload = source.read(item.filename)
+            if item.filename == "checksums.sha256":
+                payload = b""
+            target.writestr(item, payload)
+
+    with pytest.raises(DomainError, match="未覆盖"):
+        eb.verify_ebpack(incomplete)
+
+
 def test_schema_too_new_rejected(runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     services = AppServices(runtime)
     eb = EbpackService(runtime)
@@ -123,6 +185,44 @@ def test_schema_too_new_rejected(runtime, tmp_path: Path, monkeypatch: pytest.Mo
                 "encrypted": False,
                 "schema_version": SCHEMA_VERSION + 10,
             }
+        )
+
+    with pytest.raises(DomainError, match="schema_version 无效"):
+        eb._validate_manifest(
+            {
+                "format": "graduate-mistake-book-ebpack",
+                "format_version": 1,
+                "encrypted": False,
+                "schema_version": 0,
+            }
+        )
+
+
+def test_manifest_schema_must_match_snapshot(runtime, tmp_path: Path) -> None:
+    services = AppServices(runtime)
+    eb = EbpackService(runtime)
+    services.create_problem(title="schema mismatch")
+    pack = eb.export_ebpack(tmp_path / "mismatch.ebpack")
+    extracted = tmp_path / "mismatch"
+    with zipfile.ZipFile(pack, "r") as archive:
+        archive.extractall(extracted)
+
+    with pytest.raises(DomainError, match="不一致"):
+        eb._validate_snapshot_schema(
+            extracted,
+            {
+                "schema_version": SCHEMA_VERSION - 1,
+                "problem_count": 1,
+            },
+        )
+
+    with pytest.raises(DomainError, match="problem_count 不一致"):
+        eb._validate_snapshot_schema(
+            extracted,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "problem_count": 2,
+            },
         )
 
 

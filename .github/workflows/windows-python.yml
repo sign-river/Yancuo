@@ -75,4 +75,4 @@ jobs:
           $wheel = Get-ChildItem -LiteralPath dist -Filter *.whl | Select-Object -First 1
           python -m pip install --no-deps --target $env:WHEEL_SMOKE_ROOT $wheel.FullName
           $env:PYTHONPATH = $env:WHEEL_SMOKE_ROOT
-          python -c "import yancuo_win; from yancuo_win.config.settings import default_toml_path, load_settings; from yancuo_win.import_export.workspace import WorkspaceService; p=default_toml_path(); assert p.is_file(), p; assert 'resources' in str(p), p; assert load_settings(p).application.schema_version == 4; print(yancuo_win.__file__); print(p)"
+          python -c "import yancuo_win; from yancuo_win.config.settings import default_toml_path, load_settings; from yancuo_win.domain.identity import SCHEMA_VERSION; from yancuo_win.import_export.workspace import WorkspaceService; p=default_toml_path(); assert p.is_file(), p; assert 'resources' in str(p), p; assert load_settings(p).application.schema_version == SCHEMA_VERSION; print(yancuo_win.__file__); print(p)"

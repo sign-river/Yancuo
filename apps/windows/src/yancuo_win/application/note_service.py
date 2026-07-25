@@ -12,8 +12,10 @@ from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
     NoteBlock,
+    NoteCollection,
     NoteDocument,
     Tag,
+    note_collection_documents,
     note_tags,
     utcnow,
 )
@@ -276,6 +278,102 @@ class NoteService:
             session.commit()
             return self._load(session, note_id)
 
+    def list_collections(self) -> list[NoteCollection]:
+        with self.session() as session:
+            rows = list(
+                session.scalars(
+                    select(NoteCollection)
+                    .options(selectinload(NoteCollection.notes))
+                    .order_by(NoteCollection.sort_order, NoteCollection.title)
+                ).all()
+            )
+            session.expunge_all()
+            return rows
+
+    def create_collection(self, title: str, summary: str = "") -> NoteCollection:
+        title = title.strip()
+        if not title:
+            raise DomainError("合集标题不能为空")
+        if len(title) > 256:
+            raise DomainError("合集标题不能超过 256 个字符")
+        with self.session() as session:
+            if session.scalar(select(NoteCollection.id).where(NoteCollection.title == title)):
+                raise DomainError("已存在同名合集")
+            last_order = session.scalar(select(NoteCollection.sort_order).order_by(NoteCollection.sort_order.desc()).limit(1))
+            collection = NoteCollection(
+                id=new_id("ncollection"),
+                title=title,
+                summary=summary,
+                sort_order=(last_order + 1) if last_order is not None else 0,
+            )
+            session.add(collection)
+            session.commit()
+            session.refresh(collection)
+            session.expunge(collection)
+            return collection
+
+    def update_collection(self, collection_id: str, *, title: str, summary: str) -> NoteCollection:
+        title = title.strip()
+        if not title:
+            raise DomainError("合集标题不能为空")
+        if len(title) > 256:
+            raise DomainError("合集标题不能超过 256 个字符")
+        with self.session() as session:
+            collection = session.get(NoteCollection, collection_id)
+            if collection is None:
+                raise DomainError("合集不存在")
+            duplicate = session.scalar(
+                select(NoteCollection.id).where(
+                    NoteCollection.title == title, NoteCollection.id != collection_id
+                )
+            )
+            if duplicate:
+                raise DomainError("已存在同名合集")
+            collection.title = title
+            collection.summary = summary
+            collection.updated_at = utcnow()
+            session.commit()
+            session.refresh(collection)
+            session.expunge(collection)
+            return collection
+
+    def delete_collection(self, collection_id: str) -> None:
+        with self.session() as session:
+            collection = session.get(NoteCollection, collection_id)
+            if collection is None:
+                return
+            session.delete(collection)
+            session.commit()
+
+    def set_note_collections(self, note_id: str, collection_ids: list[str]) -> NoteDocument:
+        if len(collection_ids) != len(set(collection_ids)):
+            raise DomainError("笔记合集不能重复")
+        with self.session() as session:
+            note = self._load(session, note_id, allow_missing=False, detach=False)
+            self._assert_editable(note)
+            collections = list(
+                session.scalars(select(NoteCollection).where(NoteCollection.id.in_(collection_ids))).all()
+            )
+            if len(collections) != len(collection_ids):
+                raise DomainError("笔记合集包含不存在的合集")
+            session.execute(
+                delete(note_collection_documents).where(
+                    note_collection_documents.c.note_document_id == note_id
+                )
+            )
+            for order, collection_id in enumerate(collection_ids):
+                session.execute(
+                    note_collection_documents.insert().values(
+                        collection_id=collection_id,
+                        note_document_id=note_id,
+                        sort_order=order,
+                    )
+                )
+            note.revision += 1
+            note.updated_at = utcnow()
+            session.commit()
+            return self._load(session, note_id)
+
     def trash_note(self, note_id: str) -> NoteDocument:
         return self.update_note(note_id, {"status": "trashed"})
 
@@ -319,6 +417,7 @@ class NoteService:
                 selectinload(NoteDocument.blocks),
                 selectinload(NoteDocument.tags),
                 selectinload(NoteDocument.assets),
+                selectinload(NoteDocument.collections),
             )
         )
         note = session.scalar(statement)

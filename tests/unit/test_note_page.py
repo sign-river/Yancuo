@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,10 @@ from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.note_ai_service import (
     NoteBlockDraft,
     NoteExtractionDraft,
+)
+from yancuo_win.application.note_intake_service import (
+    NoteDraftBlockInput,
+    NoteDraftGroupInput,
 )
 from yancuo_win.application.note_service import NoteService
 from yancuo_win.config.settings import default_toml_path
@@ -125,3 +130,102 @@ def test_note_page_opens_original_on_demand_with_source_regions(
         ],
         "executed": True,
     }
+
+
+def test_draft_preview_moves_a_block_between_groups(note_page: NotePage) -> None:
+    source_path = note_page.notes.runtime.paths.root / "draft-source.png"
+    source = QPixmap(24, 24)
+    source.fill(Qt.GlobalColor.white)
+    assert source.save(str(source_path))
+    intake = note_page.note_intake.start_session([source_path], classification_mode="custom")
+    intake = note_page.note_intake.save_extraction(
+        intake.id,
+        metadata={},
+        groups=[
+            NoteDraftGroupInput(
+                title="first",
+                blocks=(
+                    NoteDraftBlockInput(
+                        block_type="concept",
+                        content_markdown="keep source metadata",
+                        source_asset_id=intake.assets[0].id,
+                        source_region={"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+                        uncertain_fields=[{"field": "content", "reason": "blur"}],
+                    ),
+                ),
+            ),
+            NoteDraftGroupInput(title="second"),
+        ],
+    )
+    dialog = note_page_module.NoteDraftPreviewDialog(intake, note_page.note_intake)
+    dialog._move_block(intake.groups[0].blocks[0].id, intake.groups[1].id, 0)
+
+    assert dialog.groups.topLevelItem(0).childCount() == 0
+    assert dialog.groups.topLevelItem(1).childCount() == 1
+    moved = dialog.intake.groups[1].blocks[0]
+    assert moved.content_markdown == "keep source metadata"
+    assert json.loads(moved.source_region_json)["width"] == 0.3
+    assert json.loads(moved.uncertain_json) == [{"field": "content", "reason": "blur"}]
+    dialog.close()
+
+
+def test_draft_preview_supports_compact_concept_grid_and_context_move(note_page: NotePage) -> None:
+    source_path = note_page.notes.runtime.paths.root / "concept-grid-source.png"
+    source = QPixmap(24, 24)
+    source.fill(Qt.GlobalColor.white)
+    assert source.save(str(source_path))
+    intake = note_page.note_intake.start_session([source_path], classification_mode="custom")
+    intake = note_page.note_intake.save_extraction(
+        intake.id,
+        metadata={},
+        groups=[
+            NoteDraftGroupInput(
+                title="first",
+                blocks=(
+                    NoteDraftBlockInput(block_type="concept", content_markdown="short concept"),
+                    NoteDraftBlockInput(block_type="concept", content_markdown="long " * 30),
+                ),
+            ),
+            NoteDraftGroupInput(title="second"),
+        ],
+    )
+    dialog = note_page_module.NoteDraftPreviewDialog(intake, note_page.note_intake)
+
+    dialog.block_layout.setCurrentIndex(1)
+    assert dialog.block_views.currentWidget() is dialog.concept_grid
+    assert dialog.concept_grid.count() == 2
+    assert dialog.concept_grid.item(0).sizeHint().width() < dialog.concept_grid.item(1).sizeHint().width()
+
+    dialog._move_block_to_group(intake.groups[0].blocks[0].id, intake.groups[1].id)
+
+    assert [block.content_markdown for block in dialog.intake.groups[1].blocks] == ["short concept"]
+    dialog.close()
+
+
+def test_draft_preview_allows_editing_a_block_sequence(note_page: NotePage) -> None:
+    source_path = note_page.notes.runtime.paths.root / "sequence-source.png"
+    source = QPixmap(24, 24)
+    source.fill(Qt.GlobalColor.white)
+    assert source.save(str(source_path))
+    intake = note_page.note_intake.start_session([source_path], classification_mode="custom")
+    intake = note_page.note_intake.save_extraction(
+        intake.id,
+        metadata={},
+        groups=[
+            NoteDraftGroupInput(
+                title="first",
+                blocks=(
+                    NoteDraftBlockInput(block_type="concept", content_markdown="one"),
+                    NoteDraftBlockInput(block_type="concept", content_markdown="two"),
+                ),
+            )
+        ],
+    )
+    dialog = note_page_module.NoteDraftPreviewDialog(intake, note_page.note_intake)
+
+    second = dialog.groups.topLevelItem(0).child(1)
+    assert second.flags() & Qt.ItemFlag.ItemIsEditable
+    second.setText(1, "1")
+
+    assert [block.content_markdown for block in dialog.intake.groups[0].blocks] == ["two", "one"]
+    dialog.close()

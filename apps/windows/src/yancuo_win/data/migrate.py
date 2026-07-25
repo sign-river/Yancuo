@@ -269,6 +269,41 @@ def _migrate_to_v8(engine: Engine) -> None:
     logger.info("migrated database to schema_version=8")
 
 
+def _migrate_to_v9(engine: Engine) -> None:
+    """Add recoverable note-intake sessions, source assets, groups, and blocks."""
+
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 9)
+        session.commit()
+    logger.info("migrated database to schema_version=9")
+
+
+def _migrate_to_v10(engine: Engine) -> None:
+    """Add independent personal note collections and ordered membership."""
+
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 10)
+        session.commit()
+    logger.info("migrated database to schema_version=10")
+
+
+def _migrate_to_v11(engine: Engine) -> None:
+    """Add a generic, rebuildable projection for problem and note search."""
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS unified_search_documents_fts
+            USING fts5(entity_type UNINDEXED, entity_id UNINDEXED, title, body,
+                       tags_text, collections_text, knowledge_path, tokenize='trigram')
+        """))
+    with Session(engine) as session:
+        set_schema_version(session, 11)
+        session.commit()
+    logger.info("migrated database to schema_version=11")
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -321,6 +356,9 @@ MIGRATIONS: dict[int, MigrationFn] = {
     6: _migrate_to_v6,
     7: _migrate_to_v7,
     8: _migrate_to_v8,
+    9: _migrate_to_v9,
+    10: _migrate_to_v10,
+    11: _migrate_to_v11,
 }
 
 
@@ -371,6 +409,19 @@ def verify_core_tables(engine: Engine) -> list[str]:
         required.update({"search_documents", "search_documents_fts"})
     if get_schema_version(engine) >= 8:
         required.update({"note_documents", "note_blocks", "note_assets", "note_tags"})
+    if get_schema_version(engine) >= 9:
+        required.update(
+            {
+                "note_intake_sessions",
+                "note_intake_assets",
+                "note_draft_groups",
+                "note_draft_blocks",
+            }
+        )
+    if get_schema_version(engine) >= 10:
+        required.update({"note_collections", "note_collection_documents"})
+    if get_schema_version(engine) >= 11:
+        required.update({"unified_search_documents", "unified_search_documents_fts"})
     with engine.connect() as conn:
         rows = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table'")

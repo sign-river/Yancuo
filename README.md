@@ -16,11 +16,13 @@
 | [docs/11\_schema_v6_变更说明.md](docs/11_schema_v6_变更说明.md)   | 专用录题暂存模型 |
 | [docs/13\_schema_v7_变更说明.md](docs/13_schema_v7_变更说明.md)   | 本地搜索投影与迁移保护 |
 | [docs/14\_schema_v8_变更说明.md](docs/14_schema_v8_变更说明.md)   | 笔记基础模型与迁移保护 |
+| [docs/15\_schema_v9_变更说明.md](docs/15_schema_v9_变更说明.md)   | 可恢复笔记分类暂存模型 |
+| [docs/16\_schema_v10_变更说明.md](docs/16_schema_v10_变更说明.md) | 独立笔记合集 |
 | [protocol/data-format-v1.md](protocol/data-format-v1.md)            | 跨端数据格式 v1      |
 
 ## 当前进度
 
-路线图 A–K 的代码与协议验收范围已落地，当前数据库为 `schema_version=8`，跨端字段语义为 `data_format_version=1`。这里的“完成”指对应阶段的实现已入库，不等于所有后续能力（加密、PDF、远端增量同步）都已提供。
+路线图 A–K 的代码与协议验收范围已落地，当前 Windows 数据库为 `schema_version=10`，跨端字段语义为 `data_format_version=1`。这里的“完成”指对应阶段的实现已入库，不等于所有后续能力（加密、PDF、远端增量同步）都已提供。
 
 主线后已落地：
 
@@ -52,7 +54,9 @@
 - AI 搜索已接入题库：网络请求在后台线程执行，界面显示当前阶段、候选范围、披露字段、耗时、token 和估算费用；失败时保留查询并可回退普通搜索
 - 笔记基础模型：schema v8 新增独立的 NoteDocument / NoteBlock / NoteAsset 与笔记标签关系；笔记不复用题目字段，统一搜索仍待接入
 - 笔记本地编辑与阅读：侧栏可按生命周期浏览、创建和编辑标题/文本/概念/公式/提示块；阅读页统一离线渲染公式，显示来源区域，并按需打开带蓝框标注的原图
-- AI 笔记录入：选择图片并补充提示词后，后台调用已配置视觉 Provider，生成含来源区域的可编辑笔记草稿；确认后才写入笔记、内容块和不可变原图资产
+- AI 笔记录入与分类模式：录入前可选择 AI 识别并分组或自定义分类；草稿分类行可展开编辑、选择已有路径或保存新分类提案，并可安全新增、删除空组或合并分组
+- 概念块整理：草稿确认页支持列表与紧凑网格；可拖拽或右键跨组移动，也可直接编辑组内序号，短概念自动紧凑排布、长内容保持可读
+- 可恢复笔记分类暂存：schema v9 独立保存会话、不可变来源图、分类组和草稿块；中断后可用同一会话重试，确认前不创建正式笔记
 - 可发布基线第一轮：正式题目写操作补齐 Operation 日志与远端 create 落地；ZIP/`.ebpack`/`.gmshare` 恢复增加路径、体积、校验与回滚保护
 - Windows wheel 已内置默认配置与协议 schema，并新增 Python 3.11–3.13 的 Windows CI、静态检查和安装后资源烟测
 
@@ -62,14 +66,14 @@
 
 - 图片识别目前以每张图独立请求为主；自动/一图一题/一图多题/多图一题、复合题共享材料与独立子题已进入任务规划，尚未实现。
 - 题目 AI 当前已收到现有分类路径并优先匹配已有目录；后续将升级为稳定分类 ID、近义去重，以及“无合适目录时由 AI 生成新分类并随入库确认创建”，笔记分类也复用同一规则。
-- 笔记分类确认将采用“分类组—概念块”结构：AI 可生成多个可展开分类组，自定义模式从一个空白组开始，概念块可跨组拖拽；每个非空组确认后生成独立笔记并共享同一原图。
+- 笔记分类确认已具备可恢复会话、识别前模式选择、分类行编辑、概念块多布局整理和按组独立入库；下一步通过 `SEARCH-07` 接入统一笔记搜索。
 - `.ebpack` v1 当前仅支持未加密包；`protocol/encryption-v1.md` 仍是设计占位。
 - Word 是当前稳定导出路径，PDF 导出尚未纳入可用能力承诺。
-- Android 可导入 Windows `.ebpack`，但尚未实现 GitLink/GitHub 云下载或增量同步。
+- Android 可校验并导入当前未加密 Windows schema v9 `.ebpack` 快照，但不提供笔记/草稿 UI，也尚未实现 GitLink/GitHub 云下载或增量同步。
 - GitLink/GitHub 当前以完整 Release 快照为主；LocalFolder 才提供已接入的 `changes/` Operation 通道。
 - 插件、本地模型等仍属于可选后续方向。
 
-协议入口：[`protocol/README.md`](protocol/README.md)；分享包规范：`protocol/gmshare-format-v1.md`；schema 变更：`docs/07_schema_v4_变更说明.md`。
+协议入口：[`protocol/README.md`](protocol/README.md)；分享包规范：`protocol/gmshare-format-v1.md`；最新 schema 变更：[`docs/15_schema_v9_变更说明.md`](docs/15_schema_v9_变更说明.md)。
 
 ## 快速开始（Windows）
 

@@ -20,13 +20,42 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         runtime = bootstrap_runtime(run_migrate=False)
-        from yancuo_win.data.migrate import migrate, verify_core_tables
+        from yancuo_win.data.migrate import (
+            create_pre_migration_backup,
+            ensure_search_index_schema,
+            get_schema_version,
+            migrate,
+            restore_pre_migration_backup,
+            verify_core_tables,
+        )
+        from yancuo_win.domain.identity import SCHEMA_VERSION
 
-        version = migrate(runtime.engine, target_version=args.target)
-        missing = verify_core_tables(runtime.engine)
-        if missing:
-            print(f"迁移后仍缺少表：{', '.join(missing)}", file=sys.stderr)
-            return 2
+        target = args.target if args.target is not None else SCHEMA_VERSION
+        current = get_schema_version(runtime.engine)
+        backup_path = None
+        if 0 < current < target:
+            backup_path = create_pre_migration_backup(
+                runtime.paths.database,
+                runtime.paths.backup_dir,
+                from_version=current,
+                target_version=target,
+            )
+        try:
+            version = migrate(runtime.engine, target_version=target)
+            if version >= 7:
+                ensure_search_index_schema(runtime.engine)
+            missing = verify_core_tables(runtime.engine)
+            if missing:
+                raise RuntimeError(f"迁移后仍缺少表：{', '.join(missing)}")
+        except Exception:
+            if backup_path is not None:
+                runtime.engine.dispose()
+                restore_pre_migration_backup(
+                    backup_path,
+                    runtime.paths.database,
+                    expected_schema_version=current,
+                )
+            raise
         print(f"OK schema_version={version} database={runtime.paths.database}")
         return 0
     except Exception as exc:  # noqa: BLE001

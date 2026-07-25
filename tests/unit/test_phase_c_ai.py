@@ -13,6 +13,7 @@ from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.migrate import get_schema_version, verify_core_tables
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.domain.identity import SCHEMA_VERSION
 from yancuo_win.review.changeset import validate_and_filter_proposal
 
 
@@ -35,7 +36,7 @@ def ai(runtime) -> AIService:
 
 
 def test_schema_v2_tables(runtime) -> None:
-    assert get_schema_version(runtime.engine) == 8
+    assert get_schema_version(runtime.engine) == SCHEMA_VERSION
     assert verify_core_tables(runtime.engine) == []
 
 

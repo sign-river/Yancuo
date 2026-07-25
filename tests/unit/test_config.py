@@ -18,6 +18,7 @@ from yancuo_win.config.settings import (
     save_ai_preferences,
     save_theme_preference,
 )
+from yancuo_win.domain.identity import SCHEMA_VERSION
 
 
 def test_default_toml_exists() -> None:
@@ -26,7 +27,7 @@ def test_default_toml_exists() -> None:
 
 def test_load_default_settings() -> None:
     settings = load_settings(default_toml_path())
-    assert settings.application.schema_version == 8
+    assert settings.application.schema_version == SCHEMA_VERSION
     assert settings.ai.enabled is True
     assert settings.ai.default_provider == "openai_compatible"
     assert settings.cloud.enabled is True

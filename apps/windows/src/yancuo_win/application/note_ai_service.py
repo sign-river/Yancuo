@@ -27,11 +27,25 @@ class NoteBlockDraft:
 
 
 @dataclass(frozen=True)
+class NoteDraftGroupDraft:
+    """Non-authoritative AI grouping kept in note-intake staging only."""
+
+    title: str = ""
+    summary: str = ""
+    blocks: list[NoteBlockDraft] = field(default_factory=list)
+    subject_suggestion: str = ""
+    chapter_suggestion: str = ""
+    tags: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class NoteExtractionDraft:
     source_path: Path
     title: str
     summary: str
     blocks: list[NoteBlockDraft]
+    groups: list[NoteDraftGroupDraft] = field(default_factory=list)
     subject_suggestion: str = ""
     chapter_suggestion: str = ""
     tags: list[str] = field(default_factory=list)
@@ -47,7 +61,11 @@ class NoteAiService:
         self.notes = NoteService(runtime)
 
     def extract_from_image(
-        self, image_path: Path, *, instruction: str = ""
+        self,
+        image_path: Path,
+        *,
+        instruction: str = "",
+        classification_mode: str = "custom",
     ) -> NoteExtractionDraft:
         image_path = Path(image_path)
         if not image_path.is_file():
@@ -58,7 +76,9 @@ class NoteAiService:
             raise DomainError("隐私设置禁止向 AI 发送原图")
         provider = get_provider(self.runtime.settings)
         provider.validate_configuration()
-        prompt = self._prompt(instruction)
+        if classification_mode not in {"ai", "custom"}:
+            raise DomainError("不支持的笔记分类方式")
+        prompt = self._prompt(instruction, classification_mode=classification_mode)
         result = provider.structure_from_image(
             image_path=str(image_path),
             prompt=prompt,
@@ -130,8 +150,15 @@ class NoteAiService:
         return committed
 
     @staticmethod
-    def _prompt(instruction: str) -> str:
+    def _prompt(instruction: str, *, classification_mode: str) -> str:
         extra = f"\n用户补充要求：{instruction.strip()}" if instruction.strip() else ""
+        grouping = (
+            "另外返回 groups 数组，每项包含 title、summary、tags、reason、"
+            "subject_suggestion、chapter_suggestion 和 blocks；按知识主题将内容块分组。"
+            "分类只是不具约束力的建议，绝不返回目录 ID。"
+            if classification_mode == "ai"
+            else "不要分组、不要判断科目或章节；只提取内容块。"
+        )
         return (
             "你是学习笔记整理助手。请从图片中提取印刷或手写的知识笔记，"
             "只返回 JSON，不要 Markdown 代码围栏。格式为："
@@ -139,10 +166,11 @@ class NoteAiService:
             '"chapter_suggestion":"", "tags":[], "blocks":['
             '{"type":"heading|text|concept|formula|callout", "markdown":"", '
             '"latex":"", "region":{"x":0.0,"y":0.0,"width":1.0,"height":1.0},'
-            '"uncertain_fields":[]}], "uncertain_fields":[]}. '
+            '"uncertain_fields":[]}], "uncertain_fields":[], "groups":[]}. '
             "一个独立公式使用 formula 块，独立知识点使用 concept 块，普通说明使用 text 块，"
             "重点提醒使用 callout 块；每个内容块尽量返回其在原图中的归一化 region；"
             "无法确认的字词放入对应 uncertain_fields。不要输出题目答案结构。"
+            + grouping
             + extra
         )
 
@@ -153,30 +181,46 @@ class NoteAiService:
         uncertain: list[dict[str, str]],
         result: Any,
     ) -> NoteExtractionDraft:
-        raw_blocks = fields.get("blocks")
-        blocks: list[NoteBlockDraft] = []
-        if isinstance(raw_blocks, list):
+        def normalize_blocks(raw_blocks: Any) -> list[NoteBlockDraft]:
+            blocks: list[NoteBlockDraft] = []
+            if not isinstance(raw_blocks, list):
+                return blocks
             for raw in raw_blocks:
                 if not isinstance(raw, dict):
                     continue
                 block_type = str(raw.get("type") or raw.get("block_type") or "text")
-                if block_type not in {
-                    "heading",
-                    "text",
-                    "concept",
-                    "formula",
-                    "callout",
-                }:
+                if block_type not in {"heading", "text", "concept", "formula", "callout"}:
                     block_type = "text"
                 blocks.append(
                     NoteBlockDraft(
                         block_type=block_type,
                         content_markdown=str(raw.get("markdown") or raw.get("content_markdown") or ""),
                         content_latex=str(raw.get("latex") or raw.get("content_latex") or ""),
-                        source_region=normalize_region(
-                            raw.get("region") or raw.get("source_region")
-                        ),
+                        source_region=normalize_region(raw.get("region") or raw.get("source_region")),
                         uncertain_fields=[item for item in raw.get("uncertain_fields", []) if isinstance(item, dict)],
+                    )
+                )
+            return blocks
+
+        blocks = normalize_blocks(fields.get("blocks"))
+        groups: list[NoteDraftGroupDraft] = []
+        raw_groups = fields.get("groups")
+        if isinstance(raw_groups, list):
+            for raw_group in raw_groups:
+                if not isinstance(raw_group, dict):
+                    continue
+                group_blocks = normalize_blocks(raw_group.get("blocks"))
+                if not group_blocks:
+                    continue
+                groups.append(
+                    NoteDraftGroupDraft(
+                        title=str(raw_group.get("title") or ""),
+                        summary=str(raw_group.get("summary") or ""),
+                        blocks=group_blocks,
+                        subject_suggestion=str(raw_group.get("subject_suggestion") or ""),
+                        chapter_suggestion=str(raw_group.get("chapter_suggestion") or ""),
+                        tags=[str(item) for item in raw_group.get("tags", []) if str(item).strip()][:20],
+                        reason=str(raw_group.get("reason") or ""),
                     )
                 )
         # Mock and older providers return the problem-shaped fields. Keep a safe
@@ -195,6 +239,7 @@ class NoteAiService:
             title=str(fields.get("title") or source_path.stem),
             summary=str(fields.get("summary") or fields.get("notes") or ""),
             blocks=blocks,
+            groups=groups,
             subject_suggestion=str(fields.get("subject_suggestion") or fields.get("subject_name") or ""),
             chapter_suggestion=str(fields.get("chapter_suggestion") or fields.get("chapter_name") or ""),
             tags=[str(item) for item in fields.get("tags", []) if str(item).strip()][:20],

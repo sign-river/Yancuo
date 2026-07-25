@@ -2,7 +2,7 @@
 
 > 状态：跨端字段语义 v1 稳定基线。变更前须说明原因与兼容性影响。
 > 权威实现：Windows `yancuo_win.data.models` 与 Android `cn.yancuo.android.data.db`。
-> 当前版本：数据库 `schema_version=8`；跨端字段语义 `data_format_version=1`。两者含义不同，不能互换。
+> 当前版本：Windows 数据库 `schema_version=10`；Android 新建本地核心库为 schema v7，可导入并保留加法式 Windows v10 快照；跨端字段语义 `data_format_version=1`。这些版本含义不同，不能互换。
 
 ---
 
@@ -144,10 +144,10 @@
 
 | key | 示例 value |
 |-----|------------|
-| schema_version | `7`（当前迁移目标；历史版本依次为 1—6） |
+| schema_version | `9`（Windows 当前迁移目标；历史版本依次为 1—8） |
 | data_format_version | `1` |
 
-程序打开库时：若 `schema_version` 高于软件支持版本（当前为 7），应拒绝并提示升级。各次加法迁移见 `docs/05`—`docs/07`、[`docs/10_schema_v5_变更说明.md`](../docs/10_schema_v5_变更说明.md)、[`docs/11_schema_v6_变更说明.md`](../docs/11_schema_v6_变更说明.md) 和 [`docs/13_schema_v7_变更说明.md`](../docs/13_schema_v7_变更说明.md)。
+程序打开库时：若 `schema_version` 高于本程序支持版本，应拒绝并提示升级。Windows 当前支持到 10；Android 本地核心建库为 7，未加密 `.ebpack` 导入器可保留到 10 的加法式快照。各次加法迁移见 `docs/05`—`docs/07`、[`docs/10_schema_v5_变更说明.md`](../docs/10_schema_v5_变更说明.md)、[`docs/11_schema_v6_变更说明.md`](../docs/11_schema_v6_变更说明.md)、[`docs/13_schema_v7_变更说明.md`](../docs/13_schema_v7_变更说明.md)、[`docs/14_schema_v8_变更说明.md`](../docs/14_schema_v8_变更说明.md)、[`docs/15_schema_v9_变更说明.md`](../docs/15_schema_v9_变更说明.md) 和 [`docs/16_schema_v10_变更说明.md`](../docs/16_schema_v10_变更说明.md)。
 
 ---
 
@@ -182,6 +182,7 @@
 ## 8. 范围边界与扩展
 
 - `sync_operations` 表自 `schema_version=3` 起由 Windows 库持久化；Operation 的交换与合并语义由 [`sync-protocol-v1.md`](sync-protocol-v1.md) 单独定义，本文件不重复规定线协议。
+- schema v8 的正式笔记表和 schema v9 的笔记分类暂存表目前是 Windows 权威扩展；完整 `.ebpack` 快照会保留这些表，Android 当前只读取题目核心字段，不承诺笔记 UI 或笔记增量同步。
 - 朋友分享包 `.gmshare` 已有独立 v1 规范（[`gmshare-format-v1.md`](gmshare-format-v1.md)），不属于本核心数据格式。
 - 端到端加密载荷仍未实现；[`encryption-v1.md`](encryption-v1.md) 目前只是设计占位，当前 `.ebpack` 必须为 `encrypted=false`。
 - Word/PDF 仍只是导出目标，不得作为主存储；当前可用导出路径以 Word 为主，PDF 不在本协议承诺范围内。

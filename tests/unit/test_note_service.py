@@ -108,3 +108,36 @@ def test_note_block_validation_and_reorder_must_be_complete(note_bundle) -> None
 
     notes.update_block(second.id, {"content_markdown": "更新"})
     assert notes.get_note(note.id).blocks[1].content_markdown == "更新"
+
+
+def test_personal_collections_are_independent_from_knowledge_categories(note_bundle) -> None:
+    _runtime, _app, notes, _subject, _chapter = note_bundle
+    first = notes.create_note(title="极限错因")
+    second = notes.create_note(title="本周总结")
+    collection = notes.create_collection("考研冲刺", "最后两周复盘")
+
+    notes.set_note_collections(first.id, [collection.id])
+    notes.set_note_collections(second.id, [collection.id])
+
+    assert [item.title for item in notes.get_note(first.id).collections] == ["考研冲刺"]
+    assert [item.title for item in notes.list_collections()] == ["考研冲刺"]
+    assert {note.id for note in notes.list_collections()[0].notes} == {first.id, second.id}
+    notes.delete_collection(collection.id)
+    assert notes.get_note(first.id) is not None
+    assert notes.get_note(second.id) is not None
+    assert notes.list_collections() == []
+
+
+def test_note_collection_validates_titles_and_membership(note_bundle) -> None:
+    _runtime, _app, notes, _subject, _chapter = note_bundle
+    note = notes.create_note(title="边界")
+    with pytest.raises(DomainError, match="不能为空"):
+        notes.create_collection("  ")
+    collection = notes.create_collection("复盘")
+    with pytest.raises(DomainError, match="同名"):
+        notes.create_collection("复盘")
+    with pytest.raises(DomainError, match="重复"):
+        notes.set_note_collections(note.id, [collection.id, collection.id])
+    notes.trash_note(note.id)
+    with pytest.raises(DomainError, match="不可编辑"):
+        notes.set_note_collections(note.id, [collection.id])

@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 
 from yancuo_win import __version__
 from yancuo_win.application.bootstrap import RuntimeContext
-from yancuo_win.data.models import Asset, Problem
+from yancuo_win.data.models import Problem
 from yancuo_win.domain.identity import DATA_FORMAT_VERSION, SCHEMA_VERSION
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.archive import (
@@ -131,7 +131,8 @@ class EbpackService:
             if identity_src.is_file():
                 shutil.copy2(identity_src, staging / "identity.json")
 
-            problem_count, asset_count = self._counts()
+            problem_count = self._problem_count()
+            asset_count = len(object_entries)
             manifest = {
                 "format": FORMAT_NAME,
                 "format_version": FORMAT_VERSION,
@@ -167,11 +168,9 @@ class EbpackService:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    def _counts(self) -> tuple[int, int]:
+    def _problem_count(self) -> int:
         with self.runtime.session_factory() as s:
-            pc = int(s.scalar(select(func.count()).select_from(Problem)) or 0)
-            ac = int(s.scalar(select(func.count()).select_from(Asset)) or 0)
-            return pc, ac
+            return int(s.scalar(select(func.count()).select_from(Problem)) or 0)
 
     def _build_checksums(self, staging: Path) -> list[str]:
         lines: list[str] = []
@@ -229,7 +228,8 @@ class EbpackService:
                         safe_extract_zip(zf, tmp)
                     except ArchiveSecurityError as exc:
                         raise DomainError(f"ebpack ZIP 解压被拒绝：{exc}") from exc
-                    self._verify_checksums(tmp)
+                    self._verify_checksums(tmp, manifest=manifest)
+                    self._validate_snapshot_schema(tmp, manifest)
                 finally:
                     shutil.rmtree(tmp, ignore_errors=True)
                 return manifest
@@ -252,15 +252,67 @@ class EbpackService:
             )
         if manifest.get("encrypted"):
             raise DomainError("v1 尚未实现加密包解密，拒绝导入")
+        if pkg_schema <= 0:
+            raise DomainError("ebpack schema_version 无效")
         if pkg_schema > SCHEMA_VERSION:
             raise DomainError(
                 f"包 schema_version={pkg_schema} 高于程序支持的 {SCHEMA_VERSION}，请升级软件"
             )
 
-    def _verify_checksums(self, root: Path) -> None:
+    @staticmethod
+    def _validate_snapshot_schema(root: Path, manifest: dict[str, Any]) -> None:
+        snapshot = root / "database" / "snapshot.sqlite"
+        try:
+            with closing(sqlite3.connect(snapshot)) as connection:
+                integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                if integrity is None or integrity[0] != "ok":
+                    detail = integrity[0] if integrity else "no result"
+                    raise DomainError(f"ebpack SQLite 完整性检查失败：{detail}")
+                foreign_key_error = connection.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchone()
+                if foreign_key_error is not None:
+                    raise DomainError("ebpack SQLite 外键检查失败")
+                row = connection.execute(
+                    "SELECT value FROM meta_kv WHERE key='schema_version'"
+                ).fetchone()
+                problem_count = int(
+                    connection.execute("SELECT count(*) FROM problems").fetchone()[0]
+                )
+        except DomainError:
+            raise
+        except sqlite3.DatabaseError as exc:
+            raise DomainError("ebpack snapshot.sqlite 不是有效数据库") from exc
+        try:
+            snapshot_schema = int(row[0]) if row else 0
+        except (TypeError, ValueError) as exc:
+            raise DomainError("ebpack snapshot.sqlite 的 schema_version 无效") from exc
+        manifest_schema = int(manifest.get("schema_version") or 0)
+        if snapshot_schema != manifest_schema:
+            raise DomainError(
+                "ebpack manifest 与 snapshot.sqlite 的 schema_version 不一致："
+                f"{manifest_schema} != {snapshot_schema}"
+            )
+        try:
+            manifest_problem_count = int(manifest.get("problem_count"))
+        except (TypeError, ValueError) as exc:
+            raise DomainError("ebpack manifest problem_count 无效") from exc
+        if problem_count != manifest_problem_count:
+            raise DomainError(
+                "ebpack manifest 与 snapshot.sqlite 的 problem_count 不一致："
+                f"{manifest_problem_count} != {problem_count}"
+            )
+
+    def _verify_checksums(
+        self,
+        root: Path,
+        *,
+        manifest: dict[str, Any] | None = None,
+    ) -> None:
         table = root / "checksums.sha256"
         if not table.is_file():
             raise DomainError("缺少 checksums.sha256")
+        checksummed_paths: set[str] = set()
         for line in table.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
@@ -269,6 +321,9 @@ class EbpackService:
             if len(parts) != 2:
                 raise DomainError(f"checksums 行格式错误：{line[:80]}")
             expected, rel = parts[0].strip(), parts[1].strip()
+            if rel in checksummed_paths:
+                raise DomainError(f"checksums 路径重复：{rel}")
+            checksummed_paths.add(rel)
             try:
                 path = validate_relative_checksum_path(root, rel)
             except ArchiveSecurityError as exc:
@@ -278,6 +333,70 @@ class EbpackService:
             actual = _sha256_file(path)
             if actual != expected:
                 raise DomainError(f"校验失败：{rel}")
+
+        required_paths = {
+            "manifest.json",
+            "database/snapshot.sqlite",
+            "database/migrations.json",
+            "assets/index.json",
+        }
+        if (root / "identity.json").is_file():
+            required_paths.add("identity.json")
+
+        try:
+            asset_index = json.loads(
+                (root / "assets" / "index.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainError("assets/index.json 无效") from exc
+        objects = asset_index.get("objects") if isinstance(asset_index, dict) else None
+        if not isinstance(objects, list):
+            raise DomainError("assets/index.json 缺少 objects 数组")
+
+        indexed_object_paths: set[str] = set()
+        for item in objects:
+            if not isinstance(item, dict):
+                raise DomainError("assets/index.json 对象条目无效")
+            relative_path = str(item.get("relative_path") or "").replace("\\", "/")
+            if not relative_path.startswith("objects/"):
+                raise DomainError(f"assets/index.json 对象路径无效：{relative_path}")
+            package_path = f"assets/{relative_path}"
+            if package_path in indexed_object_paths:
+                raise DomainError(f"assets/index.json 对象路径重复：{relative_path}")
+            indexed_object_paths.add(package_path)
+            try:
+                object_path = validate_relative_checksum_path(root, package_path)
+            except ArchiveSecurityError as exc:
+                raise DomainError(
+                    f"assets/index.json 对象路径非法：{relative_path}"
+                ) from exc
+            if not object_path.is_file():
+                raise DomainError(f"assets/index.json 引用缺失：{relative_path}")
+            declared_sha = str(item.get("sha256") or "")
+            if declared_sha != _sha256_file(object_path):
+                raise DomainError(f"assets/index.json 哈希不匹配：{relative_path}")
+
+        actual_object_paths = {
+            path.relative_to(root).as_posix()
+            for path in iter_regular_files(root / "assets" / "objects")
+        }
+        if actual_object_paths != indexed_object_paths:
+            raise DomainError("assets/index.json 与包内对象文件不一致")
+        required_paths.update(indexed_object_paths)
+        missing_checksums = sorted(required_paths - checksummed_paths)
+        if missing_checksums:
+            raise DomainError(
+                "checksums 未覆盖必要条目：" + ", ".join(missing_checksums)
+            )
+        if manifest is not None and int(manifest.get("schema_version") or 0) >= 9:
+            try:
+                manifest_asset_count = int(manifest.get("asset_count") or 0)
+            except (TypeError, ValueError) as exc:
+                raise DomainError("ebpack manifest asset_count 无效") from exc
+            if manifest_asset_count != len(indexed_object_paths):
+                raise DomainError(
+                    "ebpack manifest asset_count 与对象索引数量不一致"
+                )
 
     def restore_ebpack(self, pack: Path, target_root: Path) -> dict[str, Any]:
         """校验后恢复到目标数据根；失败不留下半套数据。"""
@@ -297,7 +416,7 @@ class EbpackService:
                     safe_extract_zip(zf, tmp)
                 except ArchiveSecurityError as exc:
                     raise DomainError(f"ebpack ZIP 解压被拒绝：{exc}") from exc
-            self._verify_checksums(tmp)
+            self._verify_checksums(tmp, manifest=manifest)
 
             db_src = tmp / "database" / "snapshot.sqlite"
             assets_src = tmp / "assets"

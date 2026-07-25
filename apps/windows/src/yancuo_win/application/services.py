@@ -25,6 +25,8 @@ from yancuo_win.data.models import (
     Chapter,
     IntakeAsset,
     IntakeCandidateRecord,
+    NoteAsset,
+    NoteIntakeAsset,
     Problem,
     ProblemOrigin,
     Prompt,
@@ -1232,6 +1234,16 @@ class AppServices:
                 or s.scalar(
                     select(func.count(IntakeAsset.id)).where(
                         IntakeAsset.relative_path == path
+                    )
+                )
+                or s.scalar(
+                    select(func.count(NoteAsset.id)).where(
+                        NoteAsset.relative_path == path
+                    )
+                )
+                or s.scalar(
+                    select(func.count(NoteIntakeAsset.id)).where(
+                        NoteIntakeAsset.relative_path == path
                     )
                 )
             }
