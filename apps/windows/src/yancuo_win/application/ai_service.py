@@ -11,9 +11,13 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, selectinload
 
-from yancuo_win.ai.base import AIProvider, normalize_region
+from yancuo_win.ai.base import AIProvider, StructuredResult, normalize_region
 from yancuo_win.ai.factory import get_provider
-from yancuo_win.application.ai_result_cache import recognition_cache_key
+from yancuo_win.application.ai_result_cache import (
+    find_recognition_cache,
+    load_cached_structure,
+    recognition_cache_key,
+)
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.data.ids import new_id
@@ -668,26 +672,41 @@ class AIService:
 
             try:
                 timings_ms["preflight"] = (perf_counter() - item_started) * 1000
+                allowed = set(json.loads(job.allowed_fields_json) or list(DEFAULT_ALLOWED_FIELDS))
+                cache_key = recognition_cache_key(
+                    asset_sha256=asset.sha256,
+                    prompt_body=prompt_body,
+                    prompt_version=prompt_version,
+                    provider=job.provider,
+                    model=job.model,
+                    allowed_fields=sorted(allowed),
+                )
+                cached = find_recognition_cache(s, cache_key)
+                cached_fields = load_cached_structure(cached) if cached else None
                 if not self.runtime.settings.privacy.send_original_images_to_ai:
                     raise DomainError("隐私设置禁止向 AI 发送原图")
-                active_stage = "provider"
-                provider_started = perf_counter()
-                result = provider.structure_from_image(
-                    image_path=str(image_path),
-                    prompt=prompt_body,
-                    model=job.model,
-                    timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
-                )
-                timings_ms["provider_total"] = (
-                    perf_counter() - provider_started
-                ) * 1000
+                if cached_fields and "problems" not in cached_fields:
+                    active_stage = "cache"
+                    result = StructuredResult(fields=cached_fields, raw_text=cached.raw_response)
+                    timings_ms["cache_hit"] = 1.0
+                else:
+                    active_stage = "provider"
+                    provider_started = perf_counter()
+                    result = provider.structure_from_image(
+                        image_path=str(image_path),
+                        prompt=prompt_body,
+                        model=job.model,
+                        timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+                    )
+                    timings_ms["provider_total"] = (
+                        perf_counter() - provider_started
+                    ) * 1000
                 for key, value in result.timings_ms.items():
                     if isinstance(value, (int, float)):
                         timings_ms[str(key)] = float(value)
 
                 active_stage = "validation"
                 validation_started = perf_counter()
-                allowed = set(json.loads(job.allowed_fields_json) or list(DEFAULT_ALLOWED_FIELDS))
                 proposals: list[
                     tuple[dict[str, Any], list[dict[str, Any]], dict[str, float]]
                 ] = []
