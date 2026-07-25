@@ -132,8 +132,12 @@ def bootstrap_runtime(*, run_migrate: bool = True) -> RuntimeContext:
         search_health = SearchIndexService(runtime).repair_if_needed()
         logger.info("search index: %s", search_health.summary)
     if run_migrate and schema_version >= 11:
-        from yancuo_win.application.unified_search_service import UnifiedSearchIndexService
+        from yancuo_win.application.unified_search_service import (
+            UnifiedSearchIndexService,
+            install_unified_search_index_hooks,
+        )
 
+        install_unified_search_index_hooks(session_factory)
         note_count = UnifiedSearchIndexService(runtime).repair_notes_if_needed()
         logger.info("unified note search index: %s documents", note_count)
     if run_migrate and schema_version >= 9:

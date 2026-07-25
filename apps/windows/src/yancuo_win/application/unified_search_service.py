@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import hashlib
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, event, select, text
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.session import Session, sessionmaker
 
-from yancuo_win.data.models import NoteDocument, UnifiedSearchDocument
+from yancuo_win.data.models import (
+    NoteBlock,
+    NoteCollection,
+    NoteDocument,
+    Tag,
+    UnifiedSearchDocument,
+)
+
+_REBUILD_KEY = "yancuo_unified_note_search_rebuild"
+_HOOKS_INSTALLED_ATTR = "_yancuo_unified_note_search_hooks_installed"
 
 
 class UnifiedSearchIndexService:
@@ -38,20 +48,25 @@ class UnifiedSearchIndexService:
 
     def rebuild_notes(self) -> int:
         with self.runtime.session_factory() as session:
-            notes = list(session.scalars(select(NoteDocument).options(
-                selectinload(NoteDocument.blocks), selectinload(NoteDocument.tags),
-                selectinload(NoteDocument.collections),
-            )).all())
-            session.execute(delete(UnifiedSearchDocument).where(UnifiedSearchDocument.entity_type == "note"))
-            session.execute(text("DELETE FROM unified_search_documents_fts WHERE entity_type='note'"))
-            documents = [self._document(note) for note in notes]
-            if documents:
-                session.execute(UnifiedSearchDocument.__table__.insert(), documents)
-                session.execute(text("""INSERT INTO unified_search_documents_fts
-                    (entity_type, entity_id, title, body, tags_text, collections_text, knowledge_path)
-                    VALUES (:entity_type, :entity_id, :title, :body, :tags_text, :collections_text, :knowledge_path)"""), documents)
+            count = self._replace_notes(session)
             session.commit()
-            return len(documents)
+            return count
+
+    @classmethod
+    def _replace_notes(cls, session: Session) -> int:
+        notes = list(session.scalars(select(NoteDocument).options(
+            selectinload(NoteDocument.blocks), selectinload(NoteDocument.tags),
+            selectinload(NoteDocument.collections),
+        )).all())
+        session.execute(delete(UnifiedSearchDocument).where(UnifiedSearchDocument.entity_type == "note"))
+        session.execute(text("DELETE FROM unified_search_documents_fts WHERE entity_type='note'"))
+        documents = [cls._document(note) for note in notes]
+        if documents:
+            session.execute(UnifiedSearchDocument.__table__.insert(), documents)
+            session.execute(text("""INSERT INTO unified_search_documents_fts
+                (entity_type, entity_id, title, body, tags_text, collections_text, knowledge_path)
+                VALUES (:entity_type, :entity_id, :title, :body, :tags_text, :collections_text, :knowledge_path)"""), documents)
+        return len(documents)
 
     def repair_notes_if_needed(self) -> int:
         """Repair the disposable note projection when its two local copies diverge."""
@@ -106,3 +121,24 @@ class UnifiedSearchIndexService:
                 ORDER BY updated_at DESC LIMIT :limit""").bindparams(__import__("sqlalchemy").bindparam("statuses", expanding=True)),
                 {"statuses": statuses, "query": f"%{query}%", "limit": min(limit, 200)}).mappings().all()
         return tuple(rows)
+
+
+def _capture_note_search_changes(session: Session, _flush_context: object, _instances: object) -> None:
+    watched = (NoteDocument, NoteBlock, NoteCollection, Tag)
+    if any(isinstance(item, watched) for item in session.new.union(session.dirty).union(session.deleted)):
+        session.info[_REBUILD_KEY] = True
+
+
+def _apply_note_search_changes(session: Session, _flush_context: object) -> None:
+    if session.info.pop(_REBUILD_KEY, False):
+        UnifiedSearchIndexService._replace_notes(session)
+
+
+def install_unified_search_index_hooks(factory: sessionmaker[Session]) -> None:
+    """Keep the disposable note projection in the originating write transaction."""
+
+    if getattr(factory, _HOOKS_INSTALLED_ATTR, False):
+        return
+    event.listen(factory, "before_flush", _capture_note_search_changes)
+    event.listen(factory, "after_flush_postexec", _apply_note_search_changes)
+    setattr(factory, _HOOKS_INSTALLED_ATTR, True)

@@ -819,9 +819,6 @@ class NotePage(QWidget):
             )
             query = self.note_search_edit.text().strip()
             if query:
-                # Keep search results current while SEARCH-07's shared write hooks
-                # are being introduced for all note mutation paths.
-                self.note_search.rebuild_notes()
                 hits = self.note_search.search_notes(
                     query,
                     statuses=(self.status_filter.currentData(),)
