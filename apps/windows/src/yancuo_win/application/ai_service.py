@@ -689,6 +689,13 @@ class AIService:
                     active_stage = "cache"
                     result = StructuredResult(fields=cached_fields, raw_text=cached.raw_response)
                     timings_ms["cache_hit"] = 1.0
+                    self._audit(
+                        s,
+                        "ai_item_cache_hit",
+                        "ai_job_item",
+                        item.id,
+                        {"source_job_item_id": cached.source_job_item_id},
+                    )
                 else:
                     active_stage = "provider"
                     provider_started = perf_counter()
