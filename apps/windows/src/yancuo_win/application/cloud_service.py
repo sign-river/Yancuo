@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+import tempfile
+import gc
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,7 +16,7 @@ from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.cloud.base import CloudProvider
 from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.domain.identity import bind_profile
+from yancuo_win.domain.identity import bind_profile, record_snapshot_head
 from yancuo_win.import_export.ebpack import EbpackService
 
 
@@ -133,12 +136,28 @@ class CloudBackupService:
         local = self.runtime.identity.profile_id
         remote = self.discover_profiles()
         remote_ids = {str(item["profile_id"]) for item in remote}
-        aliases = self._profile_index().get("aliases") or {}
-        canonical = self._resolve_profile(self._profile_index(), local)
+        index = self._profile_index()
+        aliases = index.get("aliases") or {}
+        canonical = self._resolve_profile(index, local)
+        profiles = index.get("profiles") or {}
+        remote_snapshot = profiles.get(canonical) if isinstance(profiles, dict) else {}
+        remote_snapshot_id = (
+            str(remote_snapshot.get("snapshot_id") or "")
+            if isinstance(remote_snapshot, dict)
+            else ""
+        )
+        known_snapshot_id = self.runtime.identity.last_snapshot_id
         return {
             "local_profile_id": local,
             "canonical_profile_id": canonical,
             "local_is_aliased": canonical != local,
+            "known_snapshot_id": known_snapshot_id,
+            "remote_snapshot_id": remote_snapshot_id,
+            "branch_detected": bool(
+                known_snapshot_id
+                and remote_snapshot_id
+                and known_snapshot_id != remote_snapshot_id
+            ),
             "remote_profiles": remote,
             "requires_takeover": bool(remote_ids - {local, canonical}),
             "legacy_latest_available": bool(self._profile_index().get("legacy_latest")),
@@ -159,6 +178,11 @@ class CloudBackupService:
             self.runtime.identity,
             canonical,
         )
+        snapshot_id = str(profiles[canonical].get("snapshot_id") or "")
+        if snapshot_id:
+            self.runtime.identity = record_snapshot_head(
+                self.runtime.paths.identity_file, self.runtime.identity, snapshot_id
+            )
         return {"previous_profile_id": previous_profile_id, "profile_id": canonical}
 
     def record_profile_alias(self, source_profile_id: str, canonical_profile_id: str) -> None:
@@ -205,10 +229,20 @@ class CloudBackupService:
             if not isinstance(profile_snapshots, dict):
                 raise DomainError("云端资料索引无效")
             previous = profile_snapshots.get(profile_id)
+            remote_snapshot_id = (
+                str(previous.get("snapshot_id") or "")
+                if isinstance(previous, dict)
+                else ""
+            )
+            known_snapshot_id = self.runtime.identity.last_snapshot_id
+            if remote_snapshot_id and known_snapshot_id != remote_snapshot_id:
+                raise DomainError(
+                    "云端资料已在其他设备更新；请先恢复最新快照或进行资料合并确认"
+                )
             parent_snapshot_id = (
                 previous.get("snapshot_id") if isinstance(previous, dict) else None
             )
-            tag = f"data-v1-{profile_id}-{stamp}-{device_id[-8:]}"
+            tag = f"data-v1-{profile_id}-{stamp}-{device_id[-8:]}-{snapshot_id[-8:]}"
             pack = self.ebpack.export_ebpack(
                 self.runtime.paths.cache_dir / f"{tag}.ebpack"
             )
@@ -300,6 +334,9 @@ class CloudBackupService:
             # 完整包就绪后才写资料索引；legacy 字段保留给旧客户端读取。
             index["legacy_latest"] = latest
             self.provider.write_sync_manifest(self.owner, self.repo, index)
+            self.runtime.identity = record_snapshot_head(
+                self.runtime.paths.identity_file, self.runtime.identity, snapshot_id
+            )
             return {
                 "tag": tag,
                 "sha256": sha,
@@ -380,6 +417,69 @@ class CloudBackupService:
             str(snapshot["tag"]), self.runtime.paths.cache_dir / "cloud_dl"
         )
         return self.ebpack.restore_ebpack(pack, Path(target_root))
+
+    @staticmethod
+    def _snapshot_rows(connection: sqlite3.Connection, table: str) -> dict[str, tuple[Any, ...]]:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if exists is None:
+            return {}
+        columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+        if "id" not in columns:
+            return {}
+        return {
+            str(row[0]): tuple(row)
+            for row in connection.execute(f"SELECT * FROM {table}").fetchall()
+        }
+
+    def preview_profile_merge(self, profile_id: str) -> dict[str, Any]:
+        """Compare a remote profile with this data root without mutating either."""
+
+        if profile_id == self.runtime.identity.profile_id:
+            raise DomainError("当前资料无需与自身合并")
+        with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
+            remote_root = Path(temporary) / "remote"
+            restored = self.restore_profile_to(profile_id, remote_root)
+            remote_database = remote_root / "error_book.db"
+            if not remote_database.is_file():
+                raise DomainError("远端资料恢复后缺少数据库")
+            tables = ("problems", "note_documents", "study_records")
+            summary: dict[str, dict[str, Any]] = {}
+            local = sqlite3.connect(self.runtime.paths.database)
+            remote = sqlite3.connect(remote_database)
+            try:
+                for table in tables:
+                    local_rows = self._snapshot_rows(local, table)
+                    remote_rows = self._snapshot_rows(remote, table)
+                    shared = set(local_rows) & set(remote_rows)
+                    conflicts = sorted(
+                        row_id
+                        for row_id in shared
+                        if local_rows[row_id] != remote_rows[row_id]
+                    )
+                    summary[table] = {
+                        "local": len(local_rows),
+                        "remote": len(remote_rows),
+                        "new_remote": len(set(remote_rows) - set(local_rows)),
+                        "identical": len(shared) - len(conflicts),
+                        "conflicts": len(conflicts),
+                        "conflict_ids": conflicts[:20],
+                    }
+            finally:
+                remote.close()
+                local.close()
+            result = {
+                "profile_id": profile_id,
+                "restored_schema_version": restored["schema_version"],
+                "tables": summary,
+                "has_conflicts": any(item["conflicts"] for item in summary.values()),
+                "write_performed": False,
+            }
+            # Ebpack verification creates short-lived SQLite engines. Ensure
+            # their Windows file handles are finalized before temp cleanup.
+            gc.collect()
+            return result
 
     def restore_latest_to(self, target_root: Path) -> dict[str, Any]:
         return self.restore_profile_to(self.runtime.identity.profile_id, target_root)

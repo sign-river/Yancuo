@@ -791,7 +791,9 @@ class MainWindow(QMainWindow):
         inspect_profiles.clicked.connect(self._inspect_cloud_profiles)
         restore_profile = QPushButton("恢复指定资料…")
         restore_profile.clicked.connect(self._restore_cloud_profile)
-        cloud_profiles.body.addLayout(button_row(inspect_profiles, restore_profile))
+        preview_merge = ghost_button("预检资料合并…")
+        preview_merge.clicked.connect(self._preview_cloud_profile_merge)
+        cloud_profiles.body.addLayout(button_row(inspect_profiles, restore_profile, preview_merge))
         lay.addWidget(cloud_profiles)
         lay.addStretch(1)
         self._refresh_account_page()
@@ -845,6 +847,8 @@ class MainWindow(QMainWindow):
             )
             if state["requires_takeover"]:
                 lines.append("发现其他资料：恢复或合并前需明确确认，不会自动覆盖本地数据。")
+            if state["branch_detected"]:
+                lines.append("检测到另一设备已更新当前资料：已暂停上传，需恢复或合并确认。")
             if not profiles:
                 lines.append("云端尚无资料快照。")
             self.account_remote_summary.setText("\n".join(lines))
@@ -893,6 +897,36 @@ class MainWindow(QMainWindow):
             )
         except DomainError as exc:
             QMessageBox.warning(self, "恢复失败", str(exc))
+
+    def _preview_cloud_profile_merge(self) -> None:
+        try:
+            self.cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+            profiles = [
+                item
+                for item in self.cloud.discover_profiles()
+                if item["profile_id"] != self.runtime.identity.profile_id
+            ]
+            if not profiles:
+                QMessageBox.information(self, "资料合并预检", "没有其他云端资料可比较")
+                return
+            labels = [f"{item['profile_id']} · {item.get('tag', '无快照')}" for item in profiles]
+            choice, accepted = QInputDialog.getItem(
+                self, "选择资料", "只比较，不写入当前资料", labels, 0, False
+            )
+            if not accepted:
+                return
+            preview = self.cloud.preview_profile_merge(profiles[labels.index(choice)]["profile_id"])
+            lines = [f"资料：{preview['profile_id']}"]
+            for table, item in preview["tables"].items():
+                lines.append(
+                    f"{table}: 远端新增 {item['new_remote']}，相同 {item['identical']}，冲突 {item['conflicts']}"
+                )
+            lines.append("未写入当前资料。" if not preview["has_conflicts"] else "存在冲突，不能自动合并。")
+            QMessageBox.information(self, "资料合并预检", "\n".join(lines))
+        except DomainError as exc:
+            QMessageBox.warning(self, "预检失败", str(exc))
 
     def _goto_due_in_library(self) -> None:
         self.main_nav.setCurrentRow(_PAGE_LIBRARY)

@@ -18,6 +18,7 @@ def test_identity_persists(tmp_path: Path) -> None:
     assert first.user_id == second.user_id
     assert first.profile_id == second.profile_id
     assert first.profile_id.startswith("profile_")
+    assert first.last_snapshot_id == ""
     assert first.database_id == second.database_id
     assert first.device_id.startswith("dev_win_")
 
@@ -43,4 +44,5 @@ def test_legacy_identity_receives_persistent_profile_id(tmp_path: Path) -> None:
     identity = load_or_create_identity(path)
 
     assert identity.profile_id.startswith("profile_")
+    assert identity.last_snapshot_id == ""
     assert identity.profile_id in path.read_text(encoding="utf-8")

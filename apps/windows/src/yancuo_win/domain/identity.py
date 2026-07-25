@@ -19,6 +19,7 @@ class LocalIdentity:
     device_id: str
     database_id: str
     profile_id: str
+    last_snapshot_id: str
     display_name: str
     created_at: str
 
@@ -47,6 +48,7 @@ def load_or_create_identity(path: Path, display_name: str = "本地用户") -> L
             device_id=str(raw["device_id"]),
             database_id=str(raw["database_id"]),
             profile_id=str(raw.get("profile_id") or _new_id("profile")),
+            last_snapshot_id=str(raw.get("last_snapshot_id") or ""),
             display_name=str(raw.get("display_name", display_name)),
             created_at=str(raw.get("created_at", "")),
         )
@@ -59,6 +61,7 @@ def load_or_create_identity(path: Path, display_name: str = "本地用户") -> L
         device_id=_new_id("dev_win"),
         database_id=_new_id("db"),
         profile_id=_new_id("profile"),
+        last_snapshot_id="",
         display_name=display_name,
         created_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -79,8 +82,30 @@ def bind_profile(path: Path, identity: LocalIdentity, profile_id: str) -> LocalI
         device_id=identity.device_id,
         database_id=identity.database_id,
         profile_id=profile_id,
+        last_snapshot_id="",
         display_name=identity.display_name,
         created_at=identity.created_at,
     )
     _write_identity(path, bound)
     return bound
+
+
+def record_snapshot_head(
+    path: Path, identity: LocalIdentity, snapshot_id: str
+) -> LocalIdentity:
+    """Persist the cloud snapshot on which this device's local edits are based."""
+
+    snapshot_id = snapshot_id.strip()
+    if not snapshot_id.startswith("snapshot_"):
+        raise ValueError("snapshot_id 格式无效")
+    updated = LocalIdentity(
+        user_id=identity.user_id,
+        device_id=identity.device_id,
+        database_id=identity.database_id,
+        profile_id=identity.profile_id,
+        last_snapshot_id=snapshot_id,
+        display_name=identity.display_name,
+        created_at=identity.created_at,
+    )
+    _write_identity(path, updated)
+    return updated

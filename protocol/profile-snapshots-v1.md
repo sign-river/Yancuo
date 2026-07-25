@@ -9,6 +9,7 @@
 ```json
 {
   "profile_id": "profile_...",
+  "last_snapshot_id": "snapshot_... 或空",
   "user_id": "usr_...",
   "device_id": "dev_win_...",
   "database_id": "db_...",
@@ -17,6 +18,7 @@
 ```
 
 - `profile_id` 是随机稳定的资料命名空间，用于组织云快照，不是认证凭据。
+- `last_snapshot_id` 是本机最后确认的云端共同祖先；若当前云端资料头不同，客户端必须暂停上传并要求恢复或合并确认。
 - `user_id` 记录本地创建者审计来源，资料绑定或合并时不得重写历史值。
 - `device_id` 标识写入设备，不能用于推断用户身份。
 - GitHub/GitLink 私有仓库权限及其系统凭据 token 是唯一云端读写边界。
@@ -50,6 +52,8 @@ Release body 至少包含：
 ```
 
 Release 一旦创建不得覆盖。共享同一父快照、但互不祖先的两个快照表示跨设备分支，不能按时间戳自动覆盖。`.ebpack` manifest 可加法携带同一 `profile_id`，旧读取器忽略未知字段。
+
+上传前，客户端比较本机 `last_snapshot_id` 与云端该资料的最新 `snapshot_id`。云端存在资料头且两者不相等时，上传必须失败；用户只能先恢复最新快照，或进入显式合并流程。成功上传后，本机才将 `last_snapshot_id` 更新为新快照 ID。
 
 ## 资料索引与接管
 

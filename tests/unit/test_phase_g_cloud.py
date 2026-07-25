@@ -12,6 +12,7 @@ from yancuo_win.application.services import AppServices
 from yancuo_win.cloud.local_folder import LocalFolderProvider
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.data.models import Problem
 from yancuo_win.infrastructure.credentials import mask_secret
 
 
@@ -104,6 +105,69 @@ def test_profiles_are_discovered_and_explicitly_bound(runtime, tmp_path: Path, m
     assert bound["previous_profile_id"] == uploaded_second["profile_id"]
     assert bound["profile_id"] == uploaded_first["profile_id"]
     assert second_runtime.identity.profile_id == uploaded_first["profile_id"]
+
+
+def test_same_profile_branch_blocks_upload_until_user_resolves(runtime, tmp_path: Path, monkeypatch) -> None:
+    cloud_root = tmp_path / "branch-cloud"
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "branches"
+    runtime.settings.cloud.enabled = True
+    first = CloudBackupService(runtime, LocalFolderProvider(cloud_root))
+    first.ensure_repository()
+    initial = first.upload_backup()
+
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "branch-second"))
+    second_runtime = bootstrap_runtime()
+    second_runtime.settings.cloud.repository.owner = "local"
+    second_runtime.settings.cloud.repository.name = "branches"
+    second_runtime.settings.cloud.enabled = True
+    second = CloudBackupService(second_runtime, LocalFolderProvider(cloud_root))
+    second.bind_local_profile(initial["profile_id"])
+
+    first.upload_backup()
+    state = second.profile_connection_state()
+    assert state["branch_detected"] is True
+    with pytest.raises(DomainError, match="其他设备更新"):
+        second.upload_backup()
+
+
+def test_profile_merge_preview_reports_new_rows_and_conflicts(runtime, tmp_path: Path, monkeypatch) -> None:
+    services = AppServices(runtime)
+    problem = services.create_problem(title="remote problem", question_markdown="before")
+    cloud_root = tmp_path / "merge-preview-cloud"
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "merge-preview"
+    runtime.settings.cloud.enabled = True
+    first = CloudBackupService(runtime, LocalFolderProvider(cloud_root))
+    first.ensure_repository()
+    uploaded = first.upload_backup()
+
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "merge-preview-local"))
+    second_runtime = bootstrap_runtime()
+    second_runtime.settings.cloud.repository.owner = "local"
+    second_runtime.settings.cloud.repository.name = "merge-preview"
+    second_runtime.settings.cloud.enabled = True
+    second = CloudBackupService(second_runtime, LocalFolderProvider(cloud_root))
+
+    preview = second.preview_profile_merge(uploaded["profile_id"])
+    assert preview["write_performed"] is False
+    assert preview["tables"]["problems"]["new_remote"] == 1
+    assert preview["has_conflicts"] is False
+
+    with second_runtime.session_factory() as session:
+        session.add(
+            Problem(
+                id=problem.id,
+                title="local conflict",
+                question_markdown="after",
+                status="inbox",
+                revision=1,
+            )
+        )
+        session.commit()
+    conflict_preview = second.preview_profile_merge(uploaded["profile_id"])
+    assert conflict_preview["has_conflicts"] is True
+    assert conflict_preview["tables"]["problems"]["conflicts"] == 1
 
 
 def test_failed_upload_does_not_update_latest(runtime, tmp_path: Path) -> None:
