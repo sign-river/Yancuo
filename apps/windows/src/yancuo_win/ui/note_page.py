@@ -40,6 +40,7 @@ from yancuo_win.application.note_ai_service import (
 from yancuo_win.application.note_intake_service import NoteIntakeService
 from yancuo_win.application.services import AppServices
 from yancuo_win.application.note_service import NoteService
+from yancuo_win.application.unified_search_service import UnifiedSearchIndexService
 from yancuo_win.data.models import NoteBlock, NoteDocument, NoteIntakeSession
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.note_worker import NoteExtractionWorker
@@ -609,6 +610,7 @@ class NotePage(QWidget):
         self._loading = False
         self.note_ai = NoteAiService(notes.runtime)
         self.note_intake = NoteIntakeService(notes.runtime)
+        self.note_search = UnifiedSearchIndexService(notes.runtime)
         self.note_worker: NoteExtractionWorker | None = None
         self._build()
         self.reload()
@@ -657,6 +659,11 @@ class NotePage(QWidget):
             self.status_filter.addItem(label, status)
         self.status_filter.currentIndexChanged.connect(self.reload)
         left.body.addWidget(self.status_filter)
+        self.note_search_edit = QLineEdit()
+        self.note_search_edit.setObjectName("NoteSearchEdit")
+        self.note_search_edit.setPlaceholderText("离线搜索标题、内容、标签或合集…")
+        self.note_search_edit.textChanged.connect(self.reload)
+        left.body.addWidget(self.note_search_edit)
         self.note_list = QListWidget()
         self.note_list.setObjectName("NoteList")
         self.note_list.currentItemChanged.connect(self._select_note)
@@ -810,6 +817,19 @@ class NotePage(QWidget):
             self._notes = self.notes.list_notes(
                 status=self.status_filter.currentData()
             )
+            query = self.note_search_edit.text().strip()
+            if query:
+                # Keep search results current while SEARCH-07's shared write hooks
+                # are being introduced for all note mutation paths.
+                self.note_search.rebuild_notes()
+                hits = self.note_search.search_notes(
+                    query,
+                    statuses=(self.status_filter.currentData(),)
+                    if self.status_filter.currentData()
+                    else ("active", "inbox", "archived", "trashed"),
+                )
+                hit_ids = {str(hit["entity_id"]) for hit in hits}
+                self._notes = [note for note in self._notes if note.id in hit_ids]
         except DomainError as exc:
             self.status_message.emit(str(exc))
             return
