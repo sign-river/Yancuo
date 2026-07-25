@@ -305,7 +305,7 @@ def test_bootstrap_restores_backup_when_migration_fails(
         ).scalar_one()
     restored.dispose()
     assert marker == "original"
-    backups = list((data_root / "backups").glob("pre-migration-v6-to-v11-*.sqlite"))
+    backups = list((data_root / "backups").glob("pre-migration-v6-to-v12-*.sqlite"))
     assert len(backups) == 1
     verify_sqlite_database(backups[0], expected_schema_version=6)
 
@@ -317,7 +317,7 @@ def test_bootstrap_uses_internal_schema_target_when_config_is_stale(
     stale_config = tmp_path / "stale.toml"
     stale_config.write_text(
         default_toml_path().read_text(encoding="utf-8").replace(
-            "schema_version = 11", "schema_version = 10"
+            "schema_version = 12", "schema_version = 10"
         ),
         encoding="utf-8",
     )

@@ -304,6 +304,16 @@ def _migrate_to_v11(engine: Engine) -> None:
     logger.info("migrated database to schema_version=11")
 
 
+def _migrate_to_v12(engine: Engine) -> None:
+    """Add durable successful-recognition cache entries."""
+
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 12)
+        session.commit()
+    logger.info("migrated database to schema_version=12")
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -359,6 +369,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     9: _migrate_to_v9,
     10: _migrate_to_v10,
     11: _migrate_to_v11,
+    12: _migrate_to_v12,
 }
 
 
@@ -422,6 +433,8 @@ def verify_core_tables(engine: Engine) -> list[str]:
         required.update({"note_collections", "note_collection_documents"})
     if get_schema_version(engine) >= 11:
         required.update({"unified_search_documents", "unified_search_documents_fts"})
+    if get_schema_version(engine) >= 12:
+        required.add("ai_recognition_cache")
     with engine.connect() as conn:
         rows = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table'")

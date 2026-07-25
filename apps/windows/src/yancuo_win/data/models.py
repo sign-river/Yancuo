@@ -563,6 +563,18 @@ class AiJobItem(Base):
     job: Mapped[AiJob] = relationship(back_populates="items")
 
 
+class AiRecognitionCache(Base):
+    """Reusable successful recognition output; source jobs remain authoritative audit data."""
+
+    __tablename__ = "ai_recognition_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    structured_json: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_response: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    source_job_item_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class IntakeSession(Base):
     """Task-scoped manual/AI intake state, separate from the formal library."""
 
