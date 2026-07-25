@@ -102,6 +102,16 @@ class Chapter(Base):
     subject: Mapped[Subject] = relationship(back_populates="chapters")
 
 
+class ChapterAlias(Base):
+    __tablename__ = "chapter_aliases"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    chapter_id: Mapped[str] = mapped_column(ForeignKey("chapters.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    normalized_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Problem(Base):
     """错题主体。状态：inbox / active / archived / trashed。"""
 
@@ -112,6 +122,10 @@ class Problem(Base):
     subject_id: Mapped[str | None] = mapped_column(ForeignKey("subjects.id"), nullable=True)
     chapter_id: Mapped[str | None] = mapped_column(ForeignKey("chapters.id"), nullable=True)
     problem_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    problem_set_id: Mapped[str | None] = mapped_column(
+        ForeignKey("problem_sets.id"), nullable=True, index=True
+    )
+    item_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     title: Mapped[str | None] = mapped_column(String(256), nullable=True)
     question_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
@@ -147,6 +161,8 @@ class Problem(Base):
         DateTime(timezone=True), nullable=True
     )
     review_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # A paused item deliberately keeps no due date without becoming "new and due".
+    review_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     tags: Mapped[list[Tag]] = relationship(
         secondary="problem_tags", back_populates="problems"
@@ -156,6 +172,31 @@ class Problem(Base):
     )
     versions: Mapped[list[Version]] = relationship(
         back_populates="problem", cascade="all, delete-orphan"
+    )
+    problem_set: Mapped[ProblemSet | None] = relationship(back_populates="problems")
+    conversations: Mapped[list[ProblemConversation]] = relationship(
+        back_populates="problem", cascade="all, delete-orphan"
+    )
+
+
+class ProblemSet(Base):
+    """Shared source material for independently reviewable child problems."""
+
+    __tablename__ = "problem_sets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    material_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    source_book: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    source_year: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    problems: Mapped[list[Problem]] = relationship(back_populates="problem_set")
+    assets: Mapped[list[ProblemSetAsset]] = relationship(
+        back_populates="problem_set", cascade="all, delete-orphan", order_by="ProblemSetAsset.sort_order"
     )
 
 
@@ -453,6 +494,23 @@ class Asset(Base):
     problem: Mapped[Problem | None] = relationship(back_populates="assets")
 
 
+class ProblemSetAsset(Base):
+    __tablename__ = "problem_set_assets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    problem_set_id: Mapped[str] = mapped_column(
+        ForeignKey("problem_sets.id"), nullable=False, index=True
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    relative_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    problem_set: Mapped[ProblemSet] = relationship(back_populates="assets")
+
+
 class Tag(Base):
     __tablename__ = "tags"
 
@@ -550,6 +608,9 @@ class AiJobItem(Base):
     intake_asset_id: Mapped[str | None] = mapped_column(
         ForeignKey("intake_assets.id"), nullable=True
     )
+    recognition_unit_id: Mapped[str | None] = mapped_column(
+        ForeignKey("intake_recognition_units.id"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     raw_response: Mapped[str] = mapped_column(Text, default="", nullable=False)
     structured_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
@@ -615,6 +676,32 @@ class IntakeAsset(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class IntakeRecognitionUnit(Base):
+    """One ordered group of source images submitted in a single AI request."""
+
+    __tablename__ = "intake_recognition_units"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("intake_sessions.id"), nullable=False, index=True
+    )
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IntakeRecognitionUnitAsset(Base):
+    __tablename__ = "intake_recognition_unit_assets"
+
+    recognition_unit_id: Mapped[str] = mapped_column(
+        ForeignKey("intake_recognition_units.id"), primary_key=True
+    )
+    intake_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("intake_assets.id"), primary_key=True
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 class IntakeCandidateRecord(Base):
     """AI/new-problem candidate that does not exist in the formal library yet."""
 
@@ -641,6 +728,17 @@ class IntakeCandidateRecord(Base):
     )
     decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class IntakeCandidateUnit(Base):
+    __tablename__ = "intake_candidate_units"
+
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("intake_candidates.id"), primary_key=True
+    )
+    recognition_unit_id: Mapped[str] = mapped_column(
+        ForeignKey("intake_recognition_units.id"), primary_key=True
     )
 
 
@@ -680,6 +778,92 @@ class ReviewItem(Base):
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     session: Mapped[ReviewSession] = relationship(back_populates="items")
+
+
+class StudySession(Base):
+    """A learner's review run; deliberately separate from change-review sessions."""
+
+    __tablename__ = "study_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    selection_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    problem_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    records: Mapped[list[StudyRecord]] = relationship(
+        back_populates="study_session", cascade="all, delete-orphan"
+    )
+
+
+class StudyRecord(Base):
+    """Immutable per-grade detail captured from schema v16 onward."""
+
+    __tablename__ = "study_records"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    study_session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("study_sessions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    problem_id: Mapped[str] = mapped_column(
+        ForeignKey("problems.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    answer_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    grade: Mapped[int] = mapped_column(Integer, nullable=False)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    graded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    interval_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_review_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    study_session: Mapped[StudySession | None] = relationship(back_populates="records")
+
+
+class ProblemConversation(Base):
+    """A problem-scoped AI discussion, independent from the problem notes field."""
+
+    __tablename__ = "problem_conversations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    problem_id: Mapped[str] = mapped_column(
+        ForeignKey("problems.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(256), default="新对话", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="draft", nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    model: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    problem_revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    context_snapshot_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    include_original_image: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    problem: Mapped[Problem] = relationship(back_populates="conversations")
+    messages: Mapped[list[ProblemMessage]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan", order_by="ProblemMessage.sequence"
+    )
+
+
+class ProblemMessage(Base):
+    __tablename__ = "problem_messages"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("problem_conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="complete", nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cost_estimate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    conversation: Mapped[ProblemConversation] = relationship(back_populates="messages")
 
 
 class AuditLog(Base):

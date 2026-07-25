@@ -94,6 +94,17 @@ def _nav_modes(window: MainWindow) -> list[str]:
     ]
 
 
+def test_account_page_exposes_local_identity_without_login(window: MainWindow) -> None:
+    items = window.main_nav.findItems("账户", Qt.MatchFlag.MatchExactly)
+    assert len(items) == 1
+
+    window.main_nav.setCurrentItem(items[0])
+
+    assert "离线模式" in window.account_identity_summary.text()
+    assert window.runtime.identity.user_id in window.account_identity_summary.text()
+    assert "AI 凭据" in window.account_connection_summary.text()
+
+
 def _select_mode(window: MainWindow, mode: str) -> None:
     if window._library_view == "browse":
         item = window._find_knowledge_item(mode)

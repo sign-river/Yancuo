@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from yancuo_win.domain.rules import DomainError
 
@@ -24,6 +25,8 @@ _INTERVAL_DAYS = {
     5: 14,
 }
 
+DEFAULT_REVIEW_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
 
 def validate_grade(grade: int) -> int:
     if grade not in REVIEW_GRADES:
@@ -40,15 +43,16 @@ def compute_next_review_at(
     grade: int,
     *,
     from_dt: datetime | None = None,
+    local_timezone: ZoneInfo = DEFAULT_REVIEW_TIMEZONE,
 ) -> datetime:
-    """根据打分计算下次复习时间（UTC，日期对齐到当天 00:00+间隔）。"""
+    """Calculate from a learner-local calendar date, retaining UTC storage."""
     grade = validate_grade(grade)
     base = from_dt or datetime.now(timezone.utc)
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
-    day = base.astimezone(timezone.utc).date()
+    day = base.astimezone(local_timezone).date()
     nxt = day + timedelta(days=interval_days_for_grade(grade))
-    return datetime(nxt.year, nxt.month, nxt.day, tzinfo=timezone.utc)
+    return datetime(nxt.year, nxt.month, nxt.day, tzinfo=local_timezone).astimezone(timezone.utc)
 
 
 def mastery_from_grade(grade: int) -> int:
@@ -56,9 +60,14 @@ def mastery_from_grade(grade: int) -> int:
     return validate_grade(grade)
 
 
-def is_due(next_review_at: datetime | None, *, today: date | None = None) -> bool:
+def is_due(
+    next_review_at: datetime | None,
+    *,
+    today: date | None = None,
+    local_timezone: ZoneInfo = DEFAULT_REVIEW_TIMEZONE,
+) -> bool:
     if next_review_at is None:
         return True  # 从未复习：进入今日复习候选（由调用方再过滤状态）
-    today = today or datetime.now(timezone.utc).date()
-    due_date = next_review_at.astimezone(timezone.utc).date()
+    today = today or datetime.now(local_timezone).date()
+    due_date = next_review_at.astimezone(local_timezone).date()
     return due_date <= today

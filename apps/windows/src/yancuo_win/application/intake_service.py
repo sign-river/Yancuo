@@ -20,7 +20,7 @@ from typing import Any
 
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QImage
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
 from yancuo_win.ai.base import normalize_region
@@ -39,8 +39,13 @@ from yancuo_win.data.models import (
     Chapter,
     IntakeAsset,
     IntakeCandidateRecord,
+    IntakeCandidateUnit,
+    IntakeRecognitionUnit,
+    IntakeRecognitionUnitAsset,
     IntakeSession,
     Problem,
+    ProblemSet,
+    ProblemSetAsset,
     ReviewItem,
     ReviewSession,
     Subject,
@@ -63,8 +68,9 @@ _INTAKE_AI_FIELDS = frozenset(
         "error_analysis",
         "notes",
         "tags",
-        "subject_name",
-        "chapter_name",
+        "subject_id",
+        "chapter_id",
+        "taxonomy_proposal",
         "problem_type",
         "priority",
     }
@@ -102,6 +108,8 @@ _REQUIRED_TEXT_FIELDS = frozenset(
         "notes",
     }
 )
+
+_RECOGNITION_MODES = frozenset({"auto", "one_to_one", "one_to_many", "many_to_one"})
 
 
 @dataclass(frozen=True)
@@ -156,6 +164,17 @@ class IntakeCandidate:
     uncertain: list[dict[str, Any]]
     original_image: Path | None
     region: dict[str, float]
+    source_images: list[Path] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class IntakeStructureSuggestion:
+    unit_id: str
+    layout_kind: str
+    subquestion_count: int
+    confidence: float
+    rationale: str
+    signals: list[str]
 
 
 @dataclass(frozen=True)
@@ -299,6 +318,65 @@ class ProblemIntakeService:
                 raise DomainError(f"字段 {key} 必须是文本或留空")
         return payload
 
+    def _apply_taxonomy_proposal(self, session, fields: dict[str, Any]) -> None:
+        proposal = fields.pop("taxonomy_proposal", None)
+        if not isinstance(proposal, dict) or fields.get("subject_id"):
+            return
+        subject_name = str(proposal.get("subject_name") or "").strip()
+        chapter_name = str(proposal.get("chapter_name") or "").strip()
+        parent_id = proposal.get("parent_chapter_id")
+        reason = str(proposal.get("reason") or "").strip()
+        if not subject_name:
+            raise DomainError("新分类提案缺少科目名称")
+        if not reason:
+            raise DomainError("新分类提案缺少创建理由")
+        if parent_id is not None and not isinstance(parent_id, str):
+            raise DomainError("新分类提案的上级章节无效")
+        subject = session.scalar(select(Subject).where(Subject.name == subject_name))
+        if subject is None:
+            subject = Subject(id=new_id("sub"), name=subject_name)
+            session.add(subject)
+            session.flush()
+        fields["subject_id"] = subject.id
+        if chapter_name:
+            parent = session.get(Chapter, parent_id) if parent_id else None
+            if parent_id and parent is None:
+                raise DomainError("新分类提案的上级章节不存在")
+            self.app._validate_chapter_parent(
+                session,
+                subject_id=subject.id,
+                parent_id=parent.id if parent else None,
+            )
+            existing = session.scalar(
+                select(Chapter).where(
+                    Chapter.subject_id == subject.id,
+                    Chapter.parent_id == (parent.id if parent else None),
+                    Chapter.name == chapter_name,
+                )
+            )
+            if existing is None:
+                self.app._ensure_unique_chapter_name(
+                    session,
+                    subject_id=subject.id,
+                    parent_id=parent.id if parent else None,
+                    name=chapter_name,
+                )
+                self.app._ensure_no_chapter_alias_conflict(
+                    session,
+                    chapter_id=None,
+                    name=chapter_name,
+                    parent_id=parent.id if parent else None,
+                )
+                existing = Chapter(
+                    id=new_id("ch"),
+                    subject_id=subject.id,
+                    parent_id=parent.id if parent else None,
+                    name=chapter_name,
+                )
+                session.add(existing)
+                session.flush()
+            fields["chapter_id"] = existing.id
+
     def commit_manual(
         self,
         fields: dict[str, Any],
@@ -402,6 +480,116 @@ class ProblemIntakeService:
             after=after,
             operation="create",
         )
+        return created
+
+    def create_problem_set(
+        self,
+        *,
+        title: str,
+        material_markdown: str,
+        children: list[tuple[dict[str, Any], list[str] | None]],
+        image_paths: list[Path],
+        source_book: str | None = None,
+        source_year: str | None = None,
+    ) -> list[Problem]:
+        """Atomically save shared material once and independently reviewable children."""
+
+        if not children:
+            raise DomainError("题组至少需要一个子题")
+        sources = [self.store.store_copy(Path(path), role="original") for path in image_paths]
+        unique_sources = {
+            stored.sha256: stored for stored in sources
+        }
+        if not material_markdown.strip() and not unique_sources:
+            raise DomainError("题组需要共享材料或至少一张来源图片")
+
+        created_ids: list[str] = []
+        snapshots: list[tuple[str, dict[str, Any]]] = []
+        with self.runtime.session_factory() as session:
+            problem_set = ProblemSet(
+                id=new_id("pset"),
+                title=title.strip(),
+                material_markdown=material_markdown,
+                source_book=source_book,
+                source_year=source_year,
+            )
+            session.add(problem_set)
+            for order, stored in enumerate(unique_sources.values()):
+                problem_set.assets.append(
+                    ProblemSetAsset(
+                        id=new_id("psasset"),
+                        sort_order=order,
+                        sha256=stored.sha256,
+                        relative_path=stored.relative_path,
+                        mime_type=stored.mime_type,
+                        size_bytes=stored.size_bytes,
+                    )
+                )
+
+            for order, (fields, tag_names) in enumerate(children):
+                payload = self._normalize_fields(fields)
+                self._validate_catalog(
+                    session, payload.get("subject_id"), payload.get("chapter_id")
+                )
+                problem = Problem(
+                    id=new_id("problem"),
+                    status="active",
+                    human_confirmed=True,
+                    revision=1,
+                    problem_set=problem_set,
+                    item_order=order,
+                    **payload,
+                )
+                session.add(problem)
+                tags = _normalized_tags(tag_names)
+                for name in tags:
+                    tag = session.scalar(select(Tag).where(Tag.name == name))
+                    if tag is None:
+                        tag = Tag(id=new_id("tag"), name=name, is_system=False)
+                        session.add(tag)
+                        session.flush()
+                    problem.tags.append(tag)
+                session.flush()
+                snapshot = sync_snapshot(problem, tags)
+                session.add(
+                    Version(
+                        id=new_id("ver"),
+                        problem_id=problem.id,
+                        revision=1,
+                        source="problem_set",
+                        summary="题组子题确认入库",
+                        snapshot_json=json.dumps(snapshot, ensure_ascii=False),
+                        created_by=self.runtime.identity.user_id,
+                    )
+                )
+                created_ids.append(problem.id)
+                snapshots.append((problem.id, snapshot))
+            session.add(
+                AuditLog(
+                    id=new_id("audit"),
+                    action="problem_set_created",
+                    entity_type="problem_set",
+                    entity_id=problem_set.id,
+                    detail_json=json.dumps(
+                        {"problem_count": len(created_ids), "asset_count": len(unique_sources)},
+                        ensure_ascii=False,
+                    ),
+                    actor=self.runtime.identity.user_id,
+                )
+            )
+            session.commit()
+            created = session.scalars(
+                select(Problem)
+                .where(Problem.id.in_(created_ids))
+                .options(selectinload(Problem.tags), selectinload(Problem.assets))
+                .order_by(Problem.item_order)
+            ).all()
+            session.expunge_all()
+
+        for problem_id, snapshot in snapshots:
+            SyncService(self.runtime).record_problem_update(
+                problem_id, before={}, after=snapshot, operation="create"
+            )
         return created
 
     def load_manual_draft(self) -> ManualDraft | None:
@@ -544,16 +732,16 @@ class ProblemIntakeService:
             '"uncertain_fields": []}]}',
             "即使只有一道题也使用 problems 数组；不要把多道题拼进同一个题干。",
             "region 是该题在原图中的归一化矩形坐标，左上角为原点，四个值均为 0 到 1；无法判断时使用整图 {\"x\":0,\"y\":0,\"width\":1,\"height\":1}。",
-            "请额外输出 subject_name、chapter_name、problem_type 和 priority（1-5）。",
+            "请额外输出 subject_id、chapter_id、problem_type 和 priority（1-5）。",
             "question_markdown、user_answer、correct_answer、solution_markdown、error_analysis 等 Markdown 字段中的公式必须使用 $...$ 或 $$...$$ 定界；不要输出无定界符的裸公式。",
             "question_latex 只写裸 LaTeX，不要再包 $、$$、\\(\\) 或 \\[\\] 定界符。",
-            "subject_name/chapter_name 必须从以下有效完整路径中选择；chapter_name 使用完整章节路径；无法判断时留空，不要编造。",
+            "subject_id/chapter_id 必须从以下允许集合中选择；没有合适目录时留空，并输出 taxonomy_proposal（subject_name、parent_chapter_id、chapter_name、reason），仅提出建议，不能编造 ID。",
         ]
         for choice in self.app.list_category_choices():
             if choice.chapter_id is None:
-                lines.append(f"- {choice.subject_name} / （未分类）")
+                lines.append(f"- subject_id={choice.subject_id}; chapter_id=null; {choice.label}")
             else:
-                lines.append(f"- {choice.label}")
+                lines.append(f"- subject_id={choice.subject_id}; chapter_id={choice.chapter_id}; {choice.label}")
         return "\n".join(lines)
 
     def start_ai(
@@ -561,11 +749,14 @@ class ProblemIntakeService:
         image_paths: list[Path],
         *,
         user_instruction: str = "",
+        recognition_mode: str = "auto",
     ) -> AiIntakeSession:
         """Import images as staging records and start a job-scoped intake."""
 
         if not image_paths:
             raise DomainError("请先添加需要识别的图片")
+        if recognition_mode not in _RECOGNITION_MODES:
+            raise DomainError("不支持的识别方式")
         # Validate credentials before import creates any inbox staging records.
         get_provider(self.runtime.settings).validate_configuration()
         instruction_parts = [self._taxonomy_instruction()]
@@ -578,6 +769,7 @@ class ProblemIntakeService:
                 mode="ai",
                 status="draft",
                 user_instruction=user_instruction.strip(),
+                draft_json=json.dumps({"recognition_mode": recognition_mode}),
             )
             session.add(intake_session)
             session.flush()
@@ -616,10 +808,22 @@ class ProblemIntakeService:
             intake_session_id = intake_session.id
             session.commit()
         try:
+            mode_instruction = {
+                "auto": (
+                    "先按每张图片独立识别；如检测到跨页材料，仅提出结构建议，不自动合并。"
+                    "在 JSON 顶层额外返回 layout_kind（single / independent / composite / continuation）、"
+                    "subquestion_count、confidence（0-1）、rationale 和 signals 数组；"
+                    "它们仅供用户决策，不得改变 problems 的输出。"
+                ),
+                "one_to_one": "每张图片只提取一道题，不得把同图其他内容拆成额外题目。",
+                "one_to_many": "每张图片可拆出多道独立候选题，并为每题返回来源区域。",
+                "many_to_one": "本批图片按上传顺序共同描述同一道题或材料；只返回一个候选题。",
+            }[recognition_mode]
             job = self.ai.create_intake_structure_job(
                 intake_session_id,
                 asset_ids,
-                user_instruction="\n\n".join(instruction_parts),
+                user_instruction="\n\n".join([*instruction_parts, mode_instruction]),
+                recognition_mode=recognition_mode,
                 allowed_fields=_INTAKE_AI_FIELDS,
             )
         except Exception:
@@ -789,6 +993,8 @@ class ProblemIntakeService:
                         )
                     ).all()
                 }
+                subjects = {subject.id for subject in session.scalars(select(Subject)).all()}
+                chapters = {chapter.id: chapter.subject_id for chapter in session.scalars(select(Chapter)).all()}
                 for item in rows:
                     try:
                         fields = json.loads(item.fields_json)
@@ -797,6 +1003,19 @@ class ProblemIntakeService:
                     except json.JSONDecodeError as exc:
                         raise DomainError("AI 录题候选 JSON 无效") from exc
                     asset = assets.get(item.intake_asset_id)
+                    if isinstance(fields, dict):
+                        subject_id = fields.get("subject_id")
+                        chapter_id = fields.get("chapter_id")
+                        if subject_id and subject_id not in subjects:
+                            fields.pop("subject_id", None)
+                            fields.pop("chapter_id", None)
+                            uncertain = [*uncertain, {"field": "subject_id", "reason": "AI 返回的分类 ID 不在允许集合中"}]
+                        elif chapter_id and chapters.get(chapter_id) != subject_id:
+                            fields.pop("chapter_id", None)
+                            uncertain = [*uncertain, {"field": "chapter_id", "reason": "AI 返回的章节 ID 不属于当前科目"}]
+                        proposal = fields.get("taxonomy_proposal")
+                        if isinstance(proposal, dict):
+                            uncertain = [*uncertain, {"field": "taxonomy_proposal", "reason": f"新分类提案：{proposal.get('reason') or '待确认后创建'}"}]
                     candidates.append(
                         IntakeCandidate(
                             review_item_id=item.id,
@@ -814,6 +1033,7 @@ class ProblemIntakeService:
                                 else None
                             ),
                             region=normalize_region(region),
+                            source_images=self.candidate_source_images(item.id),
                         )
                     )
                 return candidates
@@ -847,6 +1067,211 @@ class ProblemIntakeService:
                 )
             )
         return candidates
+
+    def candidate_source_images(self, candidate_id: str) -> list[Path]:
+        """Return an AI candidate's ordered immutable source images."""
+
+        with self.runtime.session_factory() as session:
+            unit_ids = session.scalars(
+                select(IntakeCandidateUnit.recognition_unit_id).where(
+                    IntakeCandidateUnit.candidate_id == candidate_id
+                )
+            ).all()
+            if unit_ids:
+                assets = session.execute(
+                    select(IntakeAsset)
+                    .join(
+                        IntakeRecognitionUnitAsset,
+                        IntakeRecognitionUnitAsset.intake_asset_id == IntakeAsset.id,
+                    )
+                    .join(
+                        IntakeRecognitionUnit,
+                        IntakeRecognitionUnit.id
+                        == IntakeRecognitionUnitAsset.recognition_unit_id,
+                    )
+                    .where(IntakeRecognitionUnit.id.in_(unit_ids))
+                    .order_by(
+                        IntakeRecognitionUnit.sort_order,
+                        IntakeRecognitionUnitAsset.sort_order,
+                    )
+                ).scalars().all()
+                return [self.store.resolve(asset.relative_path) for asset in assets]
+            candidate = session.get(IntakeCandidateRecord, candidate_id)
+            asset = (
+                session.get(IntakeAsset, candidate.intake_asset_id)
+                if candidate is not None
+                else None
+            )
+            return [self.store.resolve(asset.relative_path)] if asset else []
+
+    def reorder_candidate_source_images(
+        self, candidate_id: str, image_paths: list[Path]
+    ) -> None:
+        """Persist a user-selected order for a single recognition unit's images."""
+
+        with self.runtime.session_factory() as session:
+            unit_ids = session.scalars(
+                select(IntakeCandidateUnit.recognition_unit_id).where(
+                    IntakeCandidateUnit.candidate_id == candidate_id
+                )
+            ).all()
+            if len(unit_ids) != 1:
+                raise DomainError("当前候选没有可排序的单一识别单元")
+            members = session.scalars(
+                select(IntakeRecognitionUnitAsset).where(
+                    IntakeRecognitionUnitAsset.recognition_unit_id == unit_ids[0]
+                )
+            ).all()
+            by_path = {
+                self.store.resolve(session.get(IntakeAsset, member.intake_asset_id).relative_path): member
+                for member in members
+                if session.get(IntakeAsset, member.intake_asset_id) is not None
+            }
+            requested = [Path(path) for path in image_paths]
+            if len(requested) != len(members) or set(requested) != set(by_path):
+                raise DomainError("来源图片顺序无效")
+            for order, path in enumerate(requested):
+                by_path[path].sort_order = order
+            session.commit()
+
+    def split_candidate_recognition_unit(self, candidate_id: str) -> None:
+        """Replace one multi-image candidate source unit with ordered single-image units."""
+
+        with self.runtime.session_factory() as session:
+            candidate = session.get(IntakeCandidateRecord, candidate_id)
+            unit_ids = session.scalars(
+                select(IntakeCandidateUnit.recognition_unit_id).where(
+                    IntakeCandidateUnit.candidate_id == candidate_id
+                )
+            ).all()
+            if candidate is None or len(unit_ids) != 1:
+                raise DomainError("当前候选没有可拆分的识别单元")
+            old_unit = session.get(IntakeRecognitionUnit, unit_ids[0])
+            members = session.scalars(
+                select(IntakeRecognitionUnitAsset)
+                .where(IntakeRecognitionUnitAsset.recognition_unit_id == unit_ids[0])
+                .order_by(IntakeRecognitionUnitAsset.sort_order)
+            ).all()
+            if old_unit is None or len(members) < 2:
+                raise DomainError("识别单元至少需要两张图片才能拆分")
+            session.execute(
+                delete(IntakeCandidateUnit).where(
+                    IntakeCandidateUnit.candidate_id == candidate_id
+                )
+            )
+            for order, member in enumerate(members):
+                unit = IntakeRecognitionUnit(
+                    id=new_id("iunit"), session_id=old_unit.session_id,
+                    mode="one_to_one", sort_order=old_unit.sort_order + order,
+                )
+                session.add(unit)
+                session.add(IntakeRecognitionUnitAsset(
+                    recognition_unit_id=unit.id, intake_asset_id=member.intake_asset_id, sort_order=0
+                ))
+                session.flush()
+                session.add(IntakeCandidateUnit(candidate_id=candidate_id, recognition_unit_id=unit.id))
+            session.commit()
+
+    def commit_ai_candidates_as_problem_set(
+        self, candidate_ids: list[str], *, title: str, material_markdown: str
+    ) -> list[Problem]:
+        """Promote selected pending intake candidates to independently reviewable set children."""
+
+        unique_ids = list(dict.fromkeys(candidate_ids))
+        if not unique_ids:
+            raise DomainError("请先选择至少一个待确认候选")
+        with self.runtime.session_factory() as session:
+            candidates = session.scalars(
+                select(IntakeCandidateRecord).where(
+                    IntakeCandidateRecord.id.in_(unique_ids),
+                    IntakeCandidateRecord.status == "pending",
+                )
+            ).all()
+            if len(candidates) != len(unique_ids):
+                raise DomainError("候选题已经处理或不存在")
+            by_id = {candidate.id: candidate for candidate in candidates}
+            children = []
+            source_paths: list[Path] = []
+            for candidate_id in unique_ids:
+                candidate = by_id[candidate_id]
+                try:
+                    fields = json.loads(candidate.fields_json)
+                except json.JSONDecodeError as exc:
+                    raise DomainError("候选题字段无效") from exc
+                children.append((fields if isinstance(fields, dict) else {}, fields.get("tags", []) if isinstance(fields, dict) else []))
+                source_paths.extend(self.candidate_source_images(candidate_id))
+        created = self.create_problem_set(
+            title=title, material_markdown=material_markdown,
+            children=children, image_paths=source_paths,
+        )
+        with self.runtime.session_factory() as session:
+            session_ids: set[str] = set()
+            for candidate_id, problem in zip(unique_ids, created, strict=True):
+                candidate = session.get(IntakeCandidateRecord, candidate_id)
+                if candidate is not None:
+                    candidate.status = "committed"
+                    candidate.problem_id = problem.id
+                    candidate.decided_at = utcnow()
+                    session_ids.add(candidate.session_id)
+            for session_id in session_ids:
+                remaining = session.scalar(
+                    select(func.count()).select_from(IntakeCandidateRecord).where(
+                        IntakeCandidateRecord.session_id == session_id,
+                        IntakeCandidateRecord.status == "pending",
+                    )
+                )
+                if not remaining:
+                    intake_session = session.get(IntakeSession, session_id)
+                    if intake_session is not None:
+                        intake_session.status = "completed"
+                        intake_session.completed_at = utcnow()
+            session.commit()
+        return created
+
+    def structure_suggestions(self, job_id: str) -> list[IntakeStructureSuggestion]:
+        """Return advisory-only automatic layout suggestions for an intake job."""
+
+        with self.runtime.session_factory() as session:
+            intake_session = session.scalar(
+                select(IntakeSession).where(IntakeSession.job_id == job_id)
+            )
+            if intake_session is None:
+                return []
+            try:
+                draft = json.loads(intake_session.draft_json)
+            except json.JSONDecodeError:
+                return []
+        raw_suggestions = draft.get("structure_suggestions", {}) if isinstance(draft, dict) else {}
+        if not isinstance(raw_suggestions, dict):
+            return []
+        result: list[IntakeStructureSuggestion] = []
+        for unit_id, value in raw_suggestions.items():
+            if not isinstance(unit_id, str) or not isinstance(value, dict):
+                continue
+            kind = value.get("layout_kind")
+            count = value.get("subquestion_count")
+            confidence = value.get("confidence")
+            rationale = value.get("rationale")
+            signals = value.get("signals")
+            if (
+                kind not in {"single", "independent", "composite", "continuation"}
+                or not isinstance(count, int)
+                or not isinstance(confidence, (int, float))
+                or not isinstance(rationale, str)
+                or not isinstance(signals, list)
+            ):
+                continue
+            result.append(
+                IntakeStructureSuggestion(
+                    unit_id=unit_id,
+                    layout_kind=kind,
+                    subquestion_count=max(1, min(count, 99)),
+                    confidence=max(0.0, min(float(confidence), 1.0)),
+                    rationale=rationale[:240],
+                    signals=[str(signal)[:80] for signal in signals[:8]],
+                )
+            )
+        return result
 
     def failed_items(self, job_id: str) -> list[str]:
         with self.runtime.session_factory() as session:
@@ -1486,7 +1911,11 @@ class ProblemIntakeService:
     ) -> Problem:
         """Apply the edited candidate, then promote its staging problem."""
 
-        payload = self._normalize_fields(fields)
+        resolved_fields = dict(fields)
+        with self.runtime.session_factory() as session:
+            self._apply_taxonomy_proposal(session, resolved_fields)
+            session.commit()
+        payload = self._normalize_fields(resolved_fields)
         tags = _normalized_tags(tag_names)
         payload["tags"] = tags
         payload["human_confirmed"] = True

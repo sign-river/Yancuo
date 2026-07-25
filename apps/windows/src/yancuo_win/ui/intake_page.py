@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListView,
@@ -851,8 +852,19 @@ class IntakePage(QWidget):
         upload.body.addLayout(file_actions)
         layout.addWidget(upload)
 
+        mode = CardFrame()
+        mode.add_title("2. 选择识别方式")
+        mode.add_hint("自动模式保持逐图识别；多图一题会按上传顺序将全部图片作为同一次视觉请求发送。")
+        self.ai_recognition_mode = QComboBox()
+        self.ai_recognition_mode.addItem("自动（逐图识别，仅提示结构建议）", "auto")
+        self.ai_recognition_mode.addItem("一图一题", "one_to_one")
+        self.ai_recognition_mode.addItem("一图多题", "one_to_many")
+        self.ai_recognition_mode.addItem("多图一题（按上传顺序）", "many_to_one")
+        mode.body.addWidget(self.ai_recognition_mode)
+        layout.addWidget(mode)
+
         prompt = CardFrame()
-        prompt.add_title("2. 告诉 AI 如何定位题目")
+        prompt.add_title("3. 告诉 AI 如何定位题目")
         prompt.add_hint("这是本批图片的补充说明；程序仍会强制结构化输出和字段安全规则。")
         self.ai_instruction = QTextEdit()
         self.ai_instruction.setPlaceholderText(
@@ -936,6 +948,10 @@ class IntakePage(QWidget):
         self.candidate_counter = QLabel("")
         self.candidate_counter.setObjectName("PageHint")
         layout.addWidget(self.candidate_counter)
+        self.structure_suggestion_label = QLabel("")
+        self.structure_suggestion_label.setWordWrap(True)
+        self.structure_suggestion_label.setObjectName("PageHint")
+        layout.addWidget(self.structure_suggestion_label)
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         left = CardFrame()
@@ -949,6 +965,22 @@ class IntakePage(QWidget):
         self.image_preview.set_editable(True)
         self.image_preview.region_drawn.connect(self._save_drawn_region)
         left.body.addWidget(self.image_preview, stretch=1)
+        self.source_image_list = QListWidget()
+        self.source_image_list.setObjectName("CandidateSourceImages")
+        self.source_image_list.setMaximumHeight(96)
+        left.body.addWidget(self.source_image_list)
+        source_actions = QHBoxLayout()
+        source_up = QPushButton("来源图上移")
+        source_up.clicked.connect(lambda: self._move_source_image(-1))
+        source_down = QPushButton("来源图下移")
+        source_down.clicked.connect(lambda: self._move_source_image(1))
+        source_split = QPushButton("拆分识别单元")
+        source_split.clicked.connect(self._split_recognition_unit)
+        source_actions.addWidget(source_up)
+        source_actions.addWidget(source_down)
+        source_actions.addWidget(source_split)
+        source_actions.addStretch(1)
+        left.body.addLayout(source_actions)
         self.region_label = QLabel("")
         self.region_label.setObjectName("PageHint")
         left.body.addWidget(self.region_label)
@@ -1014,12 +1046,15 @@ class IntakePage(QWidget):
         skip.clicked.connect(self._reject_candidate)
         confirm = primary_button("确认入库")
         confirm.clicked.connect(self._commit_candidate)
+        commit_set = QPushButton("作为题组入库")
+        commit_set.clicked.connect(self._commit_candidates_as_set)
         actions.addWidget(previous)
         actions.addWidget(next_button)
         actions.addWidget(split)
         actions.addWidget(merge)
         actions.addStretch(1)
         actions.addWidget(skip)
+        actions.addWidget(commit_set)
         actions.addWidget(confirm)
         layout.addLayout(actions)
         return page
@@ -1374,6 +1409,7 @@ class IntakePage(QWidget):
             started = self.intake.start_ai(
                 self.ai_files,
                 user_instruction=self.ai_instruction.toPlainText(),
+                recognition_mode=str(self.ai_recognition_mode.currentData()),
             )
         except DomainError as exc:
             QMessageBox.warning(self, "无法开始识别", str(exc))
@@ -1523,9 +1559,38 @@ class IntakePage(QWidget):
         self.candidate_counter.setText(
             f"待确认 {self.candidate_index + 1} / {len(self.ai_candidates)}"
         )
+        suggestions = self.intake.structure_suggestions(self.ai_job_id or "")
+        if suggestions:
+            labels = {
+                "single": "单题",
+                "independent": "独立题",
+                "composite": "复合题",
+                "continuation": "跨页续文",
+            }
+            lines = [
+                "AI 结构建议（仅提示，不会自动改变图片分组或入库方式）："
+            ]
+            for suggestion in suggestions:
+                signals = "、".join(suggestion.signals)
+                lines.append(
+                    f"建议 {labels[suggestion.layout_kind]} · {suggestion.subquestion_count} 题 · "
+                    f"置信度 {suggestion.confidence:.0%}。{suggestion.rationale}"
+                    + (f" 信号：{signals}" if signals else "")
+                )
+            self.structure_suggestion_label.setText("\n".join(lines))
+        else:
+            self.structure_suggestion_label.clear()
         self.ai_form.set_values(candidate.fields)
         self._refresh_ai_preview()
         self.image_preview.set_path(candidate.original_image)
+        self.source_image_list.clear()
+        for path in candidate.source_images:
+            item = QListWidgetItem(path.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            item.setToolTip(str(path))
+            self.source_image_list.addItem(item)
+        if self.source_image_list.count():
+            self.source_image_list.setCurrentRow(0)
         self.image_preview.set_region(candidate.region)
         self._show_region_label(candidate.region)
         region = candidate.region
@@ -1588,6 +1653,41 @@ class IntakePage(QWidget):
             return
         self.candidate_index = (self.candidate_index + delta) % len(self.ai_candidates)
         self._load_candidate()
+
+    def _move_source_image(self, delta: int) -> None:
+        if not self.ai_candidates:
+            return
+        row = self.source_image_list.currentRow()
+        target = row + delta
+        if row < 0 or target < 0 or target >= self.source_image_list.count():
+            return
+        item = self.source_image_list.takeItem(row)
+        self.source_image_list.insertItem(target, item)
+        self.source_image_list.setCurrentRow(target)
+        paths = [
+            Path(str(self.source_image_list.item(index).data(Qt.ItemDataRole.UserRole)))
+            for index in range(self.source_image_list.count())
+        ]
+        candidate = self.ai_candidates[self.candidate_index]
+        try:
+            self.intake.reorder_candidate_source_images(candidate.review_item_id, paths)
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法调整来源图", str(exc))
+            self._load_candidate()
+            return
+        self.status_message.emit("来源图片顺序已保存；不会自动重新识别")
+
+    def _split_recognition_unit(self) -> None:
+        if not self.ai_candidates:
+            return
+        candidate = self.ai_candidates[self.candidate_index]
+        try:
+            self.intake.split_candidate_recognition_unit(candidate.review_item_id)
+        except DomainError as exc:
+            QMessageBox.information(self, "无法拆分识别单元", str(exc))
+            return
+        self._reload_region_candidate(candidate.review_item_id)
+        self.status_message.emit("来源图片已拆为独立识别单元；当前候选内容保持不变")
 
     def _show_region_label(self, region: dict[str, float]) -> None:
         if region:
@@ -1861,6 +1961,35 @@ class IntakePage(QWidget):
                 self._show_done(
                     f"“{problem.title or 'AI 识别题目'}”已进入正式题库。"
                 )
+
+    def _commit_candidates_as_set(self) -> None:
+        if not self.ai_candidates:
+            return
+        title, accepted = QInputDialog.getText(
+            self, "作为题组入库", "题组标题："
+        )
+        if not accepted:
+            return
+        material, accepted = QInputDialog.getMultiLineText(
+            self, "作为题组入库", "共享材料（可留空）："
+        )
+        if not accepted:
+            return
+        try:
+            created = self.intake.commit_ai_candidates_as_problem_set(
+                [candidate.review_item_id for candidate in self.ai_candidates],
+                title=title,
+                material_markdown=material,
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法作为题组入库", str(exc))
+            return
+        self.last_problem_id = created[0].id if created else None
+        for problem in created:
+            self.problem_committed.emit(problem.id)
+        self.ai_candidates.clear()
+        self.ai_job_id = None
+        self._show_done(f"已将 {len(created)} 道子题作为题组入库。")
 
     def _reject_candidate(self) -> None:
         if not self.ai_candidates:

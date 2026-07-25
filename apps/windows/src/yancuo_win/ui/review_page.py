@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -36,6 +40,8 @@ class ReviewPage(QWidget):
         self._answer_visible = False
         self._session_grades: Counter[int] = Counter()
         self._session_completed = 0
+        self._study_session_id: str | None = None
+        self._answer_viewed_at: datetime | None = None
         self._build()
         self.reload_queue(preserve_current=False)
 
@@ -89,6 +95,18 @@ class ReviewPage(QWidget):
             self.grade_buttons.append(button)
         self.grade_card.body.addLayout(grade_row)
 
+        tools = QHBoxLayout()
+        self.pause_button = QPushButton("暂停当前题")
+        self.pause_button.clicked.connect(self._pause_current)
+        self.export_csv_button = QPushButton("导出数据表")
+        self.export_csv_button.clicked.connect(self._export_csv)
+        self.share_button = QPushButton("导出脱敏分享")
+        self.share_button.clicked.connect(self._export_share)
+        for button in (self.pause_button, self.export_csv_button, self.share_button):
+            tools.addWidget(button)
+        tools.addStretch(1)
+        self.grade_card.body.addLayout(tools)
+
         nav = QHBoxLayout()
         previous = ghost_button("← 上一题")
         previous.clicked.connect(self._previous)
@@ -122,7 +140,18 @@ class ReviewPage(QWidget):
     def start_session(self) -> None:
         self._session_grades.clear()
         self._session_completed = 0
-        self.reload_queue(preserve_current=False)
+        try:
+            session, queue = self.services.start_study_session()
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
+        self._study_session_id = session.id
+        self._queue = queue
+        self._index = 0
+        self._answer_visible = False
+        self._answer_viewed_at = None
+        self._render()
+        self.queue_changed.emit()
 
     @property
     def current_problem_id(self) -> str | None:
@@ -212,6 +241,8 @@ class ReviewPage(QWidget):
         if not self._current():
             return
         self._answer_visible = not self._answer_visible
+        if self._answer_visible:
+            self._answer_viewed_at = datetime.now(timezone.utc)
         self._render()
 
     def _grade(self, grade: int) -> None:
@@ -219,7 +250,15 @@ class ReviewPage(QWidget):
         if not problem or not self._answer_visible:
             return
         try:
-            result = self.services.record_review(problem.id, grade)
+            if self._study_session_id:
+                result = self.services.record_review(
+                    problem.id,
+                    grade,
+                    study_session_id=self._study_session_id,
+                    answer_viewed_at=self._answer_viewed_at,
+                )
+            else:
+                result = self.services.record_review(problem.id, grade)
         except DomainError as exc:
             self.status_message.emit(str(exc))
             return
@@ -231,6 +270,7 @@ class ReviewPage(QWidget):
         else:
             self._index = 0
         self._answer_visible = False
+        self._answer_viewed_at = None
         self.status_message.emit(
             f"已记录：{result['label']}；下次复习 {result['next_review_at'][:10]}"
         )
@@ -252,3 +292,79 @@ class ReviewPage(QWidget):
     def _open_current_detail(self) -> None:
         if self.current_problem_id:
             self.open_problem_requested.emit(self.current_problem_id)
+
+    def _pause_current(self) -> None:
+        problem = self._current()
+        if problem is None:
+            return
+        try:
+            self.services.set_review_enabled(problem.id, False)
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
+        self._queue.pop(self._index)
+        if self._queue:
+            self._index %= len(self._queue)
+        self._answer_visible = False
+        self._answer_viewed_at = None
+        self.status_message.emit("已暂停当前题的复习")
+        self._render()
+        self.queue_changed.emit()
+
+    def _export_csv(self) -> None:
+        if not self._study_session_id:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "导出复习数据表", "review-records.csv", "CSV (*.csv)")
+        if path:
+            self.services.export_study_session_csv(self._study_session_id, Path(path))
+            self.status_message.emit("复习数据表已导出")
+
+    def _export_share(self) -> None:
+        if not self._study_session_id:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "导出脱敏分享图片", "review-summary.png", "PNG (*.png)")
+        if path:
+            summary = self.services.finish_study_session(self._study_session_id)
+            pixmap = QPixmap(960, 420)
+            pixmap.fill(QColor("#f8fafc"))
+            painter = QPainter(pixmap)
+            painter.setPen(QColor("#172033"))
+            painter.setFont(QFont("Microsoft YaHei", 24, QFont.Weight.Bold))
+            painter.drawText(48, 72, "错题本 · 复习完成")
+            painter.setFont(QFont("Microsoft YaHei", 15))
+            painter.drawText(48, 128, f"完成 {summary['completed_count']} / {summary['problem_count']} 题")
+            painter.drawText(48, 174, "评分分布")
+            x = 48
+            for grade in REVIEW_GRADES:
+                count = summary["grades"][grade]
+                painter.setBrush(QColor("#2463eb"))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(x, 210, 132, 112, 6, 6)
+                painter.setPen(QColor("#ffffff"))
+                painter.setFont(QFont("Microsoft YaHei", 17, QFont.Weight.Bold))
+                painter.drawText(x + 18, 252, f"{grade} 分")
+                painter.drawText(x + 18, 292, f"{count} 题")
+                x += 156
+            painter.end()
+            pixmap.save(path, "PNG")
+            self.status_message.emit("脱敏分享图片已导出")
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key == Qt.Key_Space:
+            self._toggle_answer()
+            event.accept()
+            return
+        if Qt.Key_1 <= key <= Qt.Key_5 and self._answer_visible:
+            self._grade(key - Qt.Key_0)
+            event.accept()
+            return
+        if key == Qt.Key_Right:
+            self._skip()
+            event.accept()
+            return
+        if key == Qt.Key_Left:
+            self._previous()
+            event.accept()
+            return
+        super().keyPressEvent(event)

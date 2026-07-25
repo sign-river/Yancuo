@@ -16,7 +16,9 @@ from typing import Any
 
 from yancuo_win.ai.base import (
     AIProvider,
+    ChatCompletionResult,
     JsonCompletionResult,
+    ProviderCapabilities,
     StructuredCandidate,
     StructuredResult,
     normalize_region,
@@ -41,6 +43,7 @@ _TRANSIENT_NETWORK_ERRORS = (
 
 class OpenAICompatibleProvider(AIProvider):
     name = "openai_compatible"
+    capabilities = ProviderCapabilities(supports_chat=True, supports_chat_images=True)
 
     def __init__(
         self,
@@ -156,17 +159,39 @@ class OpenAICompatibleProvider(AIProvider):
         model: str,
         timeout_seconds: int,
     ) -> StructuredResult:
+        return self.structure_from_images(
+            image_paths=[image_path],
+            prompt=prompt,
+            model=model,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def structure_from_images(
+        self,
+        *,
+        image_paths: list[str],
+        prompt: str,
+        model: str,
+        timeout_seconds: int,
+    ) -> StructuredResult:
         encode_started = time.perf_counter()
-        path = Path(image_path)
-        if not path.is_file():
-            raise DomainError(f"图片不存在：{path}")
-        mime = "image/jpeg"
-        suffix = path.suffix.lower()
-        if suffix == ".png":
-            mime = "image/png"
-        elif suffix == ".webp":
-            mime = "image/webp"
-        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        if not image_paths:
+            raise DomainError("未选择图片")
+        image_content: list[dict[str, Any]] = []
+        for image_path in image_paths:
+            path = Path(image_path)
+            if not path.is_file():
+                raise DomainError(f"图片不存在：{path}")
+            mime = "image/jpeg"
+            suffix = path.suffix.lower()
+            if suffix == ".png":
+                mime = "image/png"
+            elif suffix == ".webp":
+                mime = "image/webp"
+            b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+            image_content.append(
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+            )
         image_encode_ms = (time.perf_counter() - encode_started) * 1000
         payload = {
             "model": model or "gpt-4o-mini",
@@ -174,13 +199,7 @@ class OpenAICompatibleProvider(AIProvider):
             "messages": [
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime};base64,{b64}"},
-                        },
-                    ],
+                    "content": [{"type": "text", "text": prompt}, *image_content],
                 }
             ],
         }
@@ -201,6 +220,13 @@ class OpenAICompatibleProvider(AIProvider):
             raise DomainError("AI 响应格式无效") from exc
 
         parsed = _extract_json(raw_text)
+        suggestion = {
+            "layout_kind": parsed.pop("layout_kind", None),
+            "subquestion_count": parsed.pop("subquestion_count", None),
+            "confidence": parsed.pop("confidence", None),
+            "rationale": parsed.pop("rationale", None),
+            "signals": parsed.pop("signals", None),
+        }
         candidate_payloads = parsed.get("problems")
         if isinstance(candidate_payloads, list):
             raw_candidates = [item for item in candidate_payloads if isinstance(item, dict)]
@@ -243,7 +269,10 @@ class OpenAICompatibleProvider(AIProvider):
                 "request": request_ms,
                 "response_parse": response_parse_ms,
             },
-            diagnostics={"request_attempts": self._last_request_attempts},
+            diagnostics={
+                "request_attempts": self._last_request_attempts,
+                "structure_suggestion": suggestion,
+            },
         )
 
     def complete_json(
@@ -283,6 +312,39 @@ class OpenAICompatibleProvider(AIProvider):
             diagnostics={"request_attempts": self._last_request_attempts},
         )
 
+    def complete_chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        timeout_seconds: int,
+    ) -> ChatCompletionResult:
+        body = self._request_json(
+            "/chat/completions",
+            method="POST",
+            timeout_seconds=timeout_seconds,
+            payload={"model": model or "gpt-4o-mini", "temperature": 0.2, "messages": messages},
+        )
+        try:
+            content = body["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise DomainError("AI 对话响应格式无效") from exc
+        if not isinstance(content, str) or not content.strip():
+            raise DomainError("AI 对话未返回正文")
+        usage = body.get("usage") or {}
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or prompt_tokens + completion_tokens)
+        return ChatCompletionResult(
+            content_markdown=content.strip(),
+            model=str(body.get("model") or model),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost_estimate=round(total_tokens * 0.00002, 6),
+            diagnostics={"request_attempts": self._last_request_attempts},
+        )
+
 
 def _extract_json(text: str) -> dict[str, Any]:
     text = text.strip()
@@ -298,7 +360,10 @@ def _extract_json(text: str) -> dict[str, Any]:
     match = re.search(r"\{[\s\S]*\}", text)
     if not match:
         raise DomainError("无法从 AI 输出解析 JSON")
-    data = json.loads(match.group(0))
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        raise DomainError("AI 返回了无效 JSON") from exc
     if not isinstance(data, dict):
         raise DomainError("AI JSON 根节点必须是对象")
     return data

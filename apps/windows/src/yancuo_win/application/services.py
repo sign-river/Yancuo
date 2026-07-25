@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 import stat
@@ -23,6 +24,7 @@ from yancuo_win.data.models import (
     AiJobItem,
     Asset,
     Chapter,
+    ChapterAlias,
     IntakeAsset,
     IntakeCandidateRecord,
     NoteAsset,
@@ -32,6 +34,8 @@ from yancuo_win.data.models import (
     Prompt,
     ReviewItem,
     ReviewSession,
+    StudyRecord,
+    StudySession,
     Subject,
     Tag,
     Version,
@@ -50,7 +54,7 @@ from yancuo_win.domain.review_rules import (
     mastery_from_grade,
     validate_grade,
 )
-from yancuo_win.domain.similarity import text_similarity
+from yancuo_win.domain.similarity import normalize_text, text_similarity
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
     iter_regular_files,
@@ -292,6 +296,41 @@ class AppServices:
             if sibling.id != exclude_id and sibling.name.casefold() == name.casefold():
                 raise DomainError(f"同一层级已存在章节：{name}")
 
+    @staticmethod
+    def _normalized_taxonomy_name(name: str) -> str:
+        value = name.strip()
+        for weak in ("求", "关于", "相关", "基础", "专题"):
+            value = value.replace(weak, "")
+        return normalize_text(value)
+
+    def _ensure_no_chapter_alias_conflict(
+        self, session: Session, *, chapter_id: str | None, name: str, parent_id: str | None = None
+    ) -> None:
+        normalized = self._normalized_taxonomy_name(name)
+        if not normalized:
+            return
+        for chapter in session.scalars(select(Chapter).where(Chapter.parent_id == parent_id)):
+            if chapter.id != chapter_id and self._normalized_taxonomy_name(chapter.name) == normalized:
+                raise DomainError(f"分类名称与既有章节近义重复：{chapter.name}")
+        alias = session.scalar(select(ChapterAlias).where(ChapterAlias.normalized_name == normalized))
+        if alias is not None and alias.chapter_id != chapter_id:
+            raise DomainError("分类名称与既有章节别名近义重复")
+
+    def add_chapter_alias(self, chapter_id: str, name: str) -> ChapterAlias:
+        name = name.strip()
+        if not name:
+            raise DomainError("章节别名不能为空")
+        with self.session() as s:
+            if s.get(Chapter, chapter_id) is None:
+                raise DomainError("章节不存在")
+            self._ensure_no_chapter_alias_conflict(s, chapter_id=chapter_id, name=name)
+            alias = ChapterAlias(id=new_id("chalias"), chapter_id=chapter_id, name=name, normalized_name=self._normalized_taxonomy_name(name))
+            s.add(alias)
+            s.commit()
+            s.refresh(alias)
+            s.expunge(alias)
+            return alias
+
     def create_chapter(
         self, subject_id: str, name: str, parent_id: str | None = None, sort_order: int = 0
     ) -> Chapter:
@@ -312,6 +351,7 @@ class AppServices:
                 parent_id=parent_id,
                 name=name,
             )
+            self._ensure_no_chapter_alias_conflict(s, chapter_id=None, name=name, parent_id=parent_id)
             ch = Chapter(
                 id=new_id("ch"),
                 subject_id=subject_id,
@@ -339,6 +379,9 @@ class AppServices:
                 parent_id=chapter.parent_id,
                 name=name,
                 exclude_id=chapter.id,
+            )
+            self._ensure_no_chapter_alias_conflict(
+                s, chapter_id=chapter.id, name=name, parent_id=chapter.parent_id
             )
             chapter.name = name
             chapter.updated_at = utcnow()
@@ -891,7 +934,7 @@ class AppServices:
                 ).all()
             )
             if filt.due_for_review:
-                rows = [p for p in rows if is_due(p.next_review_at)]
+                rows = [p for p in rows if p.review_enabled and is_due(p.next_review_at)]
             s.expunge_all()
             return list(rows)
 
@@ -1276,12 +1319,44 @@ class AppServices:
     def list_due_reviews(self) -> list[Problem]:
         return self.list_problems(ProblemFilter(status="active", due_for_review=True))
 
-    def record_review(self, problem_id: str, grade: int) -> dict[str, Any]:
+    def start_study_session(
+        self, *, selection: dict[str, Any] | None = None, problem_ids: list[str] | None = None
+    ) -> tuple[StudySession, list[Problem]]:
+        queue = self.list_due_reviews()
+        if problem_ids is not None:
+            wanted = set(problem_ids)
+            queue = [problem for problem in queue if problem.id in wanted]
+        criteria = selection or {"kind": "due_reviews", "timezone": "Asia/Shanghai"}
+        criteria = {**criteria, "problem_ids": [problem.id for problem in queue]}
+        study_session = StudySession(
+            id=new_id("study"),
+            selection_json=json.dumps(criteria, ensure_ascii=False, sort_keys=True),
+            problem_count=len(queue),
+            status="active",
+        )
+        with self.session() as s:
+            s.add(study_session)
+            s.commit()
+            s.refresh(study_session)
+            s.expunge(study_session)
+        return study_session, queue
+
+    def record_review(
+        self,
+        problem_id: str,
+        grade: int,
+        *,
+        study_session_id: str | None = None,
+        answer_viewed_at: datetime | None = None,
+        answered_at: datetime | None = None,
+    ) -> dict[str, Any]:
         """记录复习结果并安排下次日期。不自动删除任何题目。"""
         from yancuo_win.application.sync_service import sync_snapshot
 
         grade = validate_grade(grade)
-        next_at = compute_next_review_at(grade)
+        graded_at = utcnow()
+        next_at = compute_next_review_at(grade, from_dt=graded_at)
+        interval_days = (next_at - graded_at).days + 1
         with self.session() as s:
             problem = s.scalars(
                 select(Problem)
@@ -1292,6 +1367,12 @@ class AppServices:
                 raise DomainError("题目不存在")
             if problem.status == "trashed":
                 raise DomainError("回收站题目不可复习")
+            if not problem.review_enabled:
+                raise DomainError("题目已暂停复习，请先恢复")
+            if study_session_id:
+                study_session = s.get(StudySession, study_session_id)
+                if study_session is None or study_session.status != "active":
+                    raise DomainError("学习会话不可用")
             before = sync_snapshot(problem)
             problem.mastery = mastery_from_grade(grade)
             problem.next_review_at = next_at
@@ -1300,6 +1381,19 @@ class AppServices:
             if problem.status == "inbox":
                 # 复习过的题进入正式库更合理
                 problem.status = "active"
+            s.add(
+                StudyRecord(
+                    id=new_id("study_record"),
+                    study_session_id=study_session_id,
+                    problem_id=problem.id,
+                    answer_viewed_at=answer_viewed_at,
+                    answered_at=answered_at,
+                    grade=grade,
+                    graded_at=graded_at,
+                    interval_days=interval_days,
+                    next_review_at=next_at,
+                )
+            )
             self._add_version(
                 s,
                 problem,
@@ -1316,9 +1410,72 @@ class AppServices:
             "grade": grade,
             "label": REVIEW_GRADES[grade],
             "next_review_at": next_at.isoformat(),
-            "interval_days": (next_at.date() - datetime.now(timezone.utc).date()).days,
+            "interval_days": interval_days,
             "review_count": problem.review_count,
         }
+
+    def finish_study_session(self, study_session_id: str, *, cancelled: bool = False) -> dict[str, Any]:
+        with self.session() as s:
+            study_session = s.get(StudySession, study_session_id)
+            if study_session is None:
+                raise DomainError("学习会话不存在")
+            if study_session.status == "active":
+                study_session.status = "cancelled" if cancelled else "completed"
+                study_session.ended_at = utcnow()
+                s.commit()
+            records = list(s.scalars(select(StudyRecord).where(StudyRecord.study_session_id == study_session.id)).all())
+            result = {
+                "session_id": study_session.id,
+                "status": study_session.status,
+                "problem_count": study_session.problem_count,
+                "completed_count": len(records),
+                "remaining_count": max(0, study_session.problem_count - len(records)),
+                "grades": {grade: sum(record.grade == grade for record in records) for grade in REVIEW_GRADES},
+            }
+            s.expunge_all()
+            return result
+
+    def set_review_enabled(self, problem_id: str, enabled: bool) -> None:
+        with self.session() as s:
+            problem = s.get(Problem, problem_id)
+            if problem is None:
+                raise DomainError("题目不存在")
+            if problem.status == "trashed":
+                raise DomainError("回收站题目不可设置复习")
+            problem.review_enabled = enabled
+            if enabled and problem.next_review_at is None:
+                problem.next_review_at = datetime.now(timezone.utc)
+            elif not enabled:
+                problem.next_review_at = None
+            problem.updated_at = utcnow()
+            s.commit()
+
+    def study_session_records(self, study_session_id: str) -> list[StudyRecord]:
+        with self.session() as s:
+            records = list(s.scalars(select(StudyRecord).where(StudyRecord.study_session_id == study_session_id).order_by(StudyRecord.graded_at)).all())
+            s.expunge_all()
+            return records
+
+    def export_study_session_csv(self, study_session_id: str, dest: Path) -> Path:
+        with dest.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["problem_id", "grade", "answer_viewed_at", "answered_at", "graded_at", "interval_days", "next_review_at"])
+            writer.writeheader()
+            for record in self.study_session_records(study_session_id):
+                writer.writerow({
+                    "problem_id": record.problem_id, "grade": record.grade,
+                    "answer_viewed_at": record.answer_viewed_at.isoformat() if record.answer_viewed_at else "",
+                    "answered_at": record.answered_at.isoformat() if record.answered_at else "",
+                    "graded_at": record.graded_at.isoformat(), "interval_days": record.interval_days,
+                    "next_review_at": record.next_review_at.isoformat(),
+                })
+        return dest
+
+    def export_study_session_share(self, study_session_id: str, dest: Path) -> Path:
+        """Privacy-safe aggregate: no question text, answers, sources, or identifiers."""
+        summary = self.finish_study_session(study_session_id)
+        summary.pop("session_id", None)
+        dest.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        return dest
 
     def schedule_initial_review(self, problem_id: str) -> None:
         """将题目加入复习队列（下次=今天）。"""
@@ -1345,6 +1502,7 @@ class AppServices:
                 source="review",
                 summary="加入复习队列",
             )
+            problem.review_enabled = True
             after = sync_snapshot(problem)
             s.commit()
             s.refresh(problem)

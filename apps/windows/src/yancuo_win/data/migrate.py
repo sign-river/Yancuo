@@ -314,6 +314,88 @@ def _migrate_to_v12(engine: Engine) -> None:
     logger.info("migrated database to schema_version=12")
 
 
+def _migrate_to_v13(engine: Engine) -> None:
+    """Add ordered multi-image recognition units without rewriting old intake data."""
+
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(ai_job_items)"))
+        }
+        if "recognition_unit_id" not in columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE ai_job_items ADD COLUMN recognition_unit_id "
+                    "VARCHAR(64) REFERENCES intake_recognition_units(id)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_ai_job_items_recognition_unit_id "
+                    "ON ai_job_items (recognition_unit_id)"
+                )
+            )
+    with Session(engine) as session:
+        set_schema_version(session, 13)
+        session.commit()
+    logger.info("migrated database to schema_version=13")
+
+
+def _migrate_to_v14(engine: Engine) -> None:
+    """Add composite problem containers without changing existing problems."""
+
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(problems)"))}
+        if "problem_set_id" not in columns:
+            conn.execute(text("ALTER TABLE problems ADD COLUMN problem_set_id VARCHAR(64) REFERENCES problem_sets(id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_problems_problem_set_id ON problems (problem_set_id)"))
+        if "item_order" not in columns:
+            conn.execute(text("ALTER TABLE problems ADD COLUMN item_order INTEGER"))
+    with Session(engine) as session:
+        set_schema_version(session, 14)
+        session.commit()
+    logger.info("migrated database to schema_version=14")
+
+
+def _migrate_to_v15(engine: Engine) -> None:
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 15)
+        session.commit()
+    logger.info("migrated database to schema_version=15")
+
+
+def _migrate_to_v16(engine: Engine) -> None:
+    """Add study history and explicit review enrollment without fabricating history."""
+
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(problems)"))}
+        if "review_enabled" not in columns:
+            conn.execute(
+                text("ALTER TABLE problems ADD COLUMN review_enabled BOOLEAN NOT NULL DEFAULT 1")
+            )
+        # Existing rows preserve their prior behavior: a null due date is still an
+        # enabled, first-review item. New detailed records start from this version.
+        conn.execute(text("UPDATE problems SET review_enabled = 1 WHERE review_enabled IS NULL"))
+    with Session(engine) as session:
+        set_schema_version(session, 16)
+        session.commit()
+    logger.info("migrated database to schema_version=16")
+
+
+def _migrate_to_v17(engine: Engine) -> None:
+    """Add durable problem-scoped conversations and messages."""
+
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 17)
+        session.commit()
+    logger.info("migrated database to schema_version=17")
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -370,6 +452,11 @@ MIGRATIONS: dict[int, MigrationFn] = {
     10: _migrate_to_v10,
     11: _migrate_to_v11,
     12: _migrate_to_v12,
+    13: _migrate_to_v13,
+    14: _migrate_to_v14,
+    15: _migrate_to_v15,
+    16: _migrate_to_v16,
+    17: _migrate_to_v17,
 }
 
 
@@ -435,6 +522,20 @@ def verify_core_tables(engine: Engine) -> list[str]:
         required.update({"unified_search_documents", "unified_search_documents_fts"})
     if get_schema_version(engine) >= 12:
         required.add("ai_recognition_cache")
+    if get_schema_version(engine) >= 13:
+        required.update(
+            {
+                "intake_recognition_units",
+                "intake_recognition_unit_assets",
+                "intake_candidate_units",
+            }
+        )
+    if get_schema_version(engine) >= 14:
+        required.update({"problem_sets", "problem_set_assets"})
+    if get_schema_version(engine) >= 16:
+        required.update({"study_sessions", "study_records"})
+    if get_schema_version(engine) >= 17:
+        required.update({"problem_conversations", "problem_messages"})
     with engine.connect() as conn:
         rows = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table'")

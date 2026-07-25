@@ -8,15 +8,21 @@ from typing import Any
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QComboBox,
+    QCheckBox,
+    QFileDialog,
     QHBoxLayout,
+    QInputDialog,
+    QLineEdit,
     QLabel,
     QPushButton,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
+from yancuo_win.application.problem_chat_service import ProblemChatService
 from yancuo_win.data.models import Problem
+from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import CardFrame, ghost_button, primary_button
@@ -74,9 +80,11 @@ class ProblemDetailPage(QWidget):
     trash_requested = Signal(str)
     restore_requested = Signal(str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, chat: ProblemChatService | None = None, parent=None) -> None:
         super().__init__(parent)
+        self.chat = chat
         self.problem_id: str | None = None
+        self._image_path: Path | None = None
         self.setObjectName("PageRoot")
 
         root = QVBoxLayout(self)
@@ -99,6 +107,13 @@ class ProblemDetailPage(QWidget):
         edit = primary_button("编辑题目")
         edit.clicked.connect(self._request_edit)
         header.addWidget(edit)
+        self.view_image_button = ghost_button("查看原图")
+        self.view_image_button.clicked.connect(self._view_original_image)
+        header.addWidget(self.view_image_button)
+        self.chat_button = ghost_button("AI 讨论")
+        self.chat_button.clicked.connect(self._toggle_chat)
+        self.chat_button.setEnabled(chat is not None)
+        header.addWidget(self.chat_button)
         root.addLayout(header)
 
         actions = QHBoxLayout()
@@ -131,21 +146,43 @@ class ProblemDetailPage(QWidget):
         actions.addStretch(1)
         root.addLayout(actions)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.image_card = CardFrame()
-        self.image_card.add_title("原始图片")
-        self.image = _DetailImage()
-        self.image_card.body.addWidget(self.image, stretch=1)
-        self.image_card.setMinimumWidth(300)
-        splitter.addWidget(self.image_card)
-
         self.reader = MathContentView()
-        self.reader.setMinimumWidth(520)
-        splitter.addWidget(self.reader)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 5)
-        splitter.setSizes([360, 820])
-        root.addWidget(splitter, stretch=1)
+        root.addWidget(self.reader, stretch=1)
+
+        self.chat_card = CardFrame()
+        self.chat_card.add_title("AI 讨论")
+        chat_toolbar = QHBoxLayout()
+        self.conversation_combo = QComboBox()
+        self.conversation_combo.currentIndexChanged.connect(self._load_conversation)
+        new_chat = QPushButton("新对话")
+        new_chat.clicked.connect(self._new_conversation)
+        rename_chat = QPushButton("命名")
+        rename_chat.clicked.connect(self._rename_conversation)
+        save_chat = QPushButton("保存")
+        save_chat.clicked.connect(self._save_conversation)
+        export_chat = QPushButton("导出")
+        export_chat.clicked.connect(self._export_conversation)
+        delete_chat = QPushButton("删除")
+        delete_chat.clicked.connect(self._delete_conversation)
+        self.include_original_checkbox = QCheckBox("授权附带原图")
+        self.include_original_checkbox.setToolTip("仅在新建对话时发送一次原图授权")
+        for widget in (self.conversation_combo, new_chat, rename_chat, save_chat, export_chat, delete_chat, self.include_original_checkbox):
+            chat_toolbar.addWidget(widget)
+        self.chat_card.body.addLayout(chat_toolbar)
+        self.chat_history = MathContentView()
+        self.chat_history.setMinimumHeight(180)
+        self.chat_card.body.addWidget(self.chat_history)
+        prompt_row = QHBoxLayout()
+        self.chat_input = QLineEdit()
+        self.chat_input.setPlaceholderText("向当前题目提问")
+        self.chat_input.returnPressed.connect(self._send_chat)
+        send_chat = primary_button("发送")
+        send_chat.clicked.connect(self._send_chat)
+        prompt_row.addWidget(self.chat_input, stretch=1)
+        prompt_row.addWidget(send_chat)
+        self.chat_card.body.addLayout(prompt_row)
+        self.chat_card.setVisible(False)
+        root.addWidget(self.chat_card)
 
     def set_back_text(self, text: str) -> None:
         self.back_button.setText(text)
@@ -201,7 +238,115 @@ class ProblemDetailPage(QWidget):
             include_answers=True,
             show_header=False,
         )
-        self.image_card.setVisible(self.image.set_path(image_path))
+        # Keep original media out of the reading layout and avoid decoding it
+        # until the user explicitly opens the viewer.
+        self._image_path = image_path if image_path and image_path.is_file() else None
+        self.view_image_button.setEnabled(self._image_path is not None)
+        self.view_image_button.setToolTip(
+            "打开可缩放原图" if self._image_path else "原始图片不存在或不可读取"
+        )
+        self.chat_card.setVisible(False)
+        self._refresh_conversations()
+
+    def _view_original_image(self) -> None:
+        if self._image_path is None:
+            return
+        source = QPixmap(str(self._image_path))
+        if source.isNull():
+            self.view_image_button.setEnabled(False)
+            self.view_image_button.setToolTip("原始图片格式无法读取")
+            return
+        ImageViewerDialog(source, self).exec()
+
+    def _toggle_chat(self) -> None:
+        self.chat_card.setVisible(not self.chat_card.isVisible())
+        if self.chat_card.isVisible():
+            self._refresh_conversations()
+
+    def _refresh_conversations(self) -> None:
+        self.conversation_combo.blockSignals(True)
+        self.conversation_combo.clear()
+        if self.chat is not None and self.problem_id:
+            for conversation in self.chat.list_conversations(self.problem_id):
+                self.conversation_combo.addItem(conversation.title, conversation.id)
+        self.conversation_combo.blockSignals(False)
+        self._load_conversation()
+
+    def _conversation_id(self) -> str | None:
+        value = self.conversation_combo.currentData()
+        return value if isinstance(value, str) else None
+
+    def _load_conversation(self, *_args) -> None:
+        conversation_id = self._conversation_id()
+        if self.chat is None or not conversation_id:
+            self._set_chat_history("选择或新建一个题目讨论。")
+            return
+        conversation = self.chat.get_conversation(conversation_id)
+        if conversation is None:
+            return
+        lines = [f"基于题目修订版 {conversation.problem_revision}"]
+        for message in conversation.messages:
+            role = "我" if message.role == "user" else "AI"
+            suffix = f"\n失败：{message.error_message}" if message.status == "failed" else ""
+            lines.append(f"\n{role}\n{message.content_markdown}{suffix}")
+        self._set_chat_history("\n".join(lines))
+
+    def _set_chat_history(self, content: str) -> None:
+        self.chat_history.set_message("AI 讨论", content)
+
+    def _new_conversation(self) -> None:
+        if self.chat is None or not self.problem_id:
+            return
+        conversation = self.chat.create_conversation(
+            self.problem_id,
+            include_original_image=self.include_original_checkbox.isChecked(),
+        )
+        self._refresh_conversations()
+        self.conversation_combo.setCurrentIndex(self.conversation_combo.findData(conversation.id))
+
+    def _rename_conversation(self) -> None:
+        conversation_id = self._conversation_id()
+        if self.chat is None or not conversation_id:
+            return
+        title, accepted = QInputDialog.getText(self, "命名对话", "名称：")
+        if accepted:
+            self.chat.rename_conversation(conversation_id, title)
+            self._refresh_conversations()
+
+    def _send_chat(self) -> None:
+        if self.chat is None:
+            return
+        conversation_id = self._conversation_id()
+        if not conversation_id:
+            self._new_conversation()
+            conversation_id = self._conversation_id()
+        if not conversation_id:
+            return
+        self._set_chat_history("正在生成回答…")
+        try:
+            self.chat.send_message(conversation_id, self.chat_input.text())
+        except DomainError as exc:
+            self._set_chat_history(f"发送失败：{exc}")
+            return
+        self.chat_input.clear()
+        self._load_conversation()
+
+    def _save_conversation(self) -> None:
+        if self.chat and (conversation_id := self._conversation_id()):
+            self.chat.save_conversation(conversation_id)
+
+    def _delete_conversation(self) -> None:
+        if self.chat and (conversation_id := self._conversation_id()):
+            self.chat.delete_conversation(conversation_id)
+            self._refresh_conversations()
+
+    def _export_conversation(self) -> None:
+        conversation_id = self._conversation_id()
+        if self.chat is None or not conversation_id:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "导出对话", "problem-chat.md", "Markdown (*.md)")
+        if path:
+            self.chat.export_conversation_markdown(conversation_id, Path(path))
 
     def _request_edit(self) -> None:
         if self.problem_id:

@@ -7,11 +7,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from yancuo_win.ai.base import AIProvider, JsonCompletionResult, StructuredResult
+from yancuo_win.ai.base import AIProvider, ChatCompletionResult, JsonCompletionResult, ProviderCapabilities, StructuredResult
 
 
 class MockProvider(AIProvider):
     name = "mock"
+    capabilities = ProviderCapabilities(supports_chat=True)
 
     def structure_from_image(
         self,
@@ -47,7 +48,33 @@ class MockProvider(AIProvider):
             raw_text=str(fields),
             cost_estimate=0.0,
             model=model or "mock-v1",
+            diagnostics={
+                "structure_suggestion": {
+                    "layout_kind": "single",
+                    "subquestion_count": 1,
+                    "confidence": 0.98,
+                    "rationale": "Mock：单张图片中只检测到一个独立题目。",
+                    "signals": ["单一题干", "无连续小题编号"],
+                }
+            },
         )
+
+    def structure_from_images(
+        self, *, image_paths: list[str], prompt: str, model: str, timeout_seconds: int
+    ) -> StructuredResult:
+        if not image_paths:
+            raise ValueError("image_paths must not be empty")
+        result = self.structure_from_image(
+            image_path=image_paths[0],
+            prompt=prompt,
+            model=model,
+            timeout_seconds=timeout_seconds,
+        )
+        if len(image_paths) > 1:
+            result.fields["question_markdown"] += (
+                f"（Mock：已按顺序合并 {len(image_paths)} 张来源图片。）"
+            )
+        return result
 
     def complete_json(
         self,
@@ -98,5 +125,15 @@ class MockProvider(AIProvider):
             raise NotImplementedError("Mock 不支持该结构化文本请求")
         return JsonCompletionResult(
             raw_text=json.dumps(payload, ensure_ascii=False),
+            model=model or "mock-v1",
+        )
+
+    def complete_chat(
+        self, *, messages: list[dict[str, Any]], model: str, timeout_seconds: int
+    ) -> ChatCompletionResult:
+        del timeout_seconds
+        question = str(messages[-1].get("content") or "") if messages else ""
+        return ChatCompletionResult(
+            content_markdown=f"（Mock）针对当前题目的讨论：{question[:200]}",
             model=model or "mock-v1",
         )

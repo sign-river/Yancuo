@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections.abc import Callable
 from datetime import datetime, timezone
 from time import perf_counter
@@ -11,7 +12,12 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, selectinload
 
-from yancuo_win.ai.base import AIProvider, StructuredResult, normalize_region
+from yancuo_win.ai.base import (
+    AIProvider,
+    StructuredCandidate,
+    StructuredResult,
+    normalize_region,
+)
 from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.ai_result_cache import (
     find_recognition_cache,
@@ -29,6 +35,9 @@ from yancuo_win.data.models import (
     AuditLog,
     IntakeAsset,
     IntakeCandidateRecord,
+    IntakeCandidateUnit,
+    IntakeRecognitionUnit,
+    IntakeRecognitionUnitAsset,
     IntakeSession,
     Problem,
     Prompt,
@@ -44,6 +53,70 @@ from yancuo_win.review.changeset import (
     field_diffs,
     validate_and_filter_proposal,
 )
+
+
+def _structured_result_from_cache(
+    payload: dict[str, object] | None, raw_response: str
+) -> StructuredResult | None:
+    """Rebuild single- and multi-candidate results from durable cache data."""
+
+    if not payload:
+        return None
+    cached_problems = payload.get("problems")
+    if cached_problems is not None:
+        if not isinstance(cached_problems, list) or not cached_problems:
+            return None
+        candidates: list[StructuredCandidate] = []
+        for value in cached_problems:
+            if not isinstance(value, dict):
+                return None
+            fields = dict(value)
+            region = fields.pop("region", {})
+            if not fields or not isinstance(region, dict):
+                return None
+            candidates.append(StructuredCandidate(fields=fields, region=region))
+        return StructuredResult(
+            fields=dict(candidates[0].fields),
+            candidates=candidates,
+            raw_text=raw_response,
+        )
+
+    fields = dict(payload)
+    region = fields.pop("region", {})
+    if not fields or not isinstance(region, dict):
+        return None
+    return StructuredResult(
+        fields=fields,
+        candidates=[StructuredCandidate(fields=fields, region=region)],
+        raw_text=raw_response,
+    )
+
+
+def _structure_suggestion(value: object) -> dict[str, object] | None:
+    """Accept only bounded advisory layout metadata from an AI result."""
+
+    if not isinstance(value, dict):
+        return None
+    kind = value.get("layout_kind")
+    count = value.get("subquestion_count")
+    confidence = value.get("confidence")
+    rationale = value.get("rationale")
+    signals = value.get("signals")
+    if (
+        kind not in {"single", "independent", "composite", "continuation"}
+        or not isinstance(count, int)
+        or not isinstance(confidence, (int, float))
+        or not isinstance(rationale, str)
+        or not isinstance(signals, list)
+    ):
+        return None
+    return {
+        "layout_kind": kind,
+        "subquestion_count": max(1, min(count, 99)),
+        "confidence": max(0.0, min(float(confidence), 1.0)),
+        "rationale": rationale[:240],
+        "signals": [str(signal)[:80] for signal in signals[:8]],
+    }
 
 
 # Fields that may be materialized from a human-reviewed proposal.  In
@@ -445,6 +518,7 @@ class AIService:
         intake_asset_ids: list[str],
         *,
         user_instruction: str = "",
+        recognition_mode: str = "auto",
         allowed_fields: set[str] | frozenset[str] | None = None,
     ) -> AiJob:
         """Create a new-problem AI job without creating staging Problems."""
@@ -504,18 +578,44 @@ class AIService:
                     IntakeAsset.id.in_(intake_asset_ids),
                 )
             ).all()
-            for asset in assets:
+            assets_by_id = {asset.id: asset for asset in assets}
+            ordered_assets = [
+                assets_by_id[asset_id]
+                for asset_id in intake_asset_ids
+                if asset_id in assets_by_id
+            ]
+            if recognition_mode == "many_to_one":
+                groups = [ordered_assets]
+            else:
+                groups = [[asset] for asset in ordered_assets]
+            for unit_order, group in enumerate(groups):
+                unit = IntakeRecognitionUnit(
+                    id=new_id("iunit"),
+                    session_id=intake_session.id,
+                    mode=recognition_mode,
+                    sort_order=unit_order,
+                )
+                s.add(unit)
+                for asset_order, asset in enumerate(group):
+                    s.add(
+                        IntakeRecognitionUnitAsset(
+                            recognition_unit_id=unit.id,
+                            intake_asset_id=asset.id,
+                            sort_order=asset_order,
+                        )
+                    )
                 s.add(
                     AiJobItem(
                         id=new_id("jitem"),
                         job_id=job.id,
-                        intake_asset_id=asset.id,
+                        intake_asset_id=group[0].id,
+                        recognition_unit_id=unit.id,
                         status="pending",
                     )
                 )
             if not assets:
                 raise DomainError("录题会话中没有可识别的图片")
-            job.total_items = len(assets)
+            job.total_items = len(groups)
             intake_session.job_id = job.id
             intake_session.status = "processing"
             intake_session.user_instruction = instruction
@@ -524,7 +624,7 @@ class AIService:
                 "intake_ai_job_created",
                 "intake_session",
                 intake_session.id,
-                {"job_id": job.id, "asset_count": len(assets)},
+                {"job_id": job.id, "asset_count": len(assets), "unit_count": len(groups), "mode": recognition_mode},
             )
             s.commit()
             s.refresh(job)
@@ -633,10 +733,33 @@ class AIService:
                 return
             intake_session: IntakeSession | None = None
             problem: Problem | None = None
+            intake_assets: list[IntakeAsset] = []
+            recognition_mode = ""
             if item.intake_asset_id:
                 asset = s.get(IntakeAsset, item.intake_asset_id)
                 if asset:
                     intake_session = s.get(IntakeSession, asset.session_id)
+                    intake_assets = [asset]
+                if item.recognition_unit_id:
+                    recognition_unit = s.get(
+                        IntakeRecognitionUnit, item.recognition_unit_id
+                    )
+                    recognition_mode = recognition_unit.mode if recognition_unit else ""
+                    members = s.execute(
+                        select(IntakeAsset)
+                        .join(
+                            IntakeRecognitionUnitAsset,
+                            IntakeRecognitionUnitAsset.intake_asset_id
+                            == IntakeAsset.id,
+                        )
+                        .where(
+                            IntakeRecognitionUnitAsset.recognition_unit_id
+                            == item.recognition_unit_id
+                        )
+                        .order_by(IntakeRecognitionUnitAsset.sort_order)
+                    ).scalars().all()
+                    if members:
+                        intake_assets = members
             else:
                 asset = s.get(Asset, item.asset_id) if item.asset_id else None
                 problem = (
@@ -655,22 +778,24 @@ class AIService:
                 item.error_message = "题目或资源缺失"
                 s.commit()
                 return
+            if not intake_assets:
+                intake_assets = [asset]
 
             # 预处理：存在性 / 大小；不修改原图
-            image_path = self.store.resolve(asset.relative_path)
-            if not image_path.is_file():
-                item.status = "failed"
-                item.error_message = f"原图丢失：{asset.relative_path}"
-                job.failed_items += 1
-                s.commit()
-                return
-            size = image_path.stat().st_size
-            if size <= 0:
-                item.status = "failed"
-                item.error_message = "图片大小为 0"
-                job.failed_items += 1
-                s.commit()
-                return
+            image_paths = [self.store.resolve(value.relative_path) for value in intake_assets]
+            for source, image_path in zip(intake_assets, image_paths, strict=True):
+                if not image_path.is_file():
+                    item.status = "failed"
+                    item.error_message = f"原图丢失：{source.relative_path}"
+                    job.failed_items += 1
+                    s.commit()
+                    return
+                if image_path.stat().st_size <= 0:
+                    item.status = "failed"
+                    item.error_message = "图片大小为 0"
+                    job.failed_items += 1
+                    s.commit()
+                    return
 
             item.status = "running"
             s.commit()
@@ -678,8 +803,11 @@ class AIService:
             try:
                 timings_ms["preflight"] = (perf_counter() - item_started) * 1000
                 allowed = set(json.loads(job.allowed_fields_json) or list(DEFAULT_ALLOWED_FIELDS))
+                source_fingerprint = hashlib.sha256(
+                    "\n".join(value.sha256 for value in intake_assets).encode("ascii")
+                ).hexdigest()
                 cache_key = recognition_cache_key(
-                    asset_sha256=asset.sha256,
+                    asset_sha256=source_fingerprint,
                     prompt_body=prompt_body,
                     prompt_version=prompt_version,
                     provider=job.provider,
@@ -690,9 +818,12 @@ class AIService:
                 cached_fields = load_cached_structure(cached) if cached else None
                 if not self.runtime.settings.privacy.send_original_images_to_ai:
                     raise DomainError("隐私设置禁止向 AI 发送原图")
-                if cached_fields and "problems" not in cached_fields:
+                cached_result = _structured_result_from_cache(
+                    cached_fields, cached.raw_response if cached else ""
+                )
+                if cached_result is not None:
                     active_stage = "cache"
-                    result = StructuredResult(fields=cached_fields, raw_text=cached.raw_response)
+                    result = cached_result
                     timings_ms["cache_hit"] = 1.0
                     self._audit(
                         s,
@@ -704,12 +835,20 @@ class AIService:
                 else:
                     active_stage = "provider"
                     provider_started = perf_counter()
-                    result = provider.structure_from_image(
-                        image_path=str(image_path),
-                        prompt=prompt_body,
-                        model=job.model,
-                        timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
-                    )
+                    if len(image_paths) == 1:
+                        result = provider.structure_from_image(
+                            image_path=str(image_paths[0]),
+                            prompt=prompt_body,
+                            model=job.model,
+                            timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+                        )
+                    else:
+                        result = provider.structure_from_images(
+                            image_paths=[str(path) for path in image_paths],
+                            prompt=prompt_body,
+                            model=job.model,
+                            timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+                        )
                     timings_ms["provider_total"] = (
                         perf_counter() - provider_started
                     ) * 1000
@@ -737,6 +876,25 @@ class AIService:
                     )
                 if not proposals:
                     raise DomainError("AI 没有返回可确认的候选题")
+                if recognition_mode in {"one_to_one", "many_to_one"} and len(proposals) != 1:
+                    raise DomainError("当前识别方式要求 AI 只返回一个候选题")
+                if intake_session and recognition_mode == "auto" and item.recognition_unit_id:
+                    suggestion = _structure_suggestion(
+                        result.diagnostics.get("structure_suggestion")
+                    )
+                    if suggestion is not None:
+                        try:
+                            draft = json.loads(intake_session.draft_json)
+                        except json.JSONDecodeError:
+                            draft = {}
+                        if not isinstance(draft, dict):
+                            draft = {}
+                        suggestions = draft.setdefault("structure_suggestions", {})
+                        if isinstance(suggestions, dict):
+                            suggestions[item.recognition_unit_id] = suggestion
+                            intake_session.draft_json = json.dumps(
+                                draft, ensure_ascii=False
+                            )
                 timings_ms["validation"] = (
                     perf_counter() - validation_started
                 ) * 1000
@@ -776,9 +934,10 @@ class AIService:
                         for offset, (filtered, uncertain, region) in enumerate(
                             proposals, start=1
                         ):
+                            candidate_id = new_id("icand")
                             s.add(
                                 IntakeCandidateRecord(
-                                    id=new_id("icand"),
+                                    id=candidate_id,
                                     session_id=intake_session.id,
                                     intake_asset_id=asset.id,
                                     status="pending",
@@ -799,6 +958,13 @@ class AIService:
                                     + offset,
                                 )
                             )
+                            if item.recognition_unit_id:
+                                s.add(
+                                    IntakeCandidateUnit(
+                                        candidate_id=candidate_id,
+                                        recognition_unit_id=item.recognition_unit_id,
+                                    )
+                                )
                         intake_session.status = "review"
                         if not session_holder:
                             session_holder.append(intake_session.id)
@@ -901,7 +1067,7 @@ class AIService:
                 s.merge(
                     AiRecognitionCache(
                         cache_key=recognition_cache_key(
-                            asset_sha256=asset.sha256,
+                            asset_sha256=source_fingerprint,
                             prompt_body=prompt_body,
                             prompt_version=prompt_version,
                             provider=job.provider,

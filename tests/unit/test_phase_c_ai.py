@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from yancuo_win.ai.base import StructuredResult
+from yancuo_win.ai.base import StructuredCandidate, StructuredResult
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
@@ -158,3 +158,49 @@ def test_failed_ai_item_can_retry_in_same_job_without_duplicate_problem(
     assert completed_diagnostics["timings_ms"]["total"] >= 0
     assert services.count_problems() == original_count
     assert len(ai.list_review_items_for_job(job.id)) == 1
+
+
+def test_multi_candidate_recognition_cache_reuses_the_full_result(
+    services: AppServices,
+    ai: AIService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "two-problems.jpg"
+    image.write_bytes(b"\xff\xd8\xffmulti-cache-image")
+    problem_id = services.import_images([image])["created"][0]
+
+    class MultiProvider:
+        calls = 0
+
+        def structure_from_image(self, **_kwargs) -> StructuredResult:
+            self.calls += 1
+            return StructuredResult(
+                fields={"title": "第一题", "question_markdown": "题干一"},
+                candidates=[
+                    StructuredCandidate(
+                        fields={"title": "第一题", "question_markdown": "题干一"},
+                        region={"x": 0.0, "y": 0.0, "width": 1.0, "height": 0.4},
+                    ),
+                    StructuredCandidate(
+                        fields={"title": "第二题", "question_markdown": "题干二"},
+                        region={"x": 0.0, "y": 0.5, "width": 1.0, "height": 0.4},
+                    ),
+                ],
+                raw_text='{"problems": ["first", "second"]}',
+            )
+
+    provider = MultiProvider()
+    monkeypatch.setattr(
+        "yancuo_win.application.ai_service.get_provider",
+        lambda _settings: provider,
+    )
+
+    first = ai.create_structure_job([problem_id])
+    ai.run_job(first.id)
+    second = ai.create_structure_job([problem_id])
+    ai.run_job(second.id)
+
+    assert provider.calls == 1
+    assert len(ai.list_review_items_for_job(second.id)) == 2
+    assert ai.get_job_diagnostics(second.id)["cache_hits"] == 1

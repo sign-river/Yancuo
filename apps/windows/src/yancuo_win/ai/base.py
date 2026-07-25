@@ -70,8 +70,27 @@ class JsonCompletionResult:
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    supports_vision_structure: bool = True
+    supports_chat: bool = False
+    supports_chat_images: bool = False
+
+
+@dataclass(frozen=True)
+class ChatCompletionResult:
+    content_markdown: str
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cost_estimate: float = 0.0
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
 class AIProvider(ABC):
     name: str
+    capabilities = ProviderCapabilities()
 
     def validate_configuration(self) -> None:
         """Fail before a workflow creates staging data when setup is incomplete."""
@@ -89,6 +108,15 @@ class AIProvider(ABC):
 
         raise NotImplementedError(f"{self.name} 不支持结构化文本请求")
 
+    def complete_chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        timeout_seconds: int,
+    ) -> ChatCompletionResult:
+        raise NotImplementedError(f"{self.name} 不支持题目对话")
+
     @abstractmethod
     def structure_from_image(
         self,
@@ -99,3 +127,22 @@ class AIProvider(ABC):
         timeout_seconds: int,
     ) -> StructuredResult:
         raise NotImplementedError
+
+    def structure_from_images(
+        self,
+        *,
+        image_paths: list[str],
+        prompt: str,
+        model: str,
+        timeout_seconds: int,
+    ) -> StructuredResult:
+        """Recognize one ordered image group in a single provider request."""
+
+        if len(image_paths) == 1:
+            return self.structure_from_image(
+                image_path=image_paths[0],
+                prompt=prompt,
+                model=model,
+                timeout_seconds=timeout_seconds,
+            )
+        raise NotImplementedError(f"{self.name} 不支持单次多图识别")

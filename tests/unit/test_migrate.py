@@ -227,6 +227,60 @@ def test_migrate_v9_to_v10_adds_independent_note_collections(tmp_path: Path) -> 
     assert migrate(engine, target_version=10) == 10
 
 
+def test_migrate_v12_to_v13_adds_multi_image_recognition_tables(
+    tmp_path: Path,
+) -> None:
+    engine = make_engine(tmp_path / "recognition-units-upgrade.db")
+    assert migrate(engine, target_version=12) == 12
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE ai_recognition_cache"))
+        connection.execute(text("DROP TABLE intake_candidate_units"))
+        connection.execute(text("DROP TABLE intake_recognition_unit_assets"))
+        connection.execute(text("DROP TABLE intake_recognition_units"))
+        connection.execute(text("DROP TABLE ai_job_items"))
+        connection.execute(
+            text(
+                """
+                CREATE TABLE ai_job_items (
+                    id VARCHAR(64) PRIMARY KEY,
+                    job_id VARCHAR(64) NOT NULL REFERENCES ai_jobs(id),
+                    problem_id VARCHAR(64) REFERENCES problems(id),
+                    asset_id VARCHAR(64) REFERENCES assets(id),
+                    intake_asset_id VARCHAR(64) REFERENCES intake_assets(id),
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    raw_response TEXT NOT NULL DEFAULT '',
+                    structured_json TEXT NOT NULL DEFAULT '{}',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    cost_estimate FLOAT NOT NULL DEFAULT 0,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+        )
+
+    assert migrate(engine, target_version=13) == 13
+    with engine.connect() as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            )
+        }
+        columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(ai_job_items)"))
+        }
+    assert {
+        "intake_recognition_units",
+        "intake_recognition_unit_assets",
+        "intake_candidate_units",
+    } <= tables
+    assert "recognition_unit_id" in columns
+    assert verify_core_tables(engine) == []
+    assert migrate(engine, target_version=13) == 13
+
+
 def test_pre_migration_backup_can_restore_original_database(tmp_path: Path) -> None:
     database = tmp_path / "restore.db"
     engine = make_engine(database)
@@ -305,7 +359,7 @@ def test_bootstrap_restores_backup_when_migration_fails(
         ).scalar_one()
     restored.dispose()
     assert marker == "original"
-    backups = list((data_root / "backups").glob("pre-migration-v6-to-v12-*.sqlite"))
+    backups = list((data_root / "backups").glob("pre-migration-v6-to-v17-*.sqlite"))
     assert len(backups) == 1
     verify_sqlite_database(backups[0], expected_schema_version=6)
 

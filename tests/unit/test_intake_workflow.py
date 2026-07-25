@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QColor, QImage
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from yancuo_win.ai.base import StructuredCandidate, StructuredResult
 from yancuo_win.application.bootstrap import bootstrap_runtime
@@ -15,8 +15,14 @@ from yancuo_win.application.intake_service import ProblemIntakeService
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.models import (
     AiJob,
+    Chapter,
     IntakeCandidateRecord,
+    IntakeCandidateUnit,
+    IntakeRecognitionUnit,
+    IntakeRecognitionUnitAsset,
     IntakeSession,
+    ProblemSet,
+    ProblemSetAsset,
     ReviewItem,
     SyncOperation,
     Version,
@@ -121,7 +127,7 @@ def test_ai_intake_stays_job_scoped_and_commits_candidate(
     assert job is not None
     prompt = intake.ai.get_prompt(job.prompt_key)
     assert "只提取画红圈的题目" in prompt.body
-    assert "subject_name" in prompt.body
+    assert "subject_id" in prompt.body
     assert "线性代数 / 矩阵" in prompt.body
     assert "Markdown 字段中的公式必须使用 $...$ 或 $$...$$ 定界" in prompt.body
     assert "question_latex 只写裸 LaTeX" in prompt.body
@@ -139,6 +145,11 @@ def test_ai_intake_stays_job_scoped_and_commits_candidate(
         "candidate_write",
         "total",
     } <= progress.timings_ms.keys()
+    suggestions = intake.structure_suggestions(started.job_id)
+    assert len(suggestions) == 1
+    assert suggestions[0].layout_kind == "single"
+    assert suggestions[0].subquestion_count == 1
+    assert suggestions[0].confidence == pytest.approx(0.98)
 
     candidates = intake.list_candidates(started.job_id)
     assert len(candidates) == 1
@@ -180,6 +191,224 @@ def test_ai_intake_stays_job_scoped_and_commits_candidate(
         proposal = json.loads(intake_item.fields_json)
         assert proposal["subject_id"] == subject.id
     assert resumed.latest_resumable_ai_job() is None
+
+
+def test_ai_taxonomy_proposal_creates_checked_nested_category(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    subject = intake.app.create_subject("Mathematics")
+    parent = intake.app.create_chapter(subject.id, "Calculus")
+    image = tmp_path / "taxonomy.jpg"
+    image.write_bytes(b"\xff\xd8\xfftaxonomy")
+
+    started = intake.start_ai([image])
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    fields = dict(candidate.fields)
+    fields.update(
+        {
+            "subject_id": None,
+            "chapter_id": None,
+            "taxonomy_proposal": {
+                "subject_name": subject.name,
+                "parent_chapter_id": parent.id,
+                "chapter_name": "Sequences",
+                "reason": "The problem concerns sequence limits.",
+            },
+        }
+    )
+
+    problem = intake.commit_ai_candidate(candidate.review_item_id, fields)
+
+    assert problem.subject_id == subject.id
+    with intake.runtime.session_factory() as session:
+        chapter = session.get(Chapter, problem.chapter_id)
+        assert chapter is not None
+        assert chapter.name == "Sequences"
+        assert chapter.parent_id == parent.id
+
+
+def test_ai_taxonomy_proposal_rejects_invalid_parent_and_alias_conflict(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    subject = intake.app.create_subject("Mathematics")
+    parent = intake.app.create_chapter(subject.id, "Calculus")
+    existing = intake.app.create_chapter(subject.id, "Derivatives", parent_id=parent.id)
+    intake.app.add_chapter_alias(existing.id, "Derivative rules")
+    image = tmp_path / "taxonomy-invalid.jpg"
+    image.write_bytes(b"\xff\xd8\xfftaxonomy-invalid")
+
+    started = intake.start_ai([image])
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    fields = dict(candidate.fields)
+    fields["taxonomy_proposal"] = {
+        "subject_name": subject.name,
+        "parent_chapter_id": "ch_missing",
+        "chapter_name": "Sequences",
+        "reason": "The problem concerns sequence limits.",
+    }
+    with pytest.raises(DomainError, match="上级章节不存在"):
+        intake.commit_ai_candidate(candidate.review_item_id, fields)
+
+    fields["taxonomy_proposal"] = {
+        "subject_name": subject.name,
+        "parent_chapter_id": parent.id,
+        "chapter_name": "Derivative rules",
+        "reason": "The problem concerns differentiation.",
+    }
+    with pytest.raises(DomainError, match="别名近义重复"):
+        intake.commit_ai_candidate(candidate.review_item_id, fields)
+
+
+def test_many_images_one_problem_uses_one_ordered_recognition_unit(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    first = tmp_path / "reading-page-1.jpg"
+    second = tmp_path / "reading-page-2.jpg"
+    first.write_bytes(b"\xff\xd8\xffpage-one")
+    second.write_bytes(b"\xff\xd8\xffpage-two")
+
+    started = intake.start_ai(
+        [first, second], recognition_mode="many_to_one"
+    )
+    intake.ai.run_job(started.job_id)
+
+    progress = intake.progress(started.job_id)
+    candidates = intake.list_candidates(started.job_id)
+    assert progress.total == 1
+    assert progress.done == 1
+    assert len(candidates) == 1
+    assert "合并 2 张来源图片" in candidates[0].fields["question_markdown"]
+    with intake.runtime.session_factory() as session:
+        unit = session.scalar(
+            select(IntakeRecognitionUnit).where(
+                IntakeRecognitionUnit.session_id == started.intake_session_id
+            )
+        )
+        assert unit is not None
+        assert unit.mode == "many_to_one"
+        members = session.scalars(
+            select(IntakeRecognitionUnitAsset)
+            .where(IntakeRecognitionUnitAsset.recognition_unit_id == unit.id)
+            .order_by(IntakeRecognitionUnitAsset.sort_order)
+        ).all()
+        candidate_unit = session.scalar(
+            select(IntakeCandidateUnit).where(
+                IntakeCandidateUnit.candidate_id == candidates[0].review_item_id
+            )
+        )
+    assert len(members) == 2
+    assert candidate_unit is not None
+    assert candidate_unit.recognition_unit_id == unit.id
+
+
+def test_candidate_sources_can_be_reordered_and_split_into_units(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    first = tmp_path / "source-1.jpg"
+    second = tmp_path / "source-2.jpg"
+    first.write_bytes(b"\xff\xd8\xffsource-one")
+    second.write_bytes(b"\xff\xd8\xffsource-two")
+    started = intake.start_ai(
+        [first, second], recognition_mode="many_to_one"
+    )
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+
+    original_order = list(candidate.source_images)
+    assert len(original_order) == 2
+    intake.reorder_candidate_source_images(
+        candidate.review_item_id, list(reversed(candidate.source_images))
+    )
+    assert intake.candidate_source_images(candidate.review_item_id) == list(
+        reversed(original_order)
+    )
+    intake.split_candidate_recognition_unit(candidate.review_item_id)
+    with intake.runtime.session_factory() as session:
+        unit_count = session.scalar(
+            select(func.count(IntakeCandidateUnit.recognition_unit_id)).where(
+                IntakeCandidateUnit.candidate_id == candidate.review_item_id
+            )
+        )
+    assert unit_count == 2
+
+
+def test_pending_candidates_can_be_explicitly_promoted_as_one_problem_set(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    first = tmp_path / "set-1.jpg"
+    second = tmp_path / "set-2.jpg"
+    first.write_bytes(b"\xff\xd8\xffset-one")
+    second.write_bytes(b"\xff\xd8\xffset-two")
+    started = intake.start_ai([first, second], recognition_mode="auto")
+    intake.ai.run_job(started.job_id)
+    candidates = intake.list_candidates(started.job_id)
+
+    created = intake.commit_ai_candidates_as_problem_set(
+        [candidate.review_item_id for candidate in candidates],
+        title="阅读材料",
+        material_markdown="共享材料",
+    )
+
+    assert len(created) == 2
+    assert len({problem.problem_set_id for problem in created}) == 1
+    assert all(problem.assets == [] for problem in created)
+    assert all(
+        candidate.status == "committed"
+        for candidate in intake.list_candidates(started.job_id)
+    )
+
+
+def test_auto_mode_keeps_images_separate_while_storing_suggestions(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    first = tmp_path / "auto-one.jpg"
+    second = tmp_path / "auto-two.jpg"
+    first.write_bytes(b"\xff\xd8\xffauto-one")
+    second.write_bytes(b"\xff\xd8\xffauto-two")
+
+    started = intake.start_ai([first, second], recognition_mode="auto")
+    intake.ai.run_job(started.job_id)
+
+    assert intake.progress(started.job_id).total == 2
+    assert len(intake.list_candidates(started.job_id)) == 2
+    suggestions = intake.structure_suggestions(started.job_id)
+    assert len(suggestions) == 2
+    assert {suggestion.layout_kind for suggestion in suggestions} == {"single"}
+
+
+def test_problem_set_keeps_shared_material_once_and_children_independent(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    image = tmp_path / "reading.jpg"
+    image.write_bytes(b"\xff\xd8\xffshared-reading")
+    children = [
+        ({"title": "第 1 小题", "question_markdown": "第一问", "priority": 3}, ["阅读"]),
+        ({"title": "第 2 小题", "question_markdown": "第二问", "priority": 4}, ["阅读"]),
+    ]
+
+    created = intake.create_problem_set(
+        title="英语阅读材料",
+        material_markdown="共享阅读材料只保存一次。",
+        children=children,
+        image_paths=[image],
+    )
+
+    assert [problem.item_order for problem in created] == [0, 1]
+    assert len({problem.problem_set_id for problem in created}) == 1
+    assert all(problem.assets == [] for problem in created)
+    with intake.runtime.session_factory() as session:
+        problem_set = session.get(ProblemSet, created[0].problem_set_id)
+        assert problem_set is not None
+        assert problem_set.material_markdown == "共享阅读材料只保存一次。"
+        assets = session.scalars(
+            select(ProblemSetAsset).where(
+                ProblemSetAsset.problem_set_id == problem_set.id
+            )
+        ).all()
+    assert len(assets) == 1
+    assert intake.app.count_problems() == 2
 
 
 def test_completed_legacy_job_is_not_reported_as_intake_batch(

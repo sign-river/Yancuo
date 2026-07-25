@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.review_rules import (
     compute_next_review_at,
     interval_days_for_grade,
+    is_due,
 )
 from yancuo_win.domain.similarity import text_similarity
 
@@ -29,7 +31,9 @@ def test_interval_rules_deterministic() -> None:
     assert interval_days_for_grade(5) == 14
     fixed = datetime(2026, 7, 21, 15, 30, tzinfo=timezone.utc)
     nxt = compute_next_review_at(4, from_dt=fixed)
-    assert nxt == datetime(2026, 7, 28, tzinfo=timezone.utc)
+    # 15:30 UTC is already July 21 in Asia/Shanghai; the next local midnight
+    # after seven calendar days is 2026-07-27 16:00 UTC.
+    assert nxt == datetime(2026, 7, 27, 16, tzinfo=timezone.utc)
 
 
 def test_record_review_sets_next_date(services: AppServices) -> None:
@@ -49,6 +53,42 @@ def test_record_review_sets_next_date(services: AppServices) -> None:
     services.schedule_initial_review(p.id)
     due2 = services.list_due_reviews()
     assert any(x.id == p.id for x in due2)
+
+
+def test_paused_review_is_excluded_but_new_enabled_item_is_due(services: AppServices) -> None:
+    problem = services.create_problem(title="暂停题", status="active")
+    assert any(item.id == problem.id for item in services.list_due_reviews())
+    services.set_review_enabled(problem.id, False)
+    assert all(item.id != problem.id for item in services.list_due_reviews())
+    services.set_review_enabled(problem.id, True)
+    assert any(item.id == problem.id for item in services.list_due_reviews())
+
+
+def test_due_date_uses_shanghai_calendar_boundary() -> None:
+    local = ZoneInfo("Asia/Shanghai")
+    # 16:00 UTC is midnight on July 22 in Shanghai, so it is not due on July 21.
+    due_at = datetime(2026, 7, 21, 16, tzinfo=timezone.utc)
+    assert not is_due(due_at, today=date(2026, 7, 21), local_timezone=local)
+    assert is_due(due_at, today=date(2026, 7, 22), local_timezone=local)
+
+
+def test_study_session_records_each_grade_without_reusing_change_review(services: AppServices) -> None:
+    problem = services.create_problem(title="学习记录题", status="active")
+    session, queue = services.start_study_session()
+    assert [item.id for item in queue] == [problem.id]
+    services.record_review(
+        problem.id,
+        4,
+        study_session_id=session.id,
+        answer_viewed_at=datetime.now(timezone.utc),
+    )
+    records = services.study_session_records(session.id)
+    assert len(records) == 1
+    assert records[0].problem_id == problem.id
+    assert records[0].grade == 4
+    summary = services.finish_study_session(session.id)
+    assert summary["status"] == "completed"
+    assert summary["completed_count"] == 1
 
 
 def test_import_duplicate_tip_no_second_copy(

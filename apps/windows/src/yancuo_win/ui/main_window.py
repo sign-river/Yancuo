@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from html import escape
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
@@ -40,6 +41,7 @@ from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.cloud_service import CloudBackupService
 from yancuo_win.application.intake_service import ProblemIntakeService
 from yancuo_win.application.note_service import NoteService
+from yancuo_win.application.problem_chat_service import ProblemChatService
 from yancuo_win.application.search_service import SearchIndexService
 from yancuo_win.application.search_spec import SearchBoundary
 from yancuo_win.application.services import AppServices, ProblemFilter
@@ -47,6 +49,7 @@ from yancuo_win.application.sync_service import SyncService
 from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.data.models import Problem
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.infrastructure.credentials import get_secret
 from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.import_export.gmshare import GmshareService
 from yancuo_win.import_export.workspace import WorkspaceService
@@ -75,7 +78,8 @@ _PAGE_REVIEW = 3
 _PAGE_NOTES = 4
 _PAGE_DATA = 5
 _PAGE_SETTINGS = 6
-_PAGE_PROBLEM_DETAIL = 7
+_PAGE_ACCOUNT = 7
+_PAGE_PROBLEM_DETAIL = 8
 
 _STATUS_LABELS = {
     "inbox": "收件箱",
@@ -94,6 +98,7 @@ class MainWindow(QMainWindow):
         self.search = SearchIndexService(runtime)
         self.ai_search = AiSearchService(runtime)
         self.ai = AIService(runtime)
+        self.problem_chat = ProblemChatService(runtime)
         self.intake = ProblemIntakeService(runtime)
         self.notes = NoteService(runtime)
         self.workspace = WorkspaceService(runtime)
@@ -172,7 +177,8 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.note_page)
         self.stack.addWidget(self._build_data_page())
         self.stack.addWidget(self._build_settings_page())
-        self.problem_detail_page = ProblemDetailPage()
+        self.stack.addWidget(self._build_account_page())
+        self.problem_detail_page = ProblemDetailPage(self.problem_chat)
         self.problem_detail_page.back_requested.connect(self._close_problem_detail)
         self.problem_detail_page.edit_requested.connect(self._edit_problem_from_detail)
         self.problem_detail_page.previous_requested.connect(
@@ -226,6 +232,7 @@ class MainWindow(QMainWindow):
             ("笔记", _PAGE_NOTES),
             ("数据与同步", _PAGE_DATA),
             ("设置", _PAGE_SETTINGS),
+            ("账户", _PAGE_ACCOUNT),
         ):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, page)
@@ -258,6 +265,8 @@ class MainWindow(QMainWindow):
             self.note_page.reload()
         elif page == _PAGE_SETTINGS:
             self._refresh_focus_pages()
+        elif page == _PAGE_ACCOUNT:
+            self._refresh_account_page()
 
     def _on_main_nav_clicked(self, item: QListWidgetItem) -> None:
         """Re-open an already selected section when a nested page is active."""
@@ -736,6 +745,91 @@ class MainWindow(QMainWindow):
         lay.addWidget(search_card)
         lay.addStretch(1)
         return page
+
+    def _build_account_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("PageRoot")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(16)
+
+        title = QLabel("账户")
+        title.setObjectName("PageTitle")
+        hint = QLabel("当前以本地资料离线使用。登录不会影响录题、复习、笔记或已保存的 AI 对话。")
+        hint.setObjectName("PageHint")
+        hint.setWordWrap(True)
+        lay.addWidget(title)
+        lay.addWidget(hint)
+
+        identity = CardFrame()
+        identity.add_title("本地资料")
+        self.account_identity_summary = QLabel()
+        self.account_identity_summary.setObjectName("MutedLabel")
+        self.account_identity_summary.setWordWrap(True)
+        identity.body.addWidget(self.account_identity_summary)
+        lay.addWidget(identity)
+
+        connections = CardFrame()
+        connections.add_title("连接状态")
+        self.account_connection_summary = QLabel()
+        self.account_connection_summary.setObjectName("MutedLabel")
+        self.account_connection_summary.setWordWrap(True)
+        connections.body.addWidget(self.account_connection_summary)
+        open_settings = ghost_button("管理 AI 和云服务设置")
+        open_settings.clicked.connect(lambda: self.main_nav.setCurrentRow(_PAGE_SETTINGS))
+        connections.body.addLayout(button_row(open_settings))
+        lay.addWidget(connections)
+
+        online = CardFrame()
+        online.add_title("在线账户")
+        online.add_hint("在线账号服务尚未配置；云服务授权与研错库账号是两套独立身份。")
+        login = primary_button("登录以同步")
+        login.clicked.connect(self._show_account_login_notice)
+        online.body.addLayout(button_row(login))
+        lay.addWidget(online)
+        lay.addStretch(1)
+        self._refresh_account_page()
+        return page
+
+    @staticmethod
+    def _credential_available(credential_key: str, environment_key: str = "") -> bool:
+        if environment_key and os.environ.get(environment_key, "").strip():
+            return True
+        try:
+            return bool(get_secret(credential_key))
+        except DomainError:
+            return False
+
+    def _refresh_account_page(self) -> None:
+        identity = self.runtime.identity
+        self.account_identity_summary.setText(
+            "离线模式\n"
+            f"显示名称：{identity.display_name}\n"
+            f"本地身份：{identity.user_id}\n"
+            f"当前设备：{identity.device_id}\n"
+            f"数据目录：{self.runtime.paths.root}"
+        )
+        settings = self.runtime.settings
+        ai_config = settings.ai.providers.get(settings.ai.default_provider)
+        ai_ready = bool(settings.ai.enabled and ai_config) and self._credential_available(
+            ai_config.credential_key if ai_config else "",
+            ai_config.api_key_env if ai_config else "",
+        )
+        cloud_endpoint = getattr(settings.cloud, settings.cloud.default_provider, None)
+        cloud_ready = bool(settings.cloud.enabled and cloud_endpoint) and self._credential_available(
+            cloud_endpoint.credential_key if cloud_endpoint else ""
+        )
+        self.account_connection_summary.setText(
+            f"AI 凭据：{'已配置' if ai_ready else '未配置或未启用'}\n"
+            f"云服务：{'已连接配置' if cloud_ready else '未连接'}"
+        )
+
+    def _show_account_login_notice(self) -> None:
+        QMessageBox.information(
+            self,
+            "在线账户尚未配置",
+            "本地资料可继续完整使用。远端账号协议尚未确定，因此当前不会创建或发送登录凭据。",
+        )
 
     def _goto_due_in_library(self) -> None:
         self.main_nav.setCurrentRow(_PAGE_LIBRARY)
