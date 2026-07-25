@@ -40,10 +40,12 @@ from yancuo_win.application.note_ai_service import (
 from yancuo_win.application.note_intake_service import NoteIntakeService
 from yancuo_win.application.services import AppServices
 from yancuo_win.application.note_service import NoteService
+from yancuo_win.application.note_ai_search_service import NoteAiSearchService
 from yancuo_win.application.unified_search_service import UnifiedSearchIndexService
 from yancuo_win.data.models import NoteBlock, NoteDocument, NoteIntakeSession
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.note_worker import NoteExtractionWorker
+from yancuo_win.tasks.note_search_worker import NoteAiSearchWorker
 from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import CardFrame, danger_button, ghost_button, primary_button
@@ -611,6 +613,9 @@ class NotePage(QWidget):
         self.note_ai = NoteAiService(notes.runtime)
         self.note_intake = NoteIntakeService(notes.runtime)
         self.note_search = UnifiedSearchIndexService(notes.runtime)
+        self.note_ai_search = NoteAiSearchService(notes.runtime)
+        self.note_search_worker: NoteAiSearchWorker | None = None
+        self._note_ai_search_ids: set[str] | None = None
         self.note_worker: NoteExtractionWorker | None = None
         self._build()
         self.reload()
@@ -663,7 +668,13 @@ class NotePage(QWidget):
         self.note_search_edit.setObjectName("NoteSearchEdit")
         self.note_search_edit.setPlaceholderText("离线搜索标题、内容、标签或合集…")
         self.note_search_edit.textChanged.connect(self.reload)
+        self.note_search_edit.returnPressed.connect(self._submit_note_search)
         left.body.addWidget(self.note_search_edit)
+        self.note_search_mode = QComboBox()
+        self.note_search_mode.addItem("普通搜索", "local")
+        self.note_search_mode.addItem("AI 搜索", "ai")
+        self.note_search_mode.currentIndexChanged.connect(self._submit_note_search)
+        left.body.addWidget(self.note_search_mode)
         self.note_list = QListWidget()
         self.note_list.setObjectName("NoteList")
         self.note_list.currentItemChanged.connect(self._select_note)
@@ -819,13 +830,16 @@ class NotePage(QWidget):
             )
             query = self.note_search_edit.text().strip()
             if query:
-                hits = self.note_search.search_notes(
-                    query,
-                    statuses=(self.status_filter.currentData(),)
-                    if self.status_filter.currentData()
-                    else ("active", "inbox", "archived", "trashed"),
-                )
-                hit_ids = {str(hit["entity_id"]) for hit in hits}
+                if self.note_search_mode.currentData() == "ai" and self._note_ai_search_ids is not None:
+                    hit_ids = self._note_ai_search_ids
+                else:
+                    hits = self.note_search.search_notes(
+                        query,
+                        statuses=(self.status_filter.currentData(),)
+                        if self.status_filter.currentData()
+                        else ("active", "inbox", "archived", "trashed"),
+                    )
+                    hit_ids = {str(hit["entity_id"]) for hit in hits}
                 self._notes = [note for note in self._notes if note.id in hit_ids]
         except DomainError as exc:
             self.status_message.emit(str(exc))
@@ -850,6 +864,26 @@ class NotePage(QWidget):
             self._note = None
             self._block = None
             self.detail_stack.setCurrentIndex(0)
+
+    def _submit_note_search(self) -> None:
+        if self.note_search_mode.currentData() != "ai":
+            self._note_ai_search_ids = None
+            self.reload()
+            return
+        query = self.note_search_edit.text().strip()
+        if not query or (self.note_search_worker and self.note_search_worker.isRunning()):
+            return
+        statuses = (self.status_filter.currentData(),) if self.status_filter.currentData() else ("active", "inbox", "archived", "trashed")
+        worker = NoteAiSearchWorker(self.note_ai_search, query=query, statuses=statuses, parent=self)
+        self.note_search_worker = worker
+        worker.finished_ok.connect(self._on_note_ai_search_done)
+        worker.failed.connect(lambda error: self.status_message.emit(f"笔记 AI 搜索失败：{error}"))
+        worker.finished.connect(lambda: setattr(self, "note_search_worker", None))
+        worker.start()
+
+    def _on_note_ai_search_done(self, matches: object) -> None:
+        self._note_ai_search_ids = {item.note_id for item in matches}
+        self.reload()
 
     @staticmethod
     def _block_preview(note: NoteDocument) -> str:
