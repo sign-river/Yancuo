@@ -54,6 +54,9 @@ class UnifiedSearchIndexService:
 
     @classmethod
     def _replace_notes(cls, session: Session) -> int:
+        # Collection membership may be maintained through the association table
+        # directly, so reload relationships instead of reusing stale identity-map data.
+        session.expire_all()
         notes = list(session.scalars(select(NoteDocument).options(
             selectinload(NoteDocument.blocks), selectinload(NoteDocument.tags),
             selectinload(NoteDocument.collections),

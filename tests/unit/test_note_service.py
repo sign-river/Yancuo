@@ -9,6 +9,7 @@ import pytest
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.note_service import NoteService
 from yancuo_win.application.services import AppServices
+from yancuo_win.application.unified_search_service import UnifiedSearchIndexService
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.rules import DomainError
 
@@ -77,6 +78,20 @@ def test_note_tags_and_lifecycle_protect_trashed_documents(note_bundle) -> None:
     notes.trash_note(note.id)
     notes.delete_note_permanently(note.id)
     assert notes.get_note(note.id) is None
+
+
+def test_unified_note_search_tracks_blocks_tags_and_collections(note_bundle) -> None:
+    runtime, app, notes, _subject, _chapter = note_bundle
+    tag = app.create_tag("泰勒")
+    note = notes.create_note(title="极限")
+    notes.add_block(note.id, block_type="concept", content_markdown="等价无穷小")
+    notes.set_tags(note.id, [tag.id])
+    collection = notes.create_collection("冲刺")
+    notes.set_note_collections(note.id, [collection.id])
+
+    search = UnifiedSearchIndexService(runtime)
+    assert [row["entity_id"] for row in search.search_notes("无穷小", statuses=("inbox",))] == [note.id]
+    assert [row["entity_id"] for row in search.search_notes("冲刺", statuses=("inbox",))] == [note.id]
 
 
 def test_delete_note_block_compacts_the_remaining_order(note_bundle) -> None:
