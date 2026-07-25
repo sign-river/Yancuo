@@ -37,7 +37,8 @@ def test_local_folder_upload_latest_restore(runtime, tmp_path: Path) -> None:
 
     cloud.ensure_repository()
     uploaded = cloud.upload_backup()
-    assert uploaded["tag"].startswith("data-v1-snapshot-")
+    assert uploaded["tag"].startswith(f"data-v1-{runtime.identity.profile_id}-")
+    assert uploaded["profile_id"] == runtime.identity.profile_id
     assert len(uploaded["sha256"]) == 64
 
     latest_path = cloud_root / "local" / "test-repo" / ".mistakebook" / "latest.json"
@@ -52,6 +53,12 @@ def test_local_folder_upload_latest_restore(runtime, tmp_path: Path) -> None:
     )
     assert asset.is_file()
 
+    latest = provider.read_sync_manifest("local", "test-repo")
+    assert latest is not None
+    profile_snapshot = latest["profiles"][runtime.identity.profile_id]
+    assert profile_snapshot["tag"] == uploaded["tag"]
+    assert profile_snapshot["parent_snapshot_id"] is None
+
     backups = cloud.list_backups()
     assert any(b["tag"] == uploaded["tag"] and b["is_latest"] for b in backups)
 
@@ -59,6 +66,44 @@ def test_local_folder_upload_latest_restore(runtime, tmp_path: Path) -> None:
     result = cloud.restore_latest_to(target)
     assert (target / "error_book.db").is_file()
     assert result["schema_version"] >= 1
+
+
+def test_profiles_are_discovered_and_explicitly_bound(runtime, tmp_path: Path, monkeypatch) -> None:
+    cloud_root = tmp_path / "profile-cloud"
+    provider = LocalFolderProvider(cloud_root)
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "profiles"
+    runtime.settings.cloud.enabled = True
+    first = CloudBackupService(runtime, provider)
+    first.ensure_repository()
+    uploaded_first = first.upload_backup()
+
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "second-data"))
+    second_runtime = bootstrap_runtime()
+    second_runtime.settings.cloud.repository.owner = "local"
+    second_runtime.settings.cloud.repository.name = "profiles"
+    second_runtime.settings.cloud.enabled = True
+    second = CloudBackupService(second_runtime, LocalFolderProvider(cloud_root))
+    uploaded_second = second.upload_backup()
+
+    state = second.profile_connection_state()
+    assert state["requires_takeover"] is True
+    assert {item["profile_id"] for item in state["remote_profiles"]} == {
+        uploaded_first["profile_id"],
+        uploaded_second["profile_id"],
+    }
+
+    restored = first.restore_profile_to(
+        uploaded_second["profile_id"], tmp_path / "restored-second-profile"
+    )
+    restored_identity = Path(restored["target_root"]) / "identity.json"
+    assert uploaded_second["profile_id"] in restored_identity.read_text(encoding="utf-8")
+
+    second.record_profile_alias(uploaded_second["profile_id"], uploaded_first["profile_id"])
+    bound = second.bind_local_profile(uploaded_second["profile_id"])
+    assert bound["previous_profile_id"] == uploaded_second["profile_id"]
+    assert bound["profile_id"] == uploaded_first["profile_id"]
+    assert second_runtime.identity.profile_id == uploaded_first["profile_id"]
 
 
 def test_failed_upload_does_not_update_latest(runtime, tmp_path: Path) -> None:

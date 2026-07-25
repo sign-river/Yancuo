@@ -140,6 +140,7 @@ class EbpackService:
                 "application": "Yancuo",
                 "app_version": __version__,
                 "database_id": self.runtime.identity.database_id,
+                "profile_id": self.runtime.identity.profile_id,
                 "schema_version": self.runtime.schema_version,
                 "data_format_version": DATA_FORMAT_VERSION,
                 "problem_count": problem_count,

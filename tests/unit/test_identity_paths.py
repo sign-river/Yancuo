@@ -16,6 +16,8 @@ def test_identity_persists(tmp_path: Path) -> None:
     first = load_or_create_identity(path, display_name="测试")
     second = load_or_create_identity(path)
     assert first.user_id == second.user_id
+    assert first.profile_id == second.profile_id
+    assert first.profile_id.startswith("profile_")
     assert first.database_id == second.database_id
     assert first.device_id.startswith("dev_win_")
 
@@ -29,3 +31,16 @@ def test_data_paths_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert paths.inbox_dir.is_dir()
     assert paths.log_dir.is_dir()
     assert paths.database.name == "error_book.db"
+
+
+def test_legacy_identity_receives_persistent_profile_id(tmp_path: Path) -> None:
+    path = tmp_path / "identity.json"
+    path.write_text(
+        '{"user_id":"usr_old","device_id":"dev_win_old","database_id":"db_old"}',
+        encoding="utf-8",
+    )
+
+    identity = load_or_create_identity(path)
+
+    assert identity.profile_id.startswith("profile_")
+    assert identity.profile_id in path.read_text(encoding="utf-8")

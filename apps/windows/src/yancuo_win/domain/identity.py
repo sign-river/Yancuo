@@ -18,6 +18,7 @@ class LocalIdentity:
     user_id: str
     device_id: str
     database_id: str
+    profile_id: str
     display_name: str
     created_at: str
 
@@ -29,28 +30,57 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
-def load_or_create_identity(path: Path, display_name: str = "本地用户") -> LocalIdentity:
-    """首次启动创建本地身份；不依赖任何云账号。"""
-    if path.is_file():
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return LocalIdentity(
-            user_id=str(raw["user_id"]),
-            device_id=str(raw["device_id"]),
-            database_id=str(raw["database_id"]),
-            display_name=str(raw.get("display_name", display_name)),
-            created_at=str(raw.get("created_at", "")),
-        )
-
-    identity = LocalIdentity(
-        user_id=_new_id("usr"),
-        device_id=_new_id("dev_win"),
-        database_id=_new_id("db"),
-        display_name=display_name,
-        created_at=datetime.now(timezone.utc).isoformat(),
-    )
+def _write_identity(path: Path, identity: LocalIdentity) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(identity.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def load_or_create_identity(path: Path, display_name: str = "本地用户") -> LocalIdentity:
+    """首次启动创建本地身份；不依赖任何云账号。"""
+    if path.is_file():
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        identity = LocalIdentity(
+            user_id=str(raw["user_id"]),
+            device_id=str(raw["device_id"]),
+            database_id=str(raw["database_id"]),
+            profile_id=str(raw.get("profile_id") or _new_id("profile")),
+            display_name=str(raw.get("display_name", display_name)),
+            created_at=str(raw.get("created_at", "")),
+        )
+        if "profile_id" not in raw:
+            _write_identity(path, identity)
+        return identity
+
+    identity = LocalIdentity(
+        user_id=_new_id("usr"),
+        device_id=_new_id("dev_win"),
+        database_id=_new_id("db"),
+        profile_id=_new_id("profile"),
+        display_name=display_name,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _write_identity(path, identity)
     return identity
+
+
+def bind_profile(path: Path, identity: LocalIdentity, profile_id: str) -> LocalIdentity:
+    """Bind one local data space to a confirmed canonical cloud profile."""
+
+    profile_id = profile_id.strip()
+    if not profile_id.startswith("profile_") or len(profile_id) <= len("profile_"):
+        raise ValueError("profile_id 格式无效")
+    if any(char not in "abcdefghijklmnopqrstuvwxyz0123456789_" for char in profile_id):
+        raise ValueError("profile_id 格式无效")
+    bound = LocalIdentity(
+        user_id=identity.user_id,
+        device_id=identity.device_id,
+        database_id=identity.database_id,
+        profile_id=profile_id,
+        display_name=identity.display_name,
+        created_at=identity.created_at,
+    )
+    _write_identity(path, bound)
+    return bound

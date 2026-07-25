@@ -780,13 +780,19 @@ class MainWindow(QMainWindow):
         connections.body.addLayout(button_row(open_settings))
         lay.addWidget(connections)
 
-        online = CardFrame()
-        online.add_title("在线账户")
-        online.add_hint("在线账号服务尚未配置；云服务授权与研错库账号是两套独立身份。")
-        login = primary_button("登录以同步")
-        login.clicked.connect(self._show_account_login_notice)
-        online.body.addLayout(button_row(login))
-        lay.addWidget(online)
+        cloud_profiles = CardFrame()
+        cloud_profiles.add_title("云端资料")
+        cloud_profiles.add_hint("连接自己的私有仓库以查看、恢复或接管资料；不会创建研错库在线账号。")
+        self.account_remote_summary = QLabel("尚未检查云端资料")
+        self.account_remote_summary.setObjectName("MutedLabel")
+        self.account_remote_summary.setWordWrap(True)
+        cloud_profiles.body.addWidget(self.account_remote_summary)
+        inspect_profiles = primary_button("查看云端资料")
+        inspect_profiles.clicked.connect(self._inspect_cloud_profiles)
+        restore_profile = QPushButton("恢复指定资料…")
+        restore_profile.clicked.connect(self._restore_cloud_profile)
+        cloud_profiles.body.addLayout(button_row(inspect_profiles, restore_profile))
+        lay.addWidget(cloud_profiles)
         lay.addStretch(1)
         self._refresh_account_page()
         return page
@@ -805,6 +811,7 @@ class MainWindow(QMainWindow):
         self.account_identity_summary.setText(
             "离线模式\n"
             f"显示名称：{identity.display_name}\n"
+            f"资料 ID：{identity.profile_id}\n"
             f"本地身份：{identity.user_id}\n"
             f"当前设备：{identity.device_id}\n"
             f"数据目录：{self.runtime.paths.root}"
@@ -824,12 +831,68 @@ class MainWindow(QMainWindow):
             f"云服务：{'已连接配置' if cloud_ready else '未连接'}"
         )
 
-    def _show_account_login_notice(self) -> None:
-        QMessageBox.information(
-            self,
-            "在线账户尚未配置",
-            "本地资料可继续完整使用。远端账号协议尚未确定，因此当前不会创建或发送登录凭据。",
-        )
+    def _inspect_cloud_profiles(self) -> None:
+        try:
+            self.cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+            state = self.cloud.profile_connection_state()
+            profiles = state["remote_profiles"]
+            lines = [f"本地资料：{state['local_profile_id']}"]
+            lines.extend(
+                f"云端资料：{item['profile_id']} · {item.get('tag', '无快照')}"
+                for item in profiles
+            )
+            if state["requires_takeover"]:
+                lines.append("发现其他资料：恢复或合并前需明确确认，不会自动覆盖本地数据。")
+            if not profiles:
+                lines.append("云端尚无资料快照。")
+            self.account_remote_summary.setText("\n".join(lines))
+        except DomainError as exc:
+            self.account_remote_summary.setText(f"无法读取云端资料：{exc}")
+
+    def _restore_cloud_profile(self) -> None:
+        try:
+            self.cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+            profiles = self.cloud.discover_profiles()
+            if not profiles:
+                QMessageBox.information(self, "云端资料", "云端尚无可恢复的资料快照")
+                return
+            labels = [
+                f"{item['profile_id']} · {item.get('tag', '无快照')}"
+                for item in profiles
+            ]
+            choice, accepted = QInputDialog.getItem(
+                self, "选择云端资料", "资料快照", labels, 0, False
+            )
+            if not accepted:
+                return
+            selected = profiles[labels.index(choice)]
+            target = QFileDialog.getExistingDirectory(
+                self, "选择恢复到的数据目录（建议空目录）"
+            )
+            if not target:
+                return
+            if (
+                QMessageBox.question(
+                    self,
+                    "确认恢复资料",
+                    "恢复不会替换当前数据目录。\n"
+                    f"资料：{selected['profile_id']}\n目标：{target}\n\n继续？",
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+            result = self.cloud.restore_profile_to(selected["profile_id"], Path(target))
+            QMessageBox.information(
+                self,
+                "云端资料已恢复",
+                f"{result['target_root']}\n请设置 YANCUO_DATA_ROOT 后重启。",
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "恢复失败", str(exc))
 
     def _goto_due_in_library(self) -> None:
         self.main_nav.setCurrentRow(_PAGE_LIBRARY)
@@ -2135,7 +2198,7 @@ class MainWindow(QMainWindow):
                 self,
                 "云备份完成",
                 f"tag={result['tag']}\nsha256={result['sha256'][:16]}…\n"
-                "已先上传完整包，再更新 latest 指针（非实时同步）。",
+                "已先上传不可变完整快照，再更新当前资料指针（非实时同步）。",
             )
         except DomainError as exc:
             QMessageBox.warning(self, "云备份失败", str(exc))
@@ -2153,7 +2216,8 @@ class MainWindow(QMainWindow):
             backups = self.cloud.list_backups()
             latest = next((b for b in backups if b.get("is_latest")), None)
             summary = "云端备份列表：\n" + "\n".join(
-                f"- {b['tag']}{' (latest)' if b.get('is_latest') else ''}"
+                f"- {b.get('profile_id') or '旧格式'} · {b['tag']}"
+                f"{' (资料最新)' if b.get('is_latest') else ''}"
                 for b in backups[:20]
             )
             if not backups:
@@ -2164,7 +2228,7 @@ class MainWindow(QMainWindow):
                     self,
                     "确认恢复",
                     summary
-                    + "\n\n将下载 latest（若无则需手动指定）并恢复到所选目录。继续？",
+                    + "\n\n将恢复当前本地资料对应的最新快照到所选目录。继续？",
                 )
                 != QMessageBox.StandardButton.Yes
             ):
