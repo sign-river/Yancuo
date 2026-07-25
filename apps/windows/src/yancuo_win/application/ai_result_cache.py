@@ -49,3 +49,13 @@ def find_recognition_cache(session, cache_key: str) -> AiRecognitionCache | None
     if entry is None or not is_reusable_recognition("completed", entry.structured_json):
         return None
     return entry
+
+
+def load_cached_structure(entry: AiRecognitionCache) -> dict[str, object] | None:
+    """Treat malformed persisted data as a cache miss, never as authoritative input."""
+
+    try:
+        value = json.loads(entry.structured_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) and value else None
