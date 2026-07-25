@@ -5,6 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 
+from sqlalchemy import select
+
+from yancuo_win.data.models import AiRecognitionCache
+
 
 def recognition_cache_key(
     *,
@@ -34,3 +38,14 @@ def is_reusable_recognition(status: str, structured_json: str) -> bool:
     """Only completed, non-empty structured outputs may satisfy a cache lookup."""
 
     return status == "completed" and structured_json.strip() not in {"", "{}", "null"}
+
+
+def find_recognition_cache(session, cache_key: str) -> AiRecognitionCache | None:
+    """Return one durable successful result by its fully specified cache key."""
+
+    entry = session.scalar(
+        select(AiRecognitionCache).where(AiRecognitionCache.cache_key == cache_key)
+    )
+    if entry is None or not is_reusable_recognition("completed", entry.structured_json):
+        return None
+    return entry
