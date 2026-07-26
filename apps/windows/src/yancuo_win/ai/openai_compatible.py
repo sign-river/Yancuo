@@ -99,6 +99,7 @@ class OpenAICompatibleProvider(AIProvider):
         method: str,
         timeout_seconds: int,
         payload: dict[str, Any] | None = None,
+        retry_instruction: str = "请检查网络后点击“重新尝试失败项”",
     ) -> dict[str, Any]:
         key = self._api_key()
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -143,7 +144,7 @@ class OpenAICompatibleProvider(AIProvider):
                 reason = exc.reason if isinstance(exc, urllib.error.URLError) else str(exc)
                 raise DomainError(
                     "AI 服务连接中断，程序已自动重试 2 次仍未恢复。"
-                    f"请检查网络后点击“重新尝试失败项”。详情：{reason}"
+                    f"{retry_instruction}。详情：{reason}"
                 ) from exc
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise DomainError("AI 服务返回了无法解析的响应") from exc
@@ -324,6 +325,7 @@ class OpenAICompatibleProvider(AIProvider):
             method="POST",
             timeout_seconds=timeout_seconds,
             payload={"model": model or "gpt-4o-mini", "temperature": 0.2, "messages": messages},
+            retry_instruction="请检查网络后重新发送问题",
         )
         try:
             content = body["choices"][0]["message"]["content"]

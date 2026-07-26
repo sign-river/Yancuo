@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +15,7 @@ from sqlalchemy import select
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.cloud.local_folder import LocalFolderProvider
+from yancuo_win.cloud.base import CloudProvider
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
     Problem,
@@ -212,17 +216,77 @@ class SyncService:
             self.runtime.settings.cloud.repository.name or "graduate-mistake-book-data"
         ).strip()
 
-    def _require_ops_provider(self) -> LocalFolderProvider:
+    def _require_ops_provider(self) -> CloudProvider:
         provider = self.provider
         if provider is None:
             provider = get_cloud_provider(self.runtime.settings)
             self.provider = provider
-        if not isinstance(provider, LocalFolderProvider):
+        if isinstance(provider, LocalFolderProvider):
+            return provider
+        if provider.name != "github" or not provider.get_capabilities().release_assets:
             raise DomainError(
-                "阶段 J 增量同步目前仅完整实现于 local_folder 提供商；"
-                "GitLink/GitHub 仍用完整备份通道。"
+                "增量同步仅支持 local_folder 或具备受控批次锁的 GitHub；GitLink 仍用完整备份。"
             )
         return provider
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _push_github_batch(self, provider: CloudProvider, ops: list[dict[str, Any]]) -> None:
+        device_id = self.runtime.identity.device_id
+        profile_id = self.runtime.identity.profile_id
+        batch_id = f"batch_{uuid.uuid4().hex}"
+        tag = f"yancuo-ops-v1-{profile_id[-8:]}-{device_id[-8:]}-{batch_id[-8:]}"
+        with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
+            payload = Path(temporary) / "operations.jsonl"
+            payload.write_text("".join(json.dumps(op, ensure_ascii=False) + "\n" for op in ops), encoding="utf-8")
+            sha = self._sha256(payload)
+            body = json.dumps({"format": "yancuo-operation-batch", "format_version": 1, "batch_id": batch_id, "profile_id": profile_id, "device_id": device_id, "asset_name": "operations.jsonl", "operation_count": len(ops), "sha256": sha, "created_at": _utcnow().isoformat()}, ensure_ascii=False)
+            provider.create_release(self.owner, self.repo, tag=tag, name="Yancuo operation batch", body=body)
+            provider.upload_release_asset(self.owner, self.repo, tag=tag, file_path=payload, asset_name="operations.jsonl")
+            verified = Path(temporary) / "verified.jsonl"
+            provider.download_release_asset(self.owner, self.repo, tag=tag, asset_name="operations.jsonl", dest=verified)
+            if self._sha256(verified) != sha:
+                raise DomainError("远端 Operation 批次哈希不一致，未更新索引")
+        index = provider.read_sync_manifest(self.owner, self.repo) or {"format": "yancuo-profile-snapshots", "format_version": 1, "profiles": {}, "aliases": {}}
+        batches = index.setdefault("operation_batches", [])
+        if not isinstance(batches, list):
+            raise DomainError("云端 Operation 批次索引无效")
+        batches.append({"tag": tag, "batch_id": batch_id, "profile_id": profile_id, "device_id": device_id, "asset_name": "operations.jsonl", "sha256": sha, "created_at": _utcnow().isoformat()})
+        provider.write_sync_manifest(self.owner, self.repo, index)
+
+    def _github_remote_operations(self, provider: CloudProvider) -> list[dict[str, Any]]:
+        index = provider.read_sync_manifest(self.owner, self.repo) or {}
+        batches = index.get("operation_batches")
+        if batches is not None and not isinstance(batches, list):
+            raise DomainError("云端 Operation 批次索引无效")
+        if not isinstance(batches, list):
+            return []
+        items: list[dict[str, Any]] = []
+        for batch in batches:
+            if not isinstance(batch, dict) or batch.get("profile_id") != self.runtime.identity.profile_id or batch.get("device_id") == self.runtime.identity.device_id:
+                continue
+            tag, asset_name, expected = str(batch.get("tag") or ""), str(batch.get("asset_name") or ""), str(batch.get("sha256") or "")
+            if not tag or not asset_name or len(expected) != 64:
+                continue
+            with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
+                path = Path(temporary) / asset_name
+                provider.download_release_asset(self.owner, self.repo, tag=tag, asset_name=asset_name, dest=path)
+                if self._sha256(path) != expected:
+                    raise DomainError("远端 Operation 批次哈希不一致")
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(value, dict):
+                        items.append(value)
+        return items
 
     def record_problem_update(
         self,
@@ -289,6 +353,16 @@ class SyncService:
         if not provider.acquire_lock(self.owner, self.repo, device_id):
             raise DomainError("无法获取同步锁")
         try:
+            if not isinstance(provider, LocalFolderProvider):
+                self._push_github_batch(provider, ops)
+                now = _utcnow()
+                with self.runtime.session_factory() as s:
+                    for op in ops:
+                        row = s.get(SyncOperation, op["operation_id"])
+                        if row:
+                            row.pushed_at = now
+                    s.commit()
+                return {"pushed": len(ops)}
             provider.register_device(
                 self.owner,
                 self.repo,
@@ -328,9 +402,7 @@ class SyncService:
     def pull_and_merge(self) -> dict[str, Any]:
         provider = self._require_ops_provider()
         snapshot = self._local_snapshot_before_merge()
-        remote_ops = provider.list_remote_operations(
-            self.owner, self.repo, exclude_device=self.runtime.identity.device_id
-        )
+        remote_ops = (provider.list_remote_operations(self.owner, self.repo, exclude_device=self.runtime.identity.device_id) if isinstance(provider, LocalFolderProvider) else self._github_remote_operations(provider))
         applied = 0
         auto_merged = 0
         conflict_items = 0

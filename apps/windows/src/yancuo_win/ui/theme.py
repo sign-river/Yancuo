@@ -265,6 +265,44 @@ def app_stylesheet(theme: str = "light") -> str:
         border: 1px solid {t.border};
         border-radius: 10px;
     }}
+    QSplitter#ReviewPlanWorkspace::handle {{
+        background: transparent;
+        width: 12px;
+    }}
+    QWidget#PlanDirectoryPane, QWidget#PlanQueuePane {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+        padding: 12px;
+    }}
+    QWidget#PlanContentPane {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+        padding: 12px;
+    }}
+    QTreeWidget#PlanFolderTree, QListWidget#PlanSourceList, QListWidget#PlanQueueList {{
+        background: transparent;
+        border: none;
+        outline: none;
+        padding: 4px 0;
+    }}
+    QTreeWidget#PlanFolderTree::item, QListWidget#PlanSourceList::item,
+    QListWidget#PlanQueueList::item {{
+        min-height: 34px;
+        padding: 6px 8px;
+        margin: 1px 0;
+        border-radius: 6px;
+    }}
+    QTreeWidget#PlanFolderTree::item:hover, QListWidget#PlanSourceList::item:hover,
+    QListWidget#PlanQueueList::item:hover {{
+        background: {t.list_hover};
+    }}
+    QTreeWidget#PlanFolderTree::item:selected, QListWidget#PlanSourceList::item:selected,
+    QListWidget#PlanQueueList::item:selected {{
+        background: {t.list_selected};
+        color: {t.text};
+    }}
 
     QListWidget#FilterNav, QListWidget#ProblemList, QTreeWidget#KnowledgeTree {{
         background: {t.card};

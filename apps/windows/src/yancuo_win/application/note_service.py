@@ -14,6 +14,9 @@ from yancuo_win.data.models import (
     NoteBlock,
     NoteCollection,
     NoteDocument,
+    ReviewPlan,
+    ReviewPlanItem,
+    ReviewWaitingItem,
     Tag,
     note_collection_documents,
     note_tags,
@@ -375,7 +378,9 @@ class NoteService:
             return self._load(session, note_id)
 
     def trash_note(self, note_id: str) -> NoteDocument:
-        return self.update_note(note_id, {"status": "trashed"})
+        note = self.update_note(note_id, {"status": "trashed"})
+        self._remove_review_references(note_id)
+        return note
 
     def restore_note(self, note_id: str) -> NoteDocument:
         with self.session() as session:
@@ -400,6 +405,17 @@ class NoteService:
                 raise DomainError("只能永久删除回收站中的笔记")
             session.execute(delete(note_tags).where(note_tags.c.note_document_id == note_id))
             session.delete(note)
+            session.commit()
+
+    def _remove_review_references(self, note_id: str) -> None:
+        with self.session() as session:
+            plan_ids = select(ReviewPlan.id).where(ReviewPlan.content_type == "note")
+            session.execute(delete(ReviewWaitingItem).where(
+                ReviewWaitingItem.content_type == "note", ReviewWaitingItem.source_id == note_id
+            ))
+            session.execute(delete(ReviewPlanItem).where(
+                ReviewPlanItem.plan_id.in_(plan_ids), ReviewPlanItem.source_id == note_id
+            ))
             session.commit()
 
     @staticmethod

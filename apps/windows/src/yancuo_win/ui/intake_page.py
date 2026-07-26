@@ -43,7 +43,6 @@ from yancuo_win.application.intake_service import (
     IntakeCandidate,
     ProblemIntakeService,
     RegionRecognitionProposal,
-    ResumableIntakeBatch,
 )
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.worker import AIJobWorker, RegionRecognitionWorker
@@ -51,12 +50,11 @@ from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import CardFrame, danger_button, ghost_button, primary_button
 
 
-_PAGE_HOME = 0
-_PAGE_MANUAL = 1
-_PAGE_AI_UPLOAD = 2
-_PAGE_AI_PROCESSING = 3
-_PAGE_AI_CONFIRM = 4
-_PAGE_DONE = 5
+_PAGE_MANUAL = 0
+_PAGE_AI_UPLOAD = 1
+_PAGE_AI_PROCESSING = 2
+_PAGE_AI_CONFIRM = 3
+_PAGE_DONE = 4
 
 
 class ImagePreviewLabel(QLabel):
@@ -638,6 +636,7 @@ class IntakePage(QWidget):
     problem_committed = Signal(str)
     status_message = Signal(str)
     dashboard_requested = Signal()
+    library_requested = Signal()
     open_problem_requested = Signal(str)
 
     def __init__(self, intake: ProblemIntakeService, parent=None) -> None:
@@ -651,7 +650,6 @@ class IntakePage(QWidget):
         self.ai_candidates: list[IntakeCandidate] = []
         self.candidate_index = 0
         self.last_problem_id: str | None = None
-        self.resumable_batches: list[ResumableIntakeBatch] = []
         self._restoring_manual_draft = False
 
         self.manual_draft_timer = QTimer(self)
@@ -667,7 +665,6 @@ class IntakePage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._build_home())
         self.stack.addWidget(self._build_manual())
         self.stack.addWidget(self._build_ai_upload())
         self.stack.addWidget(self._build_processing())
@@ -680,7 +677,6 @@ class IntakePage(QWidget):
         self.progress_timer.timeout.connect(self._poll_progress)
         self._restore_manual_draft()
         self._restore_existing_session()
-        self.show_home()
 
     @staticmethod
     def _scroll(widget: QWidget) -> QScrollArea:
@@ -715,62 +711,13 @@ class IntakePage(QWidget):
         layout.setSpacing(14)
         return page, layout
 
-    def _build_home(self) -> QWidget:
-        page, layout = self._page()
-        title = QLabel("录题")
-        title.setObjectName("PageTitle")
-        hint = QLabel("选择一种方式开始。后续步骤会在这里连续完成，不需要切换到其他页面。")
-        hint.setObjectName("PageHint")
-        layout.addWidget(title)
-        layout.addWidget(hint)
-
-        row = QHBoxLayout()
-        ai = CardFrame()
-        ai.add_title("AI 录题（推荐）")
-        ai.add_hint("上传图片并描述目标特征，AI 自动提取、分类和整理，最后只需核对入库。")
-        ai_button = primary_button("上传图片识别")
-        ai_button.clicked.connect(self.show_ai_upload)
-        ai.body.addWidget(ai_button)
-        row.addWidget(ai, stretch=1)
-
-        manual = CardFrame()
-        manual.add_title("手动录题")
-        manual.add_hint("作为补充方式，在完整表单中自行填写题干、答案、分类和标签。")
-        manual_button = QPushButton("开始手动录题")
-        manual_button.clicked.connect(self.show_manual)
-        manual.body.addWidget(manual_button)
-        row.addWidget(manual, stretch=1)
-        layout.addLayout(row)
-
-        self.resume_card = CardFrame()
-        self.resume_card.add_title("待处理录题批次")
-        self.resume_hint = self.resume_card.add_hint("")
-        self.resume_batch_list = QListWidget()
-        self.resume_batch_list.setMaximumHeight(130)
-        self.resume_card.body.addWidget(self.resume_batch_list)
-        self.resume_manual = QPushButton("继续手动录题")
-        self.resume_manual.clicked.connect(self.show_manual)
-        self.resume_ai = QPushButton("继续 AI 录题")
-        self.resume_ai.clicked.connect(self._resume_ai)
-        self.abandon_ai = danger_button("放弃选中批次")
-        self.abandon_ai.clicked.connect(self._abandon_ai)
-        resume_row = QHBoxLayout()
-        resume_row.addWidget(self.resume_manual)
-        resume_row.addWidget(self.resume_ai)
-        resume_row.addWidget(self.abandon_ai)
-        resume_row.addStretch(1)
-        self.resume_card.body.addLayout(resume_row)
-        layout.addWidget(self.resume_card)
-        layout.addStretch(1)
-        return page
-
     def _build_manual(self) -> QWidget:
         page, layout = self._page()
         layout.addLayout(
             self._header(
                 "手动录题",
                 "内容会自动保存为草稿；只有点击“确认入库”才会创建正式题目。",
-                self.show_home,
+                self.library_requested.emit,
             )
         )
         body = QWidget()
@@ -816,7 +763,7 @@ class IntakePage(QWidget):
             self._header(
                 "AI 录题 · 上传",
                 "添加图片并说明目标特征，例如“红圈处是错题”或“只提取第 3 题”。",
-                self.show_home,
+                self.library_requested.emit,
             )
         )
         upload = CardFrame()
@@ -898,8 +845,8 @@ class IntakePage(QWidget):
         layout.addLayout(
             self._header(
                 "AI 录题 · 后台处理中",
-                "可以返回录题首页，任务仍会继续；再次进入即可查看当前进度。",
-                self.show_home,
+                "可以返回题库，任务仍会继续；再次从题库进入即可查看当前进度。",
+                self.library_requested.emit,
             )
         )
         card = CardFrame()
@@ -942,7 +889,7 @@ class IntakePage(QWidget):
             self._header(
                 "AI 录题 · 确认结果",
                 "先在“阅读预览”核对公式和内容；如需调整，切换到“编辑字段”后再入库。",
-                self.show_home,
+                self.library_requested.emit,
             )
         )
         self.candidate_counter = QLabel("")
@@ -1070,8 +1017,8 @@ class IntakePage(QWidget):
         ai.clicked.connect(self._new_ai)
         manual = QPushButton("继续手动录题")
         manual.clicked.connect(self._new_manual)
-        home = QPushButton("返回录题主页")
-        home.clicked.connect(self.show_home)
+        home = QPushButton("返回题库")
+        home.clicked.connect(self.library_requested.emit)
         primary_actions.addWidget(ai)
         primary_actions.addWidget(manual)
         primary_actions.addWidget(home)
@@ -1090,58 +1037,6 @@ class IntakePage(QWidget):
         layout.addStretch(2)
         return page
 
-    def show_home(self) -> None:
-        has_manual = bool(
-            self.manual_form.title_edit.text().strip()
-            or self.manual_form.question.toPlainText().strip()
-            or self.manual_images
-        ) if hasattr(self, "manual_form") else False
-        self.resumable_batches = self.intake.list_resumable_ai_batches()
-        self.resume_batch_list.clear()
-        selected_row = 0
-        state_labels = {
-            "processing": "识别处理中",
-            "review": "等待确认",
-            "failed": "部分图片失败，可重试",
-        }
-        for index, batch in enumerate(self.resumable_batches):
-            details = []
-            if batch.pending_candidates:
-                details.append(f"{batch.pending_candidates} 道待确认")
-            if batch.failed_items:
-                details.append(f"{batch.failed_items} 张失败")
-            suffix = " · ".join(details) or state_labels.get(batch.state, batch.state)
-            item = QListWidgetItem(
-                f"{state_labels.get(batch.state, batch.state)} · {suffix}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, batch.job_id)
-            if batch.instruction:
-                item.setToolTip(batch.instruction)
-            self.resume_batch_list.addItem(item)
-            if batch.job_id == self.ai_job_id:
-                selected_row = index
-        if self.resumable_batches:
-            self.resume_batch_list.setCurrentRow(selected_row)
-        has_ai_upload = bool(self.ai_files) and not self.resumable_batches
-        has_ai = bool(self.resumable_batches or has_ai_upload)
-        self.resume_card.setVisible(has_manual or has_ai)
-        self.resume_batch_list.setVisible(bool(self.resumable_batches))
-        states = []
-        if has_manual:
-            states.append("有一份手动草稿")
-        if self.resumable_batches:
-            states.append(f"有 {len(self.resumable_batches)} 个 AI 批次需要处理")
-        elif has_ai_upload:
-            states.append("AI 上传列表尚未开始")
-        self.resume_hint.setText("；".join(states))
-        self.resume_manual.setVisible(has_manual)
-        self.resume_ai.setVisible(has_ai)
-        self.resume_ai.setText(
-            "继续选中批次" if self.resumable_batches else "继续 AI 上传"
-        )
-        self.abandon_ai.setVisible(bool(self.resumable_batches))
-        self.stack.setCurrentIndex(_PAGE_HOME)
-
     def show_manual(self) -> None:
         self.manual_form.reload_catalog()
         self.stack.setCurrentIndex(_PAGE_MANUAL)
@@ -1159,24 +1054,19 @@ class IntakePage(QWidget):
         )
         self.stack.setCurrentIndex(_PAGE_AI_UPLOAD)
 
-    def _resume_ai(self) -> None:
-        selected = self.resume_batch_list.currentItem()
-        if selected is not None:
-            selected_job_id = selected.data(Qt.ItemDataRole.UserRole)
-            if selected_job_id and selected_job_id != self.ai_job_id:
-                if self.ai_worker and self.ai_worker.isRunning():
-                    QMessageBox.information(
-                        self,
-                        "当前批次仍在处理",
-                        "请先等待当前 AI 批次完成或取消，再切换到其他批次。",
-                    )
-                    return
-                self.ai_job_id = str(selected_job_id)
+    def show_ai(self) -> None:
+        if not self.ai_job_id:
+            self.ai_job_id = self.intake.latest_resumable_ai_job()
+        if self.ai_job_id:
+            try:
                 self.ai_candidates = [
                     item
                     for item in self.intake.list_candidates(self.ai_job_id)
                     if item.status in {"pending", "conflict"}
                 ]
+            except DomainError:
+                self.ai_job_id = None
+                self.ai_candidates = []
         if self.ai_candidates:
             self._load_candidate()
             self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
@@ -1191,10 +1081,7 @@ class IntakePage(QWidget):
             self.show_ai_upload()
 
     def _abandon_ai(self) -> None:
-        selected = self.resume_batch_list.currentItem()
-        if selected is None:
-            return
-        job_id = str(selected.data(Qt.ItemDataRole.UserRole) or "")
+        job_id = self.ai_job_id or ""
         if not job_id:
             return
         if (
@@ -1230,7 +1117,7 @@ class IntakePage(QWidget):
             self.ai_candidates.clear()
             self.progress_timer.stop()
         self.status_message.emit("已放弃选中的 AI 录题批次")
-        self.show_home()
+        self.library_requested.emit()
 
     def _restore_existing_session(self) -> None:
         job_id = self.intake.latest_resumable_ai_job()

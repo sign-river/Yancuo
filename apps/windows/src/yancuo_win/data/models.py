@@ -797,6 +797,49 @@ class StudySession(Base):
     )
 
 
+class ReviewPlan(Base):
+    """Named reusable review tape for one content type."""
+
+    __tablename__ = "review_plans"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(16), nullable=False)  # problem | note
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # explicit | daily
+    plan_date: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    items: Mapped[list[ReviewPlanItem]] = relationship(
+        back_populates="plan", cascade="all, delete-orphan", order_by="ReviewPlanItem.sort_order"
+    )
+
+
+class ReviewPlanItem(Base):
+    __tablename__ = "review_plan_items"
+    __table_args__ = (UniqueConstraint("plan_id", "source_id", name="uq_review_plan_item"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("review_plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    plan: Mapped[ReviewPlan] = relationship(back_populates="items")
+
+
+class ReviewWaitingItem(Base):
+    """Global explicit-plan draft queue, split by content type."""
+
+    __tablename__ = "review_waiting_items"
+    __table_args__ = (UniqueConstraint("content_type", "source_id", name="uq_review_waiting_item"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class StudyRecord(Base):
     """Immutable per-grade detail captured from schema v16 onward."""
 

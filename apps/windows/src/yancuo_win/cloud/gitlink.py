@@ -469,7 +469,9 @@ class GitLinkProvider(CloudProvider):
             )
 
     def acquire_lock(self, owner: str, repo: str, device_id: str) -> bool:
-        return True
+        raise DomainError(
+            "GitLink Release 的 version_id 不具备条件更新语义，不能用于增量同步锁"
+        )
 
     def release_lock(self, owner: str, repo: str, device_id: str) -> None:
         return None

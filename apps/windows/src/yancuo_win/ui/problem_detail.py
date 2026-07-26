@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from yancuo_win.application.problem_chat_service import ProblemChatService
 from yancuo_win.data.models import Problem
-from yancuo_win.domain.rules import DomainError
+from yancuo_win.tasks.worker import ProblemChatWorker
 from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import CardFrame, ghost_button, primary_button
@@ -85,6 +85,7 @@ class ProblemDetailPage(QWidget):
         self.chat = chat
         self.problem_id: str | None = None
         self._image_path: Path | None = None
+        self._chat_worker: ProblemChatWorker | None = None
         self.setObjectName("PageRoot")
 
         root = QVBoxLayout(self)
@@ -124,7 +125,7 @@ class ProblemDetailPage(QWidget):
         actions.addWidget(previous)
         actions.addWidget(next_button)
         actions.addSpacing(12)
-        self.review_button = QPushButton("加入今日复习")
+        self.review_button = QPushButton("加入复习计划")
         self.review_button.clicked.connect(self._request_review)
         self.favorite_button = QPushButton("收藏")
         self.favorite_button.clicked.connect(self._request_favorite)
@@ -176,10 +177,10 @@ class ProblemDetailPage(QWidget):
         self.chat_input = QLineEdit()
         self.chat_input.setPlaceholderText("向当前题目提问")
         self.chat_input.returnPressed.connect(self._send_chat)
-        send_chat = primary_button("发送")
-        send_chat.clicked.connect(self._send_chat)
+        self.send_chat_button = primary_button("发送")
+        self.send_chat_button.clicked.connect(self._send_chat)
         prompt_row.addWidget(self.chat_input, stretch=1)
-        prompt_row.addWidget(send_chat)
+        prompt_row.addWidget(self.send_chat_button)
         self.chat_card.body.addLayout(prompt_row)
         self.chat_card.setVisible(False)
         root.addWidget(self.chat_card)
@@ -314,7 +315,7 @@ class ProblemDetailPage(QWidget):
             self._refresh_conversations()
 
     def _send_chat(self) -> None:
-        if self.chat is None:
+        if self.chat is None or self._chat_worker is not None:
             return
         conversation_id = self._conversation_id()
         if not conversation_id:
@@ -322,14 +323,40 @@ class ProblemDetailPage(QWidget):
             conversation_id = self._conversation_id()
         if not conversation_id:
             return
-        self._set_chat_history("正在生成回答…")
-        try:
-            self.chat.send_message(conversation_id, self.chat_input.text())
-        except DomainError as exc:
-            self._set_chat_history(f"发送失败：{exc}")
+        content = self.chat_input.text().strip()
+        if not content:
+            self._set_chat_history("请输入要讨论的问题。")
             return
-        self.chat_input.clear()
+        self._set_chat_busy(True)
+        self._set_chat_history("正在生成回答…（可继续浏览题目）")
+        worker = ProblemChatWorker(self.chat, conversation_id, content, self)
+        worker.finished_ok.connect(self._on_chat_completed)
+        worker.failed.connect(self._on_chat_failed)
+        worker.finished.connect(self._on_chat_worker_finished)
+        self._chat_worker = worker
+        worker.start()
+
+    def _set_chat_busy(self, busy: bool) -> None:
+        self.chat_input.setEnabled(not busy)
+        self.send_chat_button.setEnabled(not busy)
+        self.conversation_combo.setEnabled(not busy)
+        self.include_original_checkbox.setEnabled(not busy)
+
+    def _on_chat_completed(self, message: object) -> None:
+        status = getattr(message, "status", "failed")
+        if status == "complete":
+            self.chat_input.clear()
         self._load_conversation()
+
+    def _on_chat_failed(self, error: str) -> None:
+        self._set_chat_history(f"发送失败：{error}")
+
+    def _on_chat_worker_finished(self) -> None:
+        worker = self._chat_worker
+        self._chat_worker = None
+        self._set_chat_busy(False)
+        if worker is not None:
+            worker.deleteLater()
 
     def _save_conversation(self) -> None:
         if self.chat and (conversation_id := self._conversation_id()):

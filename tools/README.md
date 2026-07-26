@@ -16,7 +16,7 @@ python tools/probe_gitlink.py
 2. 环境变量 `GITLINK_TOKEN`；
 3. 系统凭据 `Yancuo / yancuo_gitlink_token`（需要安装 `keyring`）。
 
-脚本只输出脱敏状态和 HTTP 结果，不打印令牌明文。成功运行会覆盖生成 [`gitlink_compat_report.md`](gitlink_compat_report.md)；未配置令牌时返回非零退出码并写出提示。探测需要网络，建议在 API 或配置变更后手动运行。
+脚本只输出脱敏状态和 HTTP 结果，不输出令牌明文或长度。成功运行会覆盖生成 [`gitlink_compat_report.md`](gitlink_compat_report.md)；未配置令牌时返回非零退出码并写出提示。探测需要网络，建议在 API 或配置变更后手动运行。
 
 ## 与运行时云备份的边界
 

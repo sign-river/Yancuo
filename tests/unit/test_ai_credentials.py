@@ -275,3 +275,24 @@ def test_remote_disconnect_exhaustion_uses_actionable_chinese_error(
 
     with pytest.raises(DomainError, match="自动重试 2 次.*重新尝试失败项"):
         provider.list_models()
+
+
+def test_chat_disconnect_uses_chat_specific_retry_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+
+    def always_disconnect(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise http.client.RemoteDisconnected("remote closed")
+
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", always_disconnect
+    )
+    monkeypatch.setattr("yancuo_win.ai.openai_compatible.time.sleep", lambda _delay: None)
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1",
+        api_key_env="FARO_API_KEY",
+    )
+
+    with pytest.raises(DomainError, match="自动重试 2 次.*重新发送问题"):
+        provider.complete_chat(messages=[{"role": "user", "content": "测试"}], model="chat", timeout_seconds=1)

@@ -20,6 +20,11 @@
 - 完整向量时钟 CRDT
 - 用 Release 承载高频 op（Release 仍只做完整备份/迁移）
 
+> 补充说明（远端批次通道）：GitLink/GitHub 不提供可由客户端安全追加的
+> `changes/*.jsonl` 文件接口。远端增量使用本协议定义的不可变**批次**附件，
+> 一批可含多条 Operation；这不等同于“每题一个 Release”，也不改变完整快照
+> Release 的恢复职责。
+
 ---
 
 ## 2. 仓库布局（与备份共存）
@@ -39,6 +44,7 @@ locks/
 tombstones/
   {entity_id}.json         # 可选墓碑副本（删除 op 已足够时可不写）
 releases/                  # 完整 .ebpack 快照（非增量通道）
+operation-batches/         # 逻辑目录；远端实现对应不可变 Release 附件
 ```
 
 ---
@@ -124,6 +130,49 @@ releases/                  # 完整 .ebpack 快照（非增量通道）
 2. **推送**：`acquire_lock` → 将未推送 op append 到 `changes/{device_id}/ops.jsonl` → 标记已推送 → `release_lock`
 3. **拉取**：读取其他设备 `ops.jsonl`，跳过已应用 `operation_id`，按时间排序合并
 4. 默认 `conflict_policy=ask`
+
+### 6.1 GitLink/GitHub 远端批次
+
+远端提供商以不可变 Release 附件承载一个推送批次：
+
+```text
+tag: yancuo-ops-v1-{profile_id_suffix}-{device_id_suffix}-{batch_id_suffix}
+asset: operations.jsonl
+```
+
+`operations.jsonl` 是 UTF-8 JSONL，每行仍是本协议第 3 节定义的一条 Operation。
+批次 Release body 至少包含：
+
+```json
+{
+  "format": "yancuo-operation-batch",
+  "format_version": 1,
+  "batch_id": "batch_...",
+  "profile_id": "profile_...",
+  "device_id": "dev_...",
+  "asset_name": "operations.jsonl",
+  "operation_count": 12,
+  "sha256": "...",
+  "created_at": "2026-07-25T00:00:00+00:00"
+}
+```
+
+- 先完整上传并校验附件，再创建或发布批次 Release；失败批次不能进入索引。
+- `latest.json` 的资料索引可加法增加 `operation_batches`，记录批次 tag、哈希、
+  profile、设备和创建时间。未知客户端必须忽略该字段。
+- 推送期间沿用仓库写锁；锁只保护“发布批次 + 更新索引”的短事务，不能覆盖或
+  修改既有批次 Release。
+- 拉取时只读取当前资料（解析别名后的 canonical profile）的其他设备批次，按
+  批次哈希和 Operation `operation_id` 去重，并继续使用第 5 节字段级合并。
+- 不存在索引或索引损坏时不得按所有 Release 猜测并执行 Operation；客户端只报告
+  可恢复错误，用户可使用完整快照恢复。
+- 单批大小、Operation 数量、JSON 行大小和下载总量必须设置硬上限；超限批次
+  拒绝导入，不能把远端仓库当作无限制消息队列。
+
+当前实现状态：LocalFolder 已接入可变 `changes/` 通道；GitHub 已接入本节定义的
+Release 批次通道，并完成私有仓库的锁竞争、附件上传下载、发布中断恢复与两端
+字段冲突联调。GitLink 已验证 `version_id` 的旧版本写入可覆盖新版本，不具备
+可复现的原子锁语义，仍只允许完整快照。
 
 ---
 

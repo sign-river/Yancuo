@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from yancuo_win.cloud.gitlink import GitLinkProvider, _find_attachment_id
+from yancuo_win.domain.rules import DomainError
 
 
 def test_find_attachment_id_nested() -> None:
@@ -87,3 +88,10 @@ def test_update_uses_version_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(p, "_json_request", fake_json)
     p.write_sync_manifest("owner", "repo", {"tag": "data-v1-snapshot-x", "sha256": "abc"})
     assert any(m == "PUT" and path.endswith("2318.json") for m, path in calls)
+
+
+def test_incremental_lock_is_explicitly_unsupported() -> None:
+    provider = GitLinkProvider(token="unit-test-token")
+
+    with pytest.raises(DomainError, match="不能用于增量同步锁"):
+        provider.acquire_lock("owner", "repo", "device")

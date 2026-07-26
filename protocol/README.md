@@ -7,7 +7,7 @@ Windows / 安卓 / 云端共享的**唯一规范真相**。
 | `data-format-v1.md`             | 跨端字段语义 v1；当前 Windows schema_version=10、data_format_version=1 |
 | `workspace-format-v1.md`        | 阶段 D 定稿                          |
 | `ebpack-format-v1.md`           | 阶段 F 定稿；当前仅支持未加密 v1 包  |
-| `sync-protocol-v1.md`           | 阶段 J 定稿；Windows LocalFolder 已接入，远端/Android 增量后置 |
+| `sync-protocol-v1.md`           | 阶段 J 定稿；Windows LocalFolder 已接入，GitLink/GitHub 批次协议已定义、实现后置 |
 | `profile-snapshots-v1.md`       | 本地资料、不可变云快照与资料接管协议 |
 | `gmshare-format-v1.md`          | 阶段 K 定稿；Windows 分享与 origin 去重已接入 |
 | `encryption-v1.md`              | 未实现设计占位；当前 `encrypted=true` 必须拒绝 |

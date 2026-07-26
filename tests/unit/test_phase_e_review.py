@@ -91,6 +91,36 @@ def test_study_session_records_each_grade_without_reusing_change_review(services
     assert summary["completed_count"] == 1
 
 
+def test_review_queue_respects_type_and_quantity_without_rescheduling(services: AppServices) -> None:
+    calculation = services.create_problem(title="计算", status="active")
+    choice = services.create_problem(title="选择", status="active")
+    services.update_problem(calculation.id, {"problem_type": "计算题"})
+    services.update_problem(choice.id, {"problem_type": "选择题"})
+
+    queue = services.prepare_study_queue(
+        scope="active",
+        problem_types={"计算题"},
+        order="scheduled",
+        limit=1,
+    )
+
+    assert [problem.id for problem in queue] == [calculation.id]
+    assert services.get_problem(calculation.id).review_count == 0
+    assert services.get_problem(choice.id).review_count == 0
+
+
+def test_daily_review_plan_has_stable_name_and_deduplicates_items(services: AppServices) -> None:
+    problem = services.create_problem(title="当日计划", status="active")
+    first = services.add_to_daily_review_plan("problem", problem.id, "2026-07-26")
+    second = services.add_to_daily_review_plan("problem", problem.id, "2026-07-26")
+
+    plan = services.get_review_plan(first.id)
+    assert second.id == first.id
+    assert plan is not None
+    assert plan.name == "2026年7月26日 复习计划"
+    assert [item.source_id for item in plan.items] == [problem.id]
+
+
 def test_import_duplicate_tip_no_second_copy(
     services: AppServices, tmp_path: Path
 ) -> None:

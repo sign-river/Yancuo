@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import csv
 import json
+import random
 import shutil
 import stat
 import zipfile
+from email.utils import parsedate_to_datetime
+from urllib.request import Request, urlopen
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,7 +36,10 @@ from yancuo_win.data.models import (
     ProblemOrigin,
     Prompt,
     ReviewItem,
+    ReviewPlan,
+    ReviewPlanItem,
     ReviewSession,
+    ReviewWaitingItem,
     StudyRecord,
     StudySession,
     Subject,
@@ -1107,6 +1113,8 @@ class AppServices:
         self._record_sync_change(
             problem, before=before, after=after, operation=operation
         )
+        if status == "trashed":
+            self.remove_review_references("problem", [problem_id])
 
     def trash_problem(self, problem_id: str) -> None:
         self.set_problem_status(problem_id, "trashed")
@@ -1319,13 +1327,219 @@ class AppServices:
     def list_due_reviews(self) -> list[Problem]:
         return self.list_problems(ProblemFilter(status="active", due_for_review=True))
 
+    def review_plan_date(self) -> str:
+        """Use a network-confirmed UTC date when available, else local Shanghai time."""
+
+        try:
+            request = Request("https://www.cloudflare.com", method="HEAD")
+            with urlopen(request, timeout=2) as response:  # nosec B310 - fixed HTTPS endpoint
+                header = response.headers.get("Date")
+            if header:
+                return parsedate_to_datetime(header).astimezone(timezone(timedelta(hours=8))).date().isoformat()
+        except OSError:
+            pass
+        return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+
+    @staticmethod
+    def _validate_review_content_type(content_type: str) -> str:
+        if content_type not in {"problem", "note"}:
+            raise DomainError("复习内容类型必须是题目或笔记")
+        return content_type
+
+    def add_to_review_waiting_queue(self, content_type: str, source_ids: Iterable[str]) -> int:
+        content_type = self._validate_review_content_type(content_type)
+        ids = list(dict.fromkeys(source_ids))
+        with self.session() as session:
+            existing = set(session.scalars(
+                select(ReviewWaitingItem.source_id).where(
+                    ReviewWaitingItem.content_type == content_type,
+                    ReviewWaitingItem.source_id.in_(ids),
+                )
+            ).all()) if ids else set()
+            for source_id in ids:
+                if source_id not in existing:
+                    session.add(ReviewWaitingItem(
+                        id=new_id("review_waiting"), content_type=content_type, source_id=source_id
+                    ))
+            session.commit()
+        return len(ids) - len(existing)
+
+    def remove_from_review_waiting_queue(self, content_type: str, source_ids: Iterable[str]) -> int:
+        content_type = self._validate_review_content_type(content_type)
+        ids = list(dict.fromkeys(source_ids))
+        with self.session() as session:
+            result = session.execute(delete(ReviewWaitingItem).where(
+                ReviewWaitingItem.content_type == content_type,
+                ReviewWaitingItem.source_id.in_(ids),
+            ))
+            session.commit()
+            return int(result.rowcount or 0)
+
+    def clear_review_waiting_queue(self, content_type: str) -> int:
+        content_type = self._validate_review_content_type(content_type)
+        with self.session() as session:
+            result = session.execute(delete(ReviewWaitingItem).where(
+                ReviewWaitingItem.content_type == content_type
+            ))
+            session.commit()
+            return int(result.rowcount or 0)
+
+    def list_review_waiting_ids(self, content_type: str) -> list[str]:
+        content_type = self._validate_review_content_type(content_type)
+        with self.session() as session:
+            return list(session.scalars(select(ReviewWaitingItem.source_id).where(
+                ReviewWaitingItem.content_type == content_type
+            ).order_by(ReviewWaitingItem.created_at)).all())
+
+    def create_review_plan_from_waiting_queue(self, content_type: str, name: str) -> ReviewPlan:
+        content_type = self._validate_review_content_type(content_type)
+        name = name.strip()
+        if not name:
+            raise DomainError("请为复习计划命名")
+        with self.session() as session:
+            waiting = list(session.scalars(select(ReviewWaitingItem).where(
+                ReviewWaitingItem.content_type == content_type
+            ).order_by(ReviewWaitingItem.created_at)).all())
+            if not waiting:
+                raise DomainError("等待队列为空")
+            plan = ReviewPlan(id=new_id("review_plan"), name=name, content_type=content_type, kind="explicit")
+            session.add(plan)
+            session.flush()
+            for order, item in enumerate(waiting):
+                session.add(ReviewPlanItem(id=new_id("review_plan_item"), plan_id=plan.id, source_id=item.source_id, sort_order=order))
+            session.execute(delete(ReviewWaitingItem).where(ReviewWaitingItem.content_type == content_type))
+            session.commit()
+            session.refresh(plan)
+            session.expunge(plan)
+            return plan
+
+    def list_review_plans(self, content_type: str | None = None) -> list[ReviewPlan]:
+        with self.session() as session:
+            statement = select(ReviewPlan).options(selectinload(ReviewPlan.items)).order_by(ReviewPlan.updated_at.desc())
+            if content_type:
+                statement = statement.where(ReviewPlan.content_type == self._validate_review_content_type(content_type))
+            rows = list(session.scalars(statement).all())
+            session.expunge_all()
+            return rows
+
+    def get_review_plan(self, plan_id: str) -> ReviewPlan | None:
+        with self.session() as session:
+            plan = session.scalar(
+                select(ReviewPlan)
+                .where(ReviewPlan.id == plan_id)
+                .options(selectinload(ReviewPlan.items))
+            )
+            if plan is not None:
+                session.expunge(plan)
+            return plan
+
+    def add_to_daily_review_plan(self, content_type: str, source_id: str, plan_date: str) -> ReviewPlan:
+        content_type = self._validate_review_content_type(content_type)
+        with self.session() as session:
+            plan = session.scalar(select(ReviewPlan).where(
+                ReviewPlan.content_type == content_type,
+                ReviewPlan.kind == "daily",
+                ReviewPlan.plan_date == plan_date,
+            ))
+            if plan is None:
+                display_date = date.fromisoformat(plan_date)
+                plan = ReviewPlan(
+                    id=new_id("review_plan"),
+                    name=f"{display_date.year}年{display_date.month}月{display_date.day}日 复习计划",
+                    content_type=content_type, kind="daily", plan_date=plan_date,
+                )
+                session.add(plan)
+                session.flush()
+            exists = session.scalar(select(ReviewPlanItem.id).where(
+                ReviewPlanItem.plan_id == plan.id, ReviewPlanItem.source_id == source_id
+            ))
+            if not exists:
+                next_order = int(session.scalar(select(func.count(ReviewPlanItem.id)).where(
+                    ReviewPlanItem.plan_id == plan.id
+                )) or 0)
+                session.add(ReviewPlanItem(
+                    id=new_id("review_plan_item"), plan_id=plan.id,
+                    source_id=source_id, sort_order=next_order,
+                ))
+            session.commit()
+            session.refresh(plan)
+            session.expunge(plan)
+            return plan
+
+    def remove_review_references(self, content_type: str, source_ids: Iterable[str]) -> None:
+        content_type = self._validate_review_content_type(content_type)
+        ids = list(dict.fromkeys(source_ids))
+        if not ids:
+            return
+        with self.session() as session:
+            plan_ids = select(ReviewPlan.id).where(ReviewPlan.content_type == content_type)
+            session.execute(delete(ReviewWaitingItem).where(
+                ReviewWaitingItem.content_type == content_type,
+                ReviewWaitingItem.source_id.in_(ids),
+            ))
+            session.execute(delete(ReviewPlanItem).where(
+                ReviewPlanItem.plan_id.in_(plan_ids), ReviewPlanItem.source_id.in_(ids)
+            ))
+            session.commit()
+
+    def prepare_study_queue(
+        self,
+        *,
+        scope: str = "due",
+        problem_types: set[str] | None = None,
+        order: str = "scheduled",
+        limit: int | None = None,
+    ) -> list[Problem]:
+        """Build a review queue without mutating scheduling state."""
+
+        if scope == "due":
+            queue = self.list_due_reviews()
+        elif scope == "active":
+            queue = [
+                problem
+                for problem in self.list_problems(ProblemFilter(status="active"))
+                if problem.review_enabled
+            ]
+        elif scope == "unreviewed":
+            queue = [
+                problem
+                for problem in self.list_problems(ProblemFilter(status="active"))
+                if problem.review_enabled and not problem.review_count
+            ]
+        else:
+            raise DomainError("不支持的复习范围")
+
+        if problem_types:
+            queue = [
+                problem
+                for problem in queue
+                if (problem.problem_type or "未标注").strip() in problem_types
+            ]
+        if order == "random":
+            random.shuffle(queue)
+        elif order == "scheduled":
+            queue.sort(
+                key=lambda problem: (
+                    problem.next_review_at is None,
+                    problem.next_review_at,
+                    problem.created_at,
+                )
+            )
+        else:
+            raise DomainError("不支持的复习顺序")
+        if limit is not None:
+            if limit < 1:
+                raise DomainError("复习数量必须大于 0")
+            queue = queue[:limit]
+        return queue
+
     def start_study_session(
         self, *, selection: dict[str, Any] | None = None, problem_ids: list[str] | None = None
     ) -> tuple[StudySession, list[Problem]]:
-        queue = self.list_due_reviews()
         if problem_ids is not None:
-            wanted = set(problem_ids)
-            queue = [problem for problem in queue if problem.id in wanted]
+            queue = self.list_problems_by_ids(problem_ids)
+        else:
+            queue = self.list_due_reviews()
         criteria = selection or {"kind": "due_reviews", "timezone": "Asia/Shanghai"}
         criteria = {**criteria, "problem_ids": [problem.id for problem in queue]}
         study_session = StudySession(

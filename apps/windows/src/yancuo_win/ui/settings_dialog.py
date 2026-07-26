@@ -11,8 +11,6 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QLabel,
@@ -43,18 +41,16 @@ from yancuo_win.ui.widgets import CardFrame, button_row, primary_button
 from yancuo_win.ui.theme import apply_app_theme, get_theme_manager
 
 
-class SettingsDialog(QDialog):
+class ServiceSettingsPage(QWidget):
     def __init__(self, runtime: RuntimeContext, parent=None) -> None:
         super().__init__(parent)
         self.runtime = runtime
-        self.setWindowTitle("设置")
-        self.resize(680, 720)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(12)
 
-        title = QLabel("设置")
+        title = QLabel("服务与外观")
         title.setObjectName("PageTitle")
         outer.addWidget(title)
 
@@ -213,10 +209,6 @@ class SettingsDialog(QDialog):
 
         scroll.setWidget(body)
         outer.addWidget(scroll, stretch=1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
-        outer.addWidget(buttons)
 
         self._refresh_token_ui()
 

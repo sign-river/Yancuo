@@ -359,7 +359,7 @@ def test_bootstrap_restores_backup_when_migration_fails(
         ).scalar_one()
     restored.dispose()
     assert marker == "original"
-    backups = list((data_root / "backups").glob("pre-migration-v6-to-v17-*.sqlite"))
+    backups = list((data_root / "backups").glob("pre-migration-v6-to-v18-*.sqlite"))
     assert len(backups) == 1
     verify_sqlite_database(backups[0], expected_schema_version=6)
 

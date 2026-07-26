@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
+import ssl
 
 import pytest
 
@@ -11,6 +13,19 @@ from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.cloud.github import GitHubProvider
 from yancuo_win.config.settings import load_settings, default_toml_path
 from yancuo_win.domain.rules import DomainError
+
+
+class _Response:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps({"login": "sign-river"}).encode("utf-8")
 
 
 def test_factory_returns_github(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,3 +105,53 @@ def test_write_latest_uses_pointer_tag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(p, "create_release", fake_create)
     p.write_sync_manifest("o", "r", {"tag": "data-v1-snapshot-x", "sha256": "abc"})
     assert created == ["yancuo-latest"]
+
+
+def test_release_backed_lock_never_overwrites_another_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    p = GitHubProvider(token="ghp_unit_test_token")
+    lock: dict[str, Any] | None = None
+
+    def fake_request(method: str, url: str, **kwargs: Any) -> Any:
+        nonlocal lock
+        if method == "GET" and "/releases/tags/yancuo-sync-lock" in url:
+            if lock is None:
+                raise DomainError("GitHub 资源不存在（404）：not found")
+            return lock
+        if method == "POST" and url.endswith("/releases"):
+            if lock is not None:
+                raise DomainError("GitHub HTTP 422: already_exists")
+            body = kwargs["body"]
+            lock = {"id": 41, "body": body["body"]}
+            return lock
+        if method == "DELETE" and url.endswith("/releases/41"):
+            lock = None
+            return {}
+        raise AssertionError(f"unexpected {method} {url}")
+
+    monkeypatch.setattr(p, "_request_json", fake_request)
+    assert p.acquire_lock("o", "r", "dev_first") is True
+    assert p.acquire_lock("o", "r", "dev_second") is False
+    p.release_lock("o", "r", "dev_second")
+    assert lock is not None
+    p.release_lock("o", "r", "dev_first")
+    assert lock is None
+
+
+def test_github_request_retries_transient_tls_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = GitHubProvider(token="ghp_unit_test_token")
+    attempts = 0
+    delays: list[float] = []
+
+    def flaky_urlopen(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ssl.SSLEOFError("TLS closed")
+        return _Response()
+
+    monkeypatch.setattr("yancuo_win.cloud.github.urlopen", flaky_urlopen)
+    monkeypatch.setattr("yancuo_win.cloud.github.time.sleep", delays.append)
+
+    assert provider._request_json("GET", "https://api.github.com/user") == {"login": "sign-river"}
+    assert attempts == 2
+    assert delays == [0.6]

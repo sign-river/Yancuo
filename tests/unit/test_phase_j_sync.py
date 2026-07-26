@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -11,6 +14,7 @@ from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.application.sync_service import SyncService
 from yancuo_win.cloud.local_folder import LocalFolderProvider
+from yancuo_win.cloud.github import GitHubProvider
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.models import (
     Problem,
@@ -350,3 +354,85 @@ def test_remote_update_waits_for_late_create(runtime, tmp_path: Path):
         )
         assert len(rows) == 2
         assert all(row.applied_at is not None for row in rows)
+
+
+def test_github_operation_batch_push_pull_and_profile_isolation(runtime, tmp_path: Path, monkeypatch) -> None:
+    provider = GitHubProvider(token="ghp_test")
+    manifest: dict[str, Any] = {"format": "yancuo-profile-snapshots", "profiles": {}, "aliases": {}}
+    assets: dict[tuple[str, str], Path] = {}
+    locked = False
+
+    def acquire(*_args) -> bool:
+        nonlocal locked
+        if locked:
+            return False
+        locked = True
+        return True
+
+    def release(*_args) -> None:
+        nonlocal locked
+        locked = False
+
+    provider.acquire_lock = acquire  # type: ignore[method-assign]
+    provider.release_lock = release  # type: ignore[method-assign]
+    provider.read_sync_manifest = lambda *_args: json.loads(json.dumps(manifest))  # type: ignore[method-assign]
+    provider.write_sync_manifest = lambda *_args: manifest.update(_args[-1])  # type: ignore[method-assign]
+    provider.create_release = lambda *_args, **kwargs: None  # type: ignore[method-assign]
+    def upload(_owner, _repo, *, tag, file_path, asset_name):
+        target = tmp_path / f"{tag}-{asset_name}"
+        shutil.copy2(file_path, target)
+        assets[(tag, asset_name)] = target
+        return {"name": asset_name}
+    def download(_owner, _repo, *, tag, asset_name, dest):
+        shutil.copy2(assets[(tag, asset_name)], dest)
+        return dest
+    provider.upload_release_asset = upload  # type: ignore[method-assign]
+    provider.download_release_asset = download  # type: ignore[method-assign]
+
+    problem = AppServices(runtime).create_problem(title="GitHub 同步题")
+    pushed = SyncService(runtime, provider).push_operations()
+    assert pushed["pushed"] >= 1
+    assert manifest["operation_batches"]
+
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "github-second"))
+    second = bootstrap_runtime()
+    second.identity = replace(second.identity, profile_id=runtime.identity.profile_id)
+    pulled = SyncService(second, provider).pull_and_merge()
+    assert pulled["applied"] >= 1
+    assert AppServices(second).get_problem(problem.id) is not None
+
+    repeated = SyncService(second, provider).pull_and_merge()
+    assert repeated["applied"] == 0
+
+    batch = manifest["operation_batches"][0]
+    assets[(batch["tag"], batch["asset_name"])].write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(DomainError, match="哈希"):
+        SyncService(second, provider)._github_remote_operations(provider)
+
+    manifest["operation_batches"][0]["profile_id"] = "profile_other"
+    third = bootstrap_runtime()
+    third.identity = replace(third.identity, profile_id=runtime.identity.profile_id)
+    assert SyncService(third, provider)._github_remote_operations(provider) == []
+
+
+def test_github_batch_upload_failure_keeps_index_and_operations_unpushed(runtime) -> None:
+    provider = GitHubProvider(token="ghp_test")
+    manifest: dict[str, Any] = {"format": "yancuo-profile-snapshots", "profiles": {}}
+    provider.acquire_lock = lambda *_args: True  # type: ignore[method-assign]
+    provider.release_lock = lambda *_args: None  # type: ignore[method-assign]
+    provider.read_sync_manifest = lambda *_args: manifest  # type: ignore[method-assign]
+    provider.create_release = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    provider.upload_release_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(DomainError("模拟上传失败"))  # type: ignore[method-assign]
+    AppServices(runtime).create_problem(title="中断批次")
+    sync = SyncService(runtime, provider)
+    with pytest.raises(DomainError, match="上传失败"):
+        sync.push_operations()
+    assert "operation_batches" not in manifest
+    assert sync.list_unpushed()
+
+
+def test_github_batch_rejects_malformed_index(runtime) -> None:
+    provider = GitHubProvider(token="ghp_test")
+    provider.read_sync_manifest = lambda *_args: {"operation_batches": {}}  # type: ignore[method-assign]
+    with pytest.raises(DomainError, match="索引无效"):
+        SyncService(runtime, provider)._github_remote_operations(provider)

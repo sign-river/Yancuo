@@ -10,10 +10,12 @@ import json
 import logging
 import os
 import re
+import ssl
 import shutil
+import time
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -30,7 +32,10 @@ logger = logging.getLogger("yancuo.cloud.github")
 
 _SAFE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _LATEST_TAG = "yancuo-latest"
+_SYNC_LOCK_TAG = "yancuo-sync-lock"
 _API_VERSION = "2022-11-28"
+_MAX_REQUEST_ATTEMPTS = 3
+_RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 
 class GitHubProvider(CloudProvider):
@@ -103,18 +108,30 @@ class GitHubProvider(CloudProvider):
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        req = Request(url, data=data, method=method, headers=headers)
-        try:
-            with urlopen(req, timeout=300) as resp:
-                raw = resp.read()
-                logger.info("github %s %s -> %s", method, url.split("?")[0], resp.status)
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:400]
-            if exc.code == 404:
-                raise DomainError(f"GitHub 资源不存在（404）：{detail}") from exc
-            raise DomainError(f"GitHub HTTP {exc.code}: {detail}") from exc
-        except OSError as exc:
-            raise DomainError(f"GitHub 请求失败：{exc}") from exc
+        raw = b""
+        for attempt in range(1, _MAX_REQUEST_ATTEMPTS + 1):
+            req = Request(url, data=data, method=method, headers=headers)
+            try:
+                with urlopen(req, timeout=300) as resp:
+                    raw = resp.read()
+                    logger.info("github %s %s -> %s", method, url.split("?")[0], resp.status)
+                break
+            except HTTPError as exc:
+                if exc.code in _RETRYABLE_HTTP_CODES and attempt < _MAX_REQUEST_ATTEMPTS:
+                    time.sleep(0.6 * attempt)
+                    continue
+                detail = exc.read().decode("utf-8", "replace")[:400]
+                if exc.code == 404:
+                    raise DomainError(f"GitHub 资源不存在（404）：{detail}") from exc
+                raise DomainError(f"GitHub HTTP {exc.code}: {detail}") from exc
+            except (OSError, ssl.SSLError, URLError) as exc:
+                if attempt < _MAX_REQUEST_ATTEMPTS:
+                    time.sleep(0.6 * attempt)
+                    continue
+                raise DomainError(
+                    "GitHub 服务连接中断，程序已自动重试 2 次仍未恢复。"
+                    f"详情：{exc}"
+                ) from exc
         if not expect_json or not raw:
             return {}
         try:
@@ -399,10 +416,72 @@ class GitHubProvider(CloudProvider):
         )
 
     def acquire_lock(self, owner: str, repo: str, device_id: str) -> bool:
+        """Acquire a conservative Release-backed lock without overwriting it.
+
+        A Release tag is unique in a repository. Unlike ``create_release``,
+        this path deliberately never updates an existing Release body: doing
+        so would let a second device steal a lock after a stale read.
+        Manual cleanup is preferable to losing an operation-batch index.
+        """
+
+        self._check_owner_repo(owner, repo)
+        try:
+            existing = self._request_json(
+                "GET", self._repo_url(owner, repo, f"/releases/tags/{quote(_SYNC_LOCK_TAG)}")
+            )
+        except DomainError as exc:
+            if "404" not in str(exc):
+                raise
+            existing = None
+        if isinstance(existing, dict):
+            try:
+                payload = json.loads(str(existing.get("body") or "{}"))
+            except json.JSONDecodeError:
+                return False
+            return bool(payload.get("device_id") == device_id)
+        try:
+            self._request_json(
+                "POST",
+                self._repo_url(owner, repo, "/releases"),
+                body={
+                    "tag_name": _SYNC_LOCK_TAG,
+                    "name": "Yancuo sync lock",
+                    "body": json.dumps({"device_id": device_id}, ensure_ascii=False),
+                    "draft": False,
+                    "prerelease": False,
+                },
+            )
+        except DomainError as exc:
+            # A concurrent create is owned by another device. Do not retry via
+            # create_release(), which would mutate its lock body.
+            if "HTTP 422" in str(exc):
+                return False
+            raise
         return True
 
     def release_lock(self, owner: str, repo: str, device_id: str) -> None:
-        return None
+        self._check_owner_repo(owner, repo)
+        try:
+            existing = self._request_json(
+                "GET", self._repo_url(owner, repo, f"/releases/tags/{quote(_SYNC_LOCK_TAG)}")
+            )
+        except DomainError as exc:
+            if "404" in str(exc):
+                return
+            raise
+        try:
+            payload = json.loads(str(existing.get("body") or "{}"))
+        except json.JSONDecodeError:
+            return
+        if payload.get("device_id") != device_id:
+            return
+        release_id = existing.get("id")
+        if release_id is not None:
+            self._request_json(
+                "DELETE",
+                self._repo_url(owner, repo, f"/releases/{release_id}"),
+                expect_json=False,
+            )
 
     def test_connection(self) -> dict[str, Any]:
         user = self.get_current_user()

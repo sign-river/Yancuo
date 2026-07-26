@@ -73,7 +73,6 @@ def main() -> int:
         "",
         f"- 探测时间：由 `tools/probe_gitlink.py` 生成",
         f"- 令牌来源：{'已提供（已脱敏）' if token else '未找到'}",
-        f"- 令牌长度：{len(token) if token else 0}",
         "",
         "## 结果摘要",
         "",
@@ -142,14 +141,13 @@ def main() -> int:
             "1. Release 列表接口 `/api/{owner}/{repo}/releases.json` 可用（已验证公开仓库）。",
             "2. `/api/v1/user.json` 当前返回 `{status,message}`，不能可靠识别当前用户；`/api/v1/repos/.../contents/` 返回 HTML 页面而非 JSON。",
             "3. `projects.json` 即使带令牌仍像全站列表；私有库请在网页创建后填写 owner/name。",
-            "4. 研错库阶段 G：**LocalFolderProvider 作为完整可测后端**；GitLinkProvider 实现同一接口，按 capabilities 降级（附件上传默认关闭），令牌仅存系统凭据。",
-            "5. 上传顺序仍遵守：先上传完整 `.ebpack` 并校验，再更新 `latest.json`。",
+            "4. 此探测未验证 `version_id` 的条件更新或等价原子锁，不能作为 GitLink 增量同步的实现依据。",
+            "5. 研错库当前仅允许 GitLink 用于完整 `.ebpack` 快照；增量 Operation 通道继续由 LocalFolderProvider 提供。",
             "",
             "## 安全",
             "",
             "- 本报告不含令牌明文。",
             "- 若令牌曾出现在聊天记录中，建议在 GitLink 设置中轮换。",
-            "",
         ]
     )
     REPORT.write_text("\n".join(lines) + "\n", encoding="utf-8")

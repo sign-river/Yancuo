@@ -7,16 +7,20 @@ import json
 import sqlite3
 import tempfile
 import gc
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import uuid
 
 from yancuo_win.application.bootstrap import RuntimeContext
+from yancuo_win.application.search_service import SearchIndexService
+from yancuo_win.application.unified_search_service import UnifiedSearchIndexService
 from yancuo_win.cloud.base import CloudProvider
 from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.domain.identity import bind_profile, record_snapshot_head
+from yancuo_win.data.models import Base
 from yancuo_win.import_export.ebpack import EbpackService
 
 
@@ -340,6 +344,7 @@ class CloudBackupService:
             return {
                 "tag": tag,
                 "sha256": sha,
+                "snapshot_id": snapshot_id,
                 "latest": snapshot,
                 "release": release.tag,
                 "profile_id": profile_id,
@@ -419,19 +424,68 @@ class CloudBackupService:
         return self.ebpack.restore_ebpack(pack, Path(target_root))
 
     @staticmethod
-    def _snapshot_rows(connection: sqlite3.Connection, table: str) -> dict[str, tuple[Any, ...]]:
+    def _table_key_columns(connection: sqlite3.Connection, table: str) -> list[str]:
+        return [
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table})")
+            if int(row[5]) > 0
+        ]
+
+    @classmethod
+    def _snapshot_rows(
+        cls, connection: sqlite3.Connection, table: str
+    ) -> dict[str, dict[str, Any]]:
         exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone()
         if exists is None:
             return {}
-        columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
-        if "id" not in columns:
+        key_columns = cls._table_key_columns(connection, table)
+        if not key_columns:
             return {}
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(f"SELECT * FROM {table}").fetchall()
         return {
-            str(row[0]): tuple(row)
-            for row in connection.execute(f"SELECT * FROM {table}").fetchall()
+            "|".join(str(row[column]) for column in key_columns): dict(row)
+            for row in rows
         }
+
+    @staticmethod
+    def _authoritative_tables(connection: sqlite3.Connection) -> list[str]:
+        """Return persistent business tables in FK-safe metadata order."""
+
+        # Search projections and recognition cache are rebuildable. Prompts are
+        # machine-local provider defaults keyed by name, not profile content;
+        # two fresh profiles legitimately contain different IDs for the same
+        # default key and must keep their local configuration.
+        derived = {
+            "meta_kv",
+            "search_documents",
+            "unified_search_documents",
+            "ai_recognition_cache",
+            "prompts",
+        }
+        available = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        return [
+            table.name
+            for table in Base.metadata.sorted_tables
+            if table.name in available and table.name not in derived
+        ]
+
+    @classmethod
+    def _field_conflicts(
+        cls, local_row: dict[str, Any], remote_row: dict[str, Any], key_columns: list[str]
+    ) -> list[str]:
+        return sorted(
+            column
+            for column in set(local_row) | set(remote_row)
+            if column not in key_columns and local_row.get(column) != remote_row.get(column)
+        )
 
     def preview_profile_merge(self, profile_id: str) -> dict[str, Any]:
         """Compare a remote profile with this data root without mutating either."""
@@ -444,20 +498,23 @@ class CloudBackupService:
             remote_database = remote_root / "error_book.db"
             if not remote_database.is_file():
                 raise DomainError("远端资料恢复后缺少数据库")
-            tables = ("problems", "note_documents", "study_records")
             summary: dict[str, dict[str, Any]] = {}
             local = sqlite3.connect(self.runtime.paths.database)
             remote = sqlite3.connect(remote_database)
             try:
+                tables = self._authoritative_tables(local)
                 for table in tables:
                     local_rows = self._snapshot_rows(local, table)
                     remote_rows = self._snapshot_rows(remote, table)
                     shared = set(local_rows) & set(remote_rows)
-                    conflicts = sorted(
-                        row_id
+                    key_columns = self._table_key_columns(local, table)
+                    conflict_fields = {
+                        row_id: self._field_conflicts(
+                            local_rows[row_id], remote_rows[row_id], key_columns
+                        )
                         for row_id in shared
-                        if local_rows[row_id] != remote_rows[row_id]
-                    )
+                    }
+                    conflicts = sorted(row_id for row_id, fields in conflict_fields.items() if fields)
                     summary[table] = {
                         "local": len(local_rows),
                         "remote": len(remote_rows),
@@ -465,6 +522,9 @@ class CloudBackupService:
                         "identical": len(shared) - len(conflicts),
                         "conflicts": len(conflicts),
                         "conflict_ids": conflicts[:20],
+                        "conflict_fields": {
+                            row_id: conflict_fields[row_id] for row_id in conflicts[:20]
+                        },
                     }
             finally:
                 remote.close()
@@ -480,6 +540,116 @@ class CloudBackupService:
             # their Windows file handles are finalized before temp cleanup.
             gc.collect()
             return result
+
+    def merge_profile(
+        self,
+        profile_id: str,
+        *,
+        primary_profile_id: str,
+        field_choices: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Merge a selected remote profile after explicit per-field choices.
+
+        Choice keys are ``table:primary-key-value:column`` and values are
+        ``local`` or ``remote``. Omitted conflict fields intentionally keep
+        the local value, so this method can never silently prefer remote data.
+        """
+
+        local_profile_id = self.runtime.identity.profile_id
+        if profile_id == local_profile_id:
+            raise DomainError("当前资料无需与自身合并")
+        if primary_profile_id not in {local_profile_id, profile_id}:
+            raise DomainError("主资料必须是当前资料或所选云端资料")
+        choices = field_choices or {}
+
+        # The remote side is already an immutable Release. Create the matching
+        # immutable local side before any data mutation.
+        local_snapshot = self.upload_backup()
+        with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
+            remote_root = Path(temporary) / "remote"
+            self.restore_profile_to(profile_id, remote_root)
+            remote_database = remote_root / "error_book.db"
+            if not remote_database.is_file():
+                raise DomainError("远端资料恢复后缺少数据库")
+
+            local = sqlite3.connect(self.runtime.paths.database)
+            remote = sqlite3.connect(remote_database)
+            copied_assets: list[Path] = []
+            inserted_rows = 0
+            applied_remote_fields = 0
+            try:
+                tables = self._authoritative_tables(local)
+                local.execute("PRAGMA foreign_keys=OFF")
+                local.execute("BEGIN IMMEDIATE")
+                for table in tables:
+                    local_rows = self._snapshot_rows(local, table)
+                    remote_rows = self._snapshot_rows(remote, table)
+                    key_columns = self._table_key_columns(local, table)
+                    columns = [str(row[1]) for row in local.execute(f"PRAGMA table_info({table})")]
+                    quoted_columns = ", ".join(f'"{column}"' for column in columns)
+                    placeholders = ", ".join("?" for _ in columns)
+                    for row_id, remote_row in remote_rows.items():
+                        local_row = local_rows.get(row_id)
+                        if local_row is None:
+                            local.execute(
+                                f'INSERT INTO "{table}" ({quoted_columns}) VALUES ({placeholders})',
+                                [remote_row.get(column) for column in columns],
+                            )
+                            inserted_rows += 1
+                            continue
+                        for column in self._field_conflicts(local_row, remote_row, key_columns):
+                            choice_key = f"{table}:{row_id}:{column}"
+                            if choices.get(choice_key) != "remote":
+                                continue
+                            where = " AND ".join(f'"{key}"=?' for key in key_columns)
+                            local.execute(
+                                f'UPDATE "{table}" SET "{column}"=? WHERE {where}',
+                                [remote_row.get(column)] + [local_row[key] for key in key_columns],
+                            )
+                            applied_remote_fields += 1
+
+                remote_objects = remote_root / "assets" / "objects"
+                local_objects = self.runtime.paths.asset_dir / "objects"
+                if remote_objects.is_dir():
+                    for source in remote_objects.rglob("*"):
+                        if not source.is_file():
+                            continue
+                        relative = source.relative_to(remote_objects)
+                        target = local_objects / relative
+                        if target.exists():
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, target)
+                        copied_assets.append(target)
+
+                violations = local.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    raise DomainError("资料合并会破坏关联关系，已取消")
+                local.commit()
+            except Exception:
+                local.rollback()
+                for path in copied_assets:
+                    path.unlink(missing_ok=True)
+                raise
+            finally:
+                local.close()
+                remote.close()
+
+        source_profile_id = profile_id if primary_profile_id == local_profile_id else local_profile_id
+        self.record_profile_alias(source_profile_id, primary_profile_id)
+        if primary_profile_id != self.runtime.identity.profile_id:
+            self.bind_local_profile(primary_profile_id)
+        # The SQLite projections are deliberately excluded from the merge.
+        # Rebuild them immediately so the running UI observes merged content.
+        SearchIndexService(self.runtime).rebuild()
+        UnifiedSearchIndexService(self.runtime).rebuild_notes()
+        return {
+            "local_snapshot_id": local_snapshot["snapshot_id"],
+            "primary_profile_id": primary_profile_id,
+            "inserted_rows": inserted_rows,
+            "remote_fields_applied": applied_remote_fields,
+            "write_performed": True,
+        }
 
     def restore_latest_to(self, target_root: Path) -> dict[str, Any]:
         return self.restore_profile_to(self.runtime.identity.profile_id, target_root)

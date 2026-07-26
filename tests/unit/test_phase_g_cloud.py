@@ -170,6 +170,60 @@ def test_profile_merge_preview_reports_new_rows_and_conflicts(runtime, tmp_path:
     assert conflict_preview["tables"]["problems"]["conflicts"] == 1
 
 
+def test_explicit_profile_merge_keeps_local_by_default_and_records_alias(
+    runtime, tmp_path: Path, monkeypatch
+) -> None:
+    services = AppServices(runtime)
+    shared = services.create_problem(title="remote title", question_markdown="remote question")
+    remote_only = services.create_problem(title="remote only", question_markdown="remote only question")
+    cloud_root = tmp_path / "merge-cloud"
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "merge"
+    runtime.settings.cloud.enabled = True
+    first = CloudBackupService(runtime, LocalFolderProvider(cloud_root))
+    first.ensure_repository()
+    uploaded = first.upload_backup()
+
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "merge-local"))
+    second_runtime = bootstrap_runtime()
+    second_runtime.settings.cloud.repository.owner = "local"
+    second_runtime.settings.cloud.repository.name = "merge"
+    second_runtime.settings.cloud.enabled = True
+    second = CloudBackupService(second_runtime, LocalFolderProvider(cloud_root))
+    with second_runtime.session_factory() as session:
+        session.add(
+            Problem(
+                id=shared.id,
+                title="local title",
+                question_markdown="local question",
+                status="inbox",
+                revision=1,
+            )
+        )
+        session.commit()
+
+    preview = second.preview_profile_merge(uploaded["profile_id"])
+    fields = preview["tables"]["problems"]["conflict_fields"][shared.id]
+    assert "question_markdown" in fields
+    result = second.merge_profile(
+        uploaded["profile_id"],
+        primary_profile_id=second_runtime.identity.profile_id,
+        field_choices={f"problems:{shared.id}:question_markdown": "remote"},
+    )
+    assert result["write_performed"] is True
+    assert result["inserted_rows"] >= 1
+    assert result["remote_fields_applied"] == 1
+    with second_runtime.session_factory() as session:
+        merged = session.get(Problem, shared.id)
+        assert merged is not None
+        assert merged.title == "local title"
+        assert merged.question_markdown == "remote question"
+        assert session.get(Problem, remote_only.id) is not None
+
+    latest = second.provider.read_sync_manifest("local", "merge")
+    assert latest["aliases"][uploaded["profile_id"]] == second_runtime.identity.profile_id
+
+
 def test_failed_upload_does_not_update_latest(runtime, tmp_path: Path) -> None:
     services = AppServices(runtime)
     services.create_problem(title="中断上传")

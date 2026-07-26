@@ -396,6 +396,16 @@ def _migrate_to_v17(engine: Engine) -> None:
     logger.info("migrated database to schema_version=17")
 
 
+def _migrate_to_v18(engine: Engine) -> None:
+    """Add named review plans and the explicit waiting queue."""
+
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 18)
+        session.commit()
+    logger.info("migrated database to schema_version=18")
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -457,6 +467,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     15: _migrate_to_v15,
     16: _migrate_to_v16,
     17: _migrate_to_v17,
+    18: _migrate_to_v18,
 }
 
 
@@ -536,6 +547,8 @@ def verify_core_tables(engine: Engine) -> list[str]:
         required.update({"study_sessions", "study_records"})
     if get_schema_version(engine) >= 17:
         required.update({"problem_conversations", "problem_messages"})
+    if get_schema_version(engine) >= 18:
+        required.update({"review_plans", "review_plan_items", "review_waiting_items"})
     with engine.connect() as conn:
         rows = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table'")

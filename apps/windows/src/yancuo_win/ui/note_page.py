@@ -601,6 +601,7 @@ class NotePage(QWidget):
 
     status_message = Signal(str)
     notes_changed = Signal()
+    add_to_review_requested = Signal(str)
 
     def __init__(self, notes: NoteService, parent=None) -> None:
         super().__init__(parent)
@@ -722,8 +723,11 @@ class NotePage(QWidget):
         self.edit_button.clicked.connect(lambda: self._set_mode("edit"))
         self.collections_button = ghost_button("加入合集")
         self.collections_button.clicked.connect(self._edit_note_collections)
+        self.review_button = ghost_button("加入复习计划")
+        self.review_button.clicked.connect(self._request_review)
         header.addWidget(self.original_button)
         header.addWidget(self.collections_button)
+        header.addWidget(self.review_button)
         header.addWidget(self.read_button)
         header.addWidget(self.edit_button)
         layout.addLayout(header)
@@ -733,6 +737,10 @@ class NotePage(QWidget):
         self.mode_stack.addWidget(self._build_reader())
         layout.addWidget(self.mode_stack, stretch=1)
         return page
+
+    def _request_review(self) -> None:
+        if self._note is not None:
+            self.add_to_review_requested.emit(self._note.id)
 
     def _build_editor(self) -> QWidget:
         editor = QWidget()

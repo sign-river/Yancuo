@@ -94,15 +94,27 @@ def _nav_modes(window: MainWindow) -> list[str]:
     ]
 
 
-def test_account_page_exposes_local_identity_without_login(window: MainWindow) -> None:
-    items = window.main_nav.findItems("账户", Qt.MatchFlag.MatchExactly)
+def test_settings_page_consolidates_account_services_and_data(window: MainWindow) -> None:
+    labels = [window.main_nav.item(row).text() for row in range(window.main_nav.count())]
+    assert labels == ["工作台", "题库", "笔记", "复习", "设置"]
+
+    items = window.main_nav.findItems("设置", Qt.MatchFlag.MatchExactly)
     assert len(items) == 1
 
     window.main_nav.setCurrentItem(items[0])
+    assert [
+        window.settings_tabs.tabText(index)
+        for index in range(window.settings_tabs.count())
+    ] == ["账户", "服务与外观", "数据与同步"]
+
+    window.settings_tabs.setCurrentIndex(0)
 
     assert "离线模式" in window.account_identity_summary.text()
     assert window.runtime.identity.user_id in window.account_identity_summary.text()
     assert "AI 凭据" in window.account_connection_summary.text()
+
+    window._open_settings()
+    assert window.settings_tabs.currentIndex() == 1
 
 
 def _select_mode(window: MainWindow, mode: str) -> None:

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStatusBar,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -62,7 +63,7 @@ from yancuo_win.ui.problem_detail import ProblemDetailPage
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
-from yancuo_win.ui.settings_dialog import SettingsDialog
+from yancuo_win.ui.settings_dialog import ServiceSettingsPage
 from yancuo_win.ui.widgets import (
     CardFrame,
     button_row,
@@ -76,10 +77,8 @@ _PAGE_INTAKE = 1
 _PAGE_LIBRARY = 2
 _PAGE_REVIEW = 3
 _PAGE_NOTES = 4
-_PAGE_DATA = 5
-_PAGE_SETTINGS = 6
-_PAGE_ACCOUNT = 7
-_PAGE_PROBLEM_DETAIL = 8
+_PAGE_SETTINGS = 5
+_PAGE_PROBLEM_DETAIL = 6
 
 _STATUS_LABELS = {
     "inbox": "收件箱",
@@ -165,6 +164,7 @@ class MainWindow(QMainWindow):
             lambda message: self.statusBar().showMessage(message)
         )
         self.intake_page.dashboard_requested.connect(self._show_dashboard)
+        self.intake_page.library_requested.connect(self._show_library)
         self.intake_page.open_problem_requested.connect(self._open_problem_from_intake)
         self.stack.addWidget(self.intake_page)
         self.stack.addWidget(self._build_library_page())
@@ -174,10 +174,9 @@ class MainWindow(QMainWindow):
             lambda message: self.statusBar().showMessage(message)
         )
         self.note_page.notes_changed.connect(self._refresh_focus_pages)
+        self.note_page.add_to_review_requested.connect(self._add_note_to_daily_review)
         self.stack.addWidget(self.note_page)
-        self.stack.addWidget(self._build_data_page())
         self.stack.addWidget(self._build_settings_page())
-        self.stack.addWidget(self._build_account_page())
         self.problem_detail_page = ProblemDetailPage(self.problem_chat)
         self.problem_detail_page.back_requested.connect(self._close_problem_detail)
         self.problem_detail_page.edit_requested.connect(self._edit_problem_from_detail)
@@ -226,13 +225,10 @@ class MainWindow(QMainWindow):
         self.main_nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for label, page in (
             ("工作台", _PAGE_DASHBOARD),
-            ("录题", _PAGE_INTAKE),
             ("题库", _PAGE_LIBRARY),
-            ("复习", _PAGE_REVIEW),
             ("笔记", _PAGE_NOTES),
-            ("数据与同步", _PAGE_DATA),
+            ("复习", _PAGE_REVIEW),
             ("设置", _PAGE_SETTINGS),
-            ("账户", _PAGE_ACCOUNT),
         ):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, page)
@@ -259,13 +255,12 @@ class MainWindow(QMainWindow):
         elif page == _PAGE_LIBRARY:
             self.refresh_problems()
         elif page == _PAGE_REVIEW:
-            self.review_page.reload_queue(preserve_current=True)
+            self.review_page.show_home()
             self._refresh_focus_pages()
         elif page == _PAGE_NOTES:
             self.note_page.reload()
         elif page == _PAGE_SETTINGS:
             self._refresh_focus_pages()
-        elif page == _PAGE_ACCOUNT:
             self._refresh_account_page()
 
     def _on_main_nav_clicked(self, item: QListWidgetItem) -> None:
@@ -274,6 +269,16 @@ class MainWindow(QMainWindow):
         page = int(item.data(Qt.ItemDataRole.UserRole))
         if self.stack.currentIndex() != page:
             self._on_main_nav(self.main_nav.row(item))
+
+    def _show_navigation_page(self, page: int) -> None:
+        """Select a visible navigation item by its page value."""
+
+        for row in range(self.main_nav.count()):
+            item = self.main_nav.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == page:
+                self.main_nav.setCurrentRow(row)
+                return
+        self.stack.setCurrentIndex(page)
 
     def _build_status(self) -> None:
         self.status = QStatusBar()
@@ -314,7 +319,7 @@ class MainWindow(QMainWindow):
         pending.add_title("待继续")
         self.dashboard_pending = pending.add_hint("暂无未完成任务")
         continue_intake = QPushButton("继续录题")
-        continue_intake.clicked.connect(self._show_intake_home)
+        continue_intake.clicked.connect(self._show_library)
         changes = QPushButton("查看待确认变更")
         changes.clicked.connect(self._open_review)
         pending.body.addLayout(button_row(continue_intake, changes))
@@ -332,19 +337,20 @@ class MainWindow(QMainWindow):
         return page
 
     def _show_dashboard(self) -> None:
-        self.main_nav.setCurrentRow(_PAGE_DASHBOARD)
+        self._show_navigation_page(_PAGE_DASHBOARD)
 
-    def _show_intake_home(self) -> None:
-        self.main_nav.setCurrentRow(_PAGE_INTAKE)
-        self.intake_page.show_home()
+    def _show_library(self) -> None:
+        self._show_navigation_page(_PAGE_LIBRARY)
 
     def _show_manual_intake(self) -> None:
-        self.main_nav.setCurrentRow(_PAGE_INTAKE)
+        self._show_library()
+        self.stack.setCurrentIndex(_PAGE_INTAKE)
         self.intake_page.show_manual()
 
     def _show_ai_intake(self) -> None:
-        self.main_nav.setCurrentRow(_PAGE_INTAKE)
-        self.intake_page.show_ai_upload()
+        self._show_library()
+        self.stack.setCurrentIndex(_PAGE_INTAKE)
+        self.intake_page.show_ai()
 
     def _on_intake_committed(self, problem_id: str) -> None:
         self.refresh_nav()
@@ -357,7 +363,7 @@ class MainWindow(QMainWindow):
         if self._library_view != "browse":
             self._set_library_view("browse")
         self._nav_mode = "active"
-        self.main_nav.setCurrentRow(_PAGE_LIBRARY)
+        self._show_library()
         self.refresh_nav()
         self._refresh_problem_item(problem_id, select=True)
         for index in range(self.problem_list.count()):
@@ -541,7 +547,7 @@ class MainWindow(QMainWindow):
             ("打开详情", self._open_selected_detail, "primary"),
             ("编辑", self._edit_selected, "normal"),
             ("入正式库", self._promote_selected, "normal"),
-            ("加入复习", self._schedule_review, "normal"),
+            ("加入复习计划", self._schedule_review, "normal"),
             ("AI 补全", self._ai_recognize, "normal"),
             ("撤销 AI 修改", self._undo_ai, "normal"),
             ("移动分类", self._move_selected_category, "normal"),
@@ -624,7 +630,7 @@ class MainWindow(QMainWindow):
                 btn.setEnabled(has_selection and self._nav_mode == "trashed")
             elif label in (
                 "入正式库",
-                "加入复习",
+                "加入复习计划",
                 "AI 补全",
                 "撤销 AI 修改",
                 "移动分类",
@@ -636,13 +642,35 @@ class MainWindow(QMainWindow):
     # —— 复习 / AI / 数据 / 设置页 ——
 
     def _build_review_page(self) -> QWidget:
-        self.review_page = ReviewPage(self.services)
+        self.review_page = ReviewPage(self.services, self.notes)
         self.review_page.status_message.connect(
             lambda message: self.statusBar().showMessage(message)
         )
         self.review_page.open_problem_requested.connect(self._open_problem_detail)
         self.review_page.queue_changed.connect(self._refresh_focus_pages)
         return self.review_page
+
+    def _build_settings_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("PageRoot")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        title = QLabel("设置")
+        title.setObjectName("PageTitle")
+        hint = QLabel("账户、服务配置与数据维护集中管理。")
+        hint.setObjectName("PageHint")
+        layout.addWidget(title)
+        layout.addWidget(hint)
+
+        self.settings_tabs = QTabWidget()
+        self.settings_tabs.addTab(self._build_account_page(), "账户")
+        self.service_settings_page = ServiceSettingsPage(self.runtime)
+        self.settings_tabs.addTab(self.service_settings_page, "服务与外观")
+        self.settings_tabs.addTab(self._build_data_page(), "数据与同步")
+        layout.addWidget(self.settings_tabs, stretch=1)
+        return page
 
     def _build_data_page(self) -> QWidget:
         page = QWidget()
@@ -699,30 +727,6 @@ class MainWindow(QMainWindow):
         c4.clicked.connect(self._sync_pull)
         cloud.body.addLayout(button_row(c1, c2, c3, c4))
         lay.addWidget(cloud)
-        lay.addStretch(1)
-        return page
-
-    def _build_settings_page(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("PageRoot")
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(16)
-
-        title = QLabel("设置")
-        title.setObjectName("PageTitle")
-        lay.addWidget(title)
-
-        card = CardFrame()
-        card.add_title("应用与密钥")
-        self.settings_summary = QLabel()
-        self.settings_summary.setObjectName("MutedLabel")
-        self.settings_summary.setWordWrap(True)
-        card.body.addWidget(self.settings_summary)
-        btn = primary_button("打开设置…")
-        btn.clicked.connect(self._open_settings)
-        card.body.addLayout(button_row(btn))
-        lay.addWidget(card)
 
         path_card = CardFrame()
         path_card.add_title("数据目录")
@@ -733,9 +737,7 @@ class MainWindow(QMainWindow):
 
         search_card = CardFrame()
         search_card.add_title("本地搜索索引")
-        self.search_index_summary = QLabel(
-            self.search.check_consistency().summary
-        )
+        self.search_index_summary = QLabel(self.search.check_consistency().summary)
         self.search_index_summary.setObjectName("MutedLabel")
         self.search_index_summary.setWordWrap(True)
         search_card.body.addWidget(self.search_index_summary)
@@ -776,7 +778,7 @@ class MainWindow(QMainWindow):
         self.account_connection_summary.setWordWrap(True)
         connections.body.addWidget(self.account_connection_summary)
         open_settings = ghost_button("管理 AI 和云服务设置")
-        open_settings.clicked.connect(lambda: self.main_nav.setCurrentRow(_PAGE_SETTINGS))
+        open_settings.clicked.connect(lambda: self.settings_tabs.setCurrentIndex(1))
         connections.body.addLayout(button_row(open_settings))
         lay.addWidget(connections)
 
@@ -793,7 +795,11 @@ class MainWindow(QMainWindow):
         restore_profile.clicked.connect(self._restore_cloud_profile)
         preview_merge = ghost_button("预检资料合并…")
         preview_merge.clicked.connect(self._preview_cloud_profile_merge)
-        cloud_profiles.body.addLayout(button_row(inspect_profiles, restore_profile, preview_merge))
+        merge_profile = ghost_button("合并指定资料…")
+        merge_profile.clicked.connect(self._merge_cloud_profile)
+        cloud_profiles.body.addLayout(
+            button_row(inspect_profiles, restore_profile, preview_merge, merge_profile)
+        )
         lay.addWidget(cloud_profiles)
         lay.addStretch(1)
         self._refresh_account_page()
@@ -928,8 +934,94 @@ class MainWindow(QMainWindow):
         except DomainError as exc:
             QMessageBox.warning(self, "预检失败", str(exc))
 
+    def _merge_cloud_profile(self) -> None:
+        """Run the deliberately explicit profile merge confirmation flow."""
+
+        try:
+            self.cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+            profiles = [
+                item
+                for item in self.cloud.discover_profiles()
+                if item["profile_id"] != self.runtime.identity.profile_id
+            ]
+            if not profiles:
+                QMessageBox.information(self, "资料合并", "没有其他云端资料可合并")
+                return
+            labels = [f"{item['profile_id']} · {item.get('tag', '无快照')}" for item in profiles]
+            choice, accepted = QInputDialog.getItem(
+                self, "选择资料", "选择要合并的云端资料", labels, 0, False
+            )
+            if not accepted:
+                return
+            remote_profile_id = profiles[labels.index(choice)]["profile_id"]
+            preview = self.cloud.preview_profile_merge(remote_profile_id)
+            conflicts = [
+                (table, row_id, field)
+                for table, item in preview["tables"].items()
+                for row_id, fields in item.get("conflict_fields", {}).items()
+                for field in fields
+            ]
+            choices: dict[str, str] = {}
+            for table, row_id, field in conflicts:
+                selection, selected = QInputDialog.getItem(
+                    self,
+                    "选择冲突字段",
+                    f"{table} / {row_id} / {field}\n选择合并后保留的值：",
+                    ["保留本地值", "采用云端值"],
+                    0,
+                    False,
+                )
+                if not selected:
+                    return
+                if selection == "采用云端值":
+                    choices[f"{table}:{row_id}:{field}"] = "remote"
+
+            primary_labels = [
+                f"当前本地资料（{self.runtime.identity.profile_id}）",
+                f"云端资料（{remote_profile_id}）",
+            ]
+            primary_choice, selected = QInputDialog.getItem(
+                self, "选择主资料", "合并成功后，另一资料将写为主资料别名：", primary_labels, 0, False
+            )
+            if not selected:
+                return
+            primary_profile_id = (
+                self.runtime.identity.profile_id
+                if primary_choice == primary_labels[0]
+                else remote_profile_id
+            )
+            if (
+                QMessageBox.question(
+                    self,
+                    "确认合并资料",
+                    "将先为当前本地资料上传不可变快照，再写入已确认的合并结果。\n"
+                    "不会自动上传合并结果，也不会覆盖历史快照。继续？",
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+            result = self.cloud.merge_profile(
+                remote_profile_id,
+                primary_profile_id=primary_profile_id,
+                field_choices=choices,
+            )
+            self._refresh_account_page()
+            self._inspect_cloud_profiles()
+            QMessageBox.information(
+                self,
+                "资料合并完成",
+                f"主资料：{result['primary_profile_id']}\n"
+                f"新增记录：{result['inserted_rows']}\n"
+                f"采用云端字段：{result['remote_fields_applied']}\n"
+                "请在确认结果后手动执行下一次云备份。",
+            )
+        except DomainError as exc:
+            QMessageBox.warning(self, "资料合并失败", str(exc))
+
     def _goto_due_in_library(self) -> None:
-        self.main_nav.setCurrentRow(_PAGE_LIBRARY)
+        self._show_library()
         if self._library_view != "browse":
             self._set_library_view("browse")
         item = self._find_knowledge_item("due")
@@ -963,11 +1055,6 @@ class MainWindow(QMainWindow):
         )
         self.dashboard_review.setText(
             f"今日还有 {due} 道题需要复习。" if due else "今日复习已完成。"
-        )
-        cloud = self.runtime.settings.cloud
-        self.settings_summary.setText(
-            f"语言 {self.runtime.settings.application.language} · "
-            f"云提供商 {cloud.default_provider} · schema v{self.runtime.schema_version}"
         )
         self.data_path_label.setText(str(self.runtime.paths.root))
 
@@ -1865,10 +1952,8 @@ class MainWindow(QMainWindow):
             )
         return_labels = {
             _PAGE_DASHBOARD: "← 返回工作台",
-            _PAGE_INTAKE: "← 返回录题",
             _PAGE_LIBRARY: "← 返回题库",
             _PAGE_REVIEW: "← 返回复习",
-            _PAGE_DATA: "← 返回数据与同步",
             _PAGE_SETTINGS: "← 返回设置",
         }
         self.problem_detail_page.set_back_text(
@@ -1895,8 +1980,7 @@ class MainWindow(QMainWindow):
     def _close_problem_detail(self) -> None:
         target = self._detail_return_page
         self.stack.setCurrentIndex(target)
-        if self.main_nav.currentRow() != target:
-            self.main_nav.setCurrentRow(target)
+        self._show_navigation_page(target)
 
     def _edit_problem_from_detail(self, problem_id: str) -> None:
         self._open_editor(problem_id)
@@ -1930,13 +2014,23 @@ class MainWindow(QMainWindow):
 
     def _schedule_problem_from_detail(self, problem_id: str) -> None:
         try:
-            self.services.schedule_initial_review(problem_id)
-            self.review_page.reload_queue(preserve_current=True)
+            self.services.add_to_daily_review_plan(
+                "problem", problem_id, self.services.review_plan_date()
+            )
             self._open_problem_detail(problem_id)
             self._refresh_focus_pages()
-            self.statusBar().showMessage("已加入今日复习")
+            self.statusBar().showMessage("已加入当日题目复习计划")
         except DomainError as exc:
             QMessageBox.warning(self, "无法加入复习", str(exc))
+
+    def _add_note_to_daily_review(self, note_id: str) -> None:
+        try:
+            self.services.add_to_daily_review_plan(
+                "note", note_id, self.services.review_plan_date()
+            )
+            self.statusBar().showMessage("已加入当日笔记复习计划")
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法加入复习计划", str(exc))
 
     def _favorite_problem_from_detail(self, problem_id: str, favorite: bool) -> None:
         try:
@@ -2335,7 +2429,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "恢复失败", str(exc))
 
     def _open_settings(self) -> None:
-        SettingsDialog(self.runtime, self).exec()
+        self._show_navigation_page(_PAGE_SETTINGS)
+        self.settings_tabs.setCurrentIndex(1)
         self._refresh_focus_pages()
 
     def _rebuild_search_index(self) -> None:
@@ -2442,8 +2537,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导入失败", str(exc))
 
     def _today_review(self) -> None:
-        self.main_nav.setCurrentRow(_PAGE_REVIEW)
-        self.review_page.start_session()
+        self._show_navigation_page(_PAGE_REVIEW)
+        self.review_page.show_home()
 
     def _schedule_review(self) -> None:
         ids = self._selected_ids()
@@ -2452,9 +2547,10 @@ class MainWindow(QMainWindow):
             return
         try:
             for pid in ids:
-                self.services.schedule_initial_review(pid)
-            QMessageBox.information(self, "完成", f"已将 {len(ids)} 题加入今日复习")
-            self.review_page.reload_queue(preserve_current=True)
+                self.services.add_to_daily_review_plan(
+                    "problem", pid, self.services.review_plan_date()
+                )
+            QMessageBox.information(self, "完成", f"已将 {len(ids)} 题加入当日题目复习计划")
             for pid in ids:
                 self._refresh_problem_item(pid, update_summary=False)
             self._update_status()
