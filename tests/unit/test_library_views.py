@@ -18,7 +18,6 @@ from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
-from yancuo_win.ui.problem_editor import ProblemEditorDialog
 
 
 class _ReaderStub(QWidget):
@@ -189,7 +188,7 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
 ) -> None:
     assert window._library_view == "browse"
     assert window.library_browse_button.isChecked()
-    assert _nav_modes(window)[:2] == ["active", "due"]
+    assert _nav_modes(window)[0].startswith("subject:")
     assert any(mode.startswith("subject:") for mode in _nav_modes(window))
     assert "inbox" not in _nav_modes(window)
     assert set(_problem_titles(window)) == {
@@ -201,7 +200,9 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
 
     window._set_library_view("process")
     assert window.library_process_button.isChecked()
-    assert _nav_modes(window) == ["inbox", "archived", "trashed"]
+    assert _nav_modes(window) == [
+        "active", "due", "favorite", "recent", "inbox", "archived", "trashed"
+    ]
     assert _problem_titles(window) == ["待整理题"]
     assert window.new_subject_button.isHidden()
 
@@ -220,15 +221,15 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
     assert _problem_titles(window) == ["归档题"]
 
 
-def test_due_navigation_returns_to_browse_view(window: MainWindow) -> None:
+def test_due_navigation_returns_to_processing_center(window: MainWindow) -> None:
     window._set_library_view("process")
     _select_mode(window, "trashed")
 
     window._goto_due_in_library()
 
-    assert window._library_view == "browse"
+    assert window._library_view == "process"
     assert window._nav_mode == "due"
-    assert window.library_browse_button.isChecked()
+    assert window.library_process_button.isChecked()
 
 
 def test_knowledge_tree_aggregates_descendants_and_preserves_expansion(
@@ -277,51 +278,63 @@ def test_knowledge_tree_aggregates_descendants_and_preserves_expansion(
 
 
 def test_catalog_menu_and_editor_use_valid_full_paths(window: MainWindow) -> None:
-    child_mode = next(
-        mode
-        for mode in _nav_modes(window)
-        if mode.startswith("chapter:")
-        and window._find_knowledge_item(mode).text(0).startswith("二重积分")
-    )
+    child_mode = next(mode for mode in _nav_modes(window) if mode.startswith("chapter:"))
     _select_mode(window, child_mode)
-    actions = [action.text() for action in window._build_catalog_menu().actions()]
-    assert {
-        "新建子章节",
-        "重命名章节",
-        "移动到其他上级",
-        "章节上移",
-        "章节下移",
-        "删除章节",
-    }.issubset(actions)
-    assert [button.text() for button in window._ctx_buttons] == [
-        "打开详情",
-        "编辑",
-        "加入复习计划",
-        "更多 ▾",
+    assert [spec.action_id for spec in window.get_create_actions()] == [
+        "create_chapter", "create_tag"
     ]
-    more_actions = [action.text() for action in window._build_question_more_menu().actions()]
-    assert "移动分类" in more_actions
-    assert more_actions[-1] == "删除"
+    assert [spec.action_id for spec in window.get_manage_actions()] == [
+        "rename_node", "move_node_up", "move_node_down", "delete_node"
+    ]
 
-    problem = next(
-        problem
-        for problem in window.services.list_problems()
-        if problem.title == "二重积分题"
-    )
-    dialog = ProblemEditorDialog(window.services, problem, window)
-    assert "积分 / 二重积分" in [
-        dialog.chapter.itemText(index)
-        for index in range(dialog.chapter.count())
+
+def test_catalog_actions_follow_selected_node_type_and_position(window: MainWindow) -> None:
+    window.knowledge_tree.setCurrentItem(None)
+    window._update_catalog_action_buttons()
+    assert [spec.action_id for spec in window.get_create_actions()] == [
+        "create_subject", "create_tag"
     ]
-    dialog.close()
+    assert window.get_manage_actions() == ()
+    assert not window.catalog_menu_button.isEnabled()
+
+    subject_mode = next(mode for mode in _nav_modes(window) if mode.startswith("subject:"))
+    _select_mode(window, subject_mode)
+    assert [spec.action_id for spec in window.get_create_actions()] == [
+        "create_chapter", "create_tag"
+    ]
+    subject_actions = window.get_manage_actions()
+    assert [spec.label for spec in subject_actions] == [
+        "重命名科目", "科目上移", "科目下移", "删除科目"
+    ]
+    assert not subject_actions[1].enabled
+    assert not subject_actions[-1].enabled
+
+    chapter_mode = next(mode for mode in _nav_modes(window) if mode.startswith("chapter:"))
+    _select_mode(window, chapter_mode)
+    assert [spec.action_id for spec in window.get_create_actions()] == [
+        "create_chapter", "create_tag"
+    ]
+    assert [spec.label for spec in window.get_manage_actions()] == [
+        "重命名章节", "章节上移", "章节下移", "删除章节"
+    ]
+
+    uncategorized_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("uncategorized:")
+    )
+    _select_mode(window, uncategorized_mode)
+    window._update_catalog_action_buttons()
+    assert [spec.action_id for spec in window.get_create_actions()] == ["create_tag"]
+    assert window.get_manage_actions() == ()
+    assert not window.catalog_menu_button.isEnabled()
 
 
 def test_smart_views_and_search_scopes_are_stable(window: MainWindow) -> None:
+    window._set_library_view("process")
     assert {"favorite", "recent"}.issubset(_nav_modes(window))
 
     _select_mode(window, "favorite")
     assert _problem_titles(window) == ["二重积分题"]
-    assert window.library_breadcrumb.text() == "题库 / 我的收藏"
+    assert window.library_breadcrumb.text() == "处理中心 / 我的收藏"
 
     _select_mode(window, "recent")
     assert set(_problem_titles(window)) == {
@@ -391,7 +404,7 @@ def test_processing_search_stays_in_current_lifecycle_status(
     window._clear_library_search()
     assert window.search_edit.text() == ""
     assert _problem_titles(window) == ["归档题"]
-    assert window.library_list_hint.text() == "待处理题目 · 双击打开详情"
+    assert window.library_list_hint.text() == "处理中心题目 · 双击打开详情"
 
 
 def test_ai_search_runs_in_background_and_displays_reason(

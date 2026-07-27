@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from html import escape
 import os
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
@@ -71,6 +73,7 @@ from yancuo_win.ui.settings_dialog import ServiceSettingsPage
 from yancuo_win.ui.widgets import (
     AppHeader,
     CardFrame,
+    ConfirmDialog,
     IconButton,
     PageHeader,
     SearchInput,
@@ -96,6 +99,26 @@ _STATUS_LABELS = {
     "trashed": "回收站",
 }
 _NAV_PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
+@dataclass(frozen=True)
+class CatalogNodeContext:
+    """The selected catalog node, normalized for all catalog actions."""
+
+    node_type: str
+    subject_id: str | None = None
+    chapter_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CatalogAction:
+    action_id: str
+    label: str
+    callback: Callable[[], None]
+    enabled: bool = True
+    separator_before: bool = False
+    danger: bool = False
+    disabled_hint: str = ""
 
 
 class MainWindow(QMainWindow):
@@ -759,10 +782,10 @@ class MainWindow(QMainWindow):
         nav_actions = QHBoxLayout(nav_footer)
         nav_actions.setContentsMargins(12, 8, 12, 8)
         self.new_subject_button = QPushButton("\uff0b \u65b0\u5efa")
-        self.new_subject_button.setToolTip("\u65b0\u5efa\u79d1\u76ee\u6216\u6807\u7b7e")
+        self.new_subject_button.setToolTip("\u65b0\u5efa\u79d1\u76ee\u3001\u7ae0\u8282\u6216\u6807\u7b7e")
         self.new_subject_button.clicked.connect(self._show_catalog_create_menu)
         self.new_tag_button = QPushButton("\u7ba1\u7406 \u25be")
-        self.new_tag_button.setToolTip("\u7ba1\u7406\u5f53\u524d\u76ee\u5f55")
+        self.new_tag_button.setToolTip("\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u79d1\u76ee\u6216\u7ae0\u8282")
         self.new_tag_button.clicked.connect(self._show_catalog_menu)
         self.catalog_menu_button = self.new_tag_button
         nav_actions.addWidget(self.new_subject_button)
@@ -920,9 +943,7 @@ class MainWindow(QMainWindow):
             menu.exec(self.cursor().pos())
 
     def _show_catalog_create_menu(self) -> None:
-        menu = QMenu(self)
-        menu.addAction("\u65b0\u5efa\u79d1\u76ee", self._new_subject)
-        menu.addAction("\u65b0\u5efa\u6807\u7b7e", self._new_tag)
+        menu = self._build_catalog_action_menu(self.get_create_actions())
         menu.exec(self.new_subject_button.mapToGlobal(self.new_subject_button.rect().bottomLeft()))
 
     def _build_question_more_menu(self) -> QMenu:
@@ -1356,11 +1377,13 @@ class MainWindow(QMainWindow):
 
     def _goto_due_in_library(self) -> None:
         self._show_library()
-        if self._library_view != "browse":
-            self._set_library_view("browse")
-        item = self._find_knowledge_item("due")
-        if item is not None:
-            self.knowledge_tree.setCurrentItem(item)
+        if self._library_view != "process":
+            self._set_library_view("process")
+        for index in range(self.process_nav.count()):
+            item = self.process_nav.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == "due":
+                self.process_nav.setCurrentRow(index)
+                break
 
     def _refresh_focus_pages(self) -> None:
         due = 0
@@ -1405,22 +1428,21 @@ class MainWindow(QMainWindow):
         if self._library_view == "browse":
             self.library_nav_title.setText("知识浏览")
             self.library_nav_hint.setText("展开科目与章节，父节点包含全部下级题目")
-            self.library_view_hint.setText(
-                "按科目与知识结构浏览正式题目；待整理、归档和回收站集中在处理中心。"
-            )
+            self.library_view_hint.setText("按科目与知识结构浏览正式题目。")
             self.library_list_hint.setText("正式题目 · 双击打开详情")
             self.new_subject_button.setVisible(True)
             self.new_tag_button.setVisible(True)
             self.catalog_menu_button.setVisible(True)
             self.library_nav_stack.setCurrentIndex(0)
             self._refresh_knowledge_tree(current_mode)
+            self._update_catalog_action_buttons()
         else:
             self.library_nav_title.setText("处理中心")
-            self.library_nav_hint.setText("按生命周期处理题目")
+            self.library_nav_hint.setText("查看常用题目视图与生命周期状态")
             self.library_view_hint.setText(
-                "集中处理待整理、已归档和回收站题目，不与知识目录混排。"
+                "集中查看常用题目视图，以及待整理、已归档和回收站题目。"
             )
-            self.library_list_hint.setText("待处理题目 · 双击打开详情")
+            self.library_list_hint.setText("处理中心题目 · 双击打开详情")
             self.new_subject_button.setVisible(False)
             self.new_tag_button.setVisible(False)
             self.catalog_menu_button.setVisible(False)
@@ -1507,45 +1529,6 @@ class MainWindow(QMainWindow):
         self.knowledge_tree.blockSignals(True)
         self.knowledge_tree.clear()
 
-        all_item = QTreeWidgetItem(["全部正式题目"])
-        self._set_tree_item_data(
-            all_item,
-            mode="active",
-            path="题库 / 全部正式题目",
-        )
-        self.knowledge_tree.addTopLevelItem(all_item)
-        due_item = QTreeWidgetItem(["今日待复习"])
-        self._set_tree_item_data(
-            due_item,
-            mode="due",
-            path="题库 / 今日待复习",
-        )
-        self.knowledge_tree.addTopLevelItem(due_item)
-        favorite_count = len(
-            self.services.list_problems(
-                ProblemFilter(status="active", favorite_only=True)
-            )
-        )
-        favorite_item = QTreeWidgetItem([f"我的收藏 · {favorite_count}"])
-        self._set_tree_item_data(
-            favorite_item,
-            mode="favorite",
-            path="题库 / 我的收藏",
-        )
-        self.knowledge_tree.addTopLevelItem(favorite_item)
-        recent_count = len(
-            self.services.list_problems(
-                ProblemFilter(status="active", created_within_days=30)
-            )
-        )
-        recent_item = QTreeWidgetItem([f"最近入库 · {recent_count}"])
-        self._set_tree_item_data(
-            recent_item,
-            mode="recent",
-            path="题库 / 最近入库（30 天）",
-        )
-        self.knowledge_tree.addTopLevelItem(recent_item)
-
         for subject in self.services.list_subjects():
             subject_problems = self.services.list_problems(
                 ProblemFilter(status="active", subject_id=subject.id)
@@ -1585,16 +1568,21 @@ class MainWindow(QMainWindow):
 
         current = self._find_knowledge_item(current_mode)
         if current is None:
-            current = all_item
-            self._nav_mode = "active"
-        self.knowledge_tree.setCurrentItem(current)
-        parent = current.parent()
-        while parent is not None:
-            parent.setExpanded(True)
-            mode = str(parent.data(0, Qt.ItemDataRole.UserRole) or "")
-            if mode:
-                self._knowledge_expanded_modes.add(mode)
-            parent = parent.parent()
+            current = self.knowledge_tree.topLevelItem(0)
+            self._nav_mode = (
+                str(current.data(0, Qt.ItemDataRole.UserRole) or "active")
+                if current is not None
+                else "active"
+            )
+        if current is not None:
+            self.knowledge_tree.setCurrentItem(current)
+            parent = current.parent()
+            while parent is not None:
+                parent.setExpanded(True)
+                mode = str(parent.data(0, Qt.ItemDataRole.UserRole) or "")
+                if mode:
+                    self._knowledge_expanded_modes.add(mode)
+                parent = parent.parent()
         self.knowledge_tree.blockSignals(False)
         scrollbar = self.knowledge_tree.verticalScrollBar()
         QTimer.singleShot(
@@ -1608,6 +1596,19 @@ class MainWindow(QMainWindow):
         self.process_nav.blockSignals(True)
         self.process_nav.clear()
         for label, mode in (
+            (f"全部正式题目 · {self.services.count_problems('active')}", "active"),
+            (
+                f"今日待复习 · {len(self.services.list_problems(ProblemFilter(status='active', due_for_review=True)))}",
+                "due",
+            ),
+            (
+                f"我的收藏 · {len(self.services.list_problems(ProblemFilter(status='active', favorite_only=True)))}",
+                "favorite",
+            ),
+            (
+                f"最近入库 · {len(self.services.list_problems(ProblemFilter(status='active', created_within_days=30)))}",
+                "recent",
+            ),
             (f"待整理 · {self.services.count_problems('inbox')}", "inbox"),
             (f"已归档 · {self.services.count_problems('archived')}", "archived"),
             (f"回收站 · {self.services.count_problems('trashed')}", "trashed"),
@@ -1627,7 +1628,7 @@ class MainWindow(QMainWindow):
                 break
         else:
             self.process_nav.setCurrentRow(0)
-            self._nav_mode = "inbox"
+            self._nav_mode = "active"
         self.process_nav.blockSignals(False)
 
     def _update_library_breadcrumb(self) -> None:
@@ -1651,7 +1652,7 @@ class MainWindow(QMainWindow):
             self.search_scope_combo.setCurrentIndex(0)
             self.search_scope_combo.setEnabled(False)
             self.search_scope_combo.setToolTip(
-                "处理中心搜索固定在当前生命周期状态，避免混入其他状态"
+                "处理中心搜索固定在当前视图范围，避免混入其他题目"
             )
         else:
             self.search_scope_combo.setEnabled(True)
@@ -1726,8 +1727,19 @@ class MainWindow(QMainWindow):
         )
         allowed_problem_ids: frozenset[str] | None = None
         if self._library_view == "process":
-            statuses = (self._nav_mode,)
+            statuses = (
+                ("active",)
+                if self._nav_mode in {"active", "due", "favorite", "recent"}
+                else (self._nav_mode,)
+            )
             scope = None
+            if self._nav_mode in {"due", "favorite", "recent"}:
+                allowed_problem_ids = frozenset(
+                    problem.id
+                    for problem in self.services.list_problems(
+                        self._filter_from_nav(include_query=False)
+                    )
+                )
         elif use_all_active:
             statuses = ("active",)
             scope = None
@@ -1911,7 +1923,11 @@ class MainWindow(QMainWindow):
             and self.search_scope_combo.currentData() == "all_active"
         )
         if self._library_view == "process":
-            statuses = (self._nav_mode,)
+            statuses = (
+                ("active",)
+                if self._nav_mode in {"active", "due", "favorite", "recent"}
+                else (self._nav_mode,)
+            )
             scope = None
         elif use_all_active:
             statuses = ("active",)
@@ -1931,7 +1947,7 @@ class MainWindow(QMainWindow):
         )
         if (
             not use_all_active
-            and self._library_view == "browse"
+            and self._library_view in {"browse", "process"}
             and self._nav_mode in {"due", "favorite", "recent"}
         ):
             allowed_ids = {
@@ -1992,7 +2008,7 @@ class MainWindow(QMainWindow):
         elif self._library_view == "browse":
             self.library_list_hint.setText("正式题目 · 双击打开详情")
         else:
-            self.library_list_hint.setText("待处理题目 · 双击打开详情")
+            self.library_list_hint.setText("处理中心题目 · 双击打开详情")
 
     @staticmethod
     def _problem_item_text(problem: Problem) -> str:
@@ -2150,10 +2166,12 @@ class MainWindow(QMainWindow):
         _prev: QTreeWidgetItem | None,
     ) -> None:
         if current is None:
+            self._update_catalog_action_buttons()
             return
         self._apply_nav_mode(
             str(current.data(0, Qt.ItemDataRole.UserRole) or "active")
         )
+        self._update_catalog_action_buttons()
 
     def _on_process_nav_changed(
         self,
@@ -2937,59 +2955,140 @@ class MainWindow(QMainWindow):
         item = self.knowledge_tree.itemAt(position)
         if item is not None:
             self.knowledge_tree.setCurrentItem(item)
-        menu = self._build_catalog_menu()
+        menu = self._build_catalog_action_menu(self.get_manage_actions())
         menu.exec(self.knowledge_tree.viewport().mapToGlobal(position))
 
     def _show_catalog_menu(self) -> None:
-        menu = self._build_catalog_menu()
+        menu = self._build_catalog_action_menu(self.get_manage_actions())
         menu.exec(
             self.catalog_menu_button.mapToGlobal(
                 self.catalog_menu_button.rect().bottomLeft()
             )
         )
 
-    def _build_catalog_menu(self):
-        from PySide6.QtWidgets import QMenu
-
-        menu = QMenu(self)
-        menu.addAction("新建科目", self._new_subject)
-        mode = self._nav_mode
+    def _catalog_node_context(self) -> CatalogNodeContext:
+        """Normalize selection once so both menus use the same node type."""
+        if self._library_view != "browse":
+            return CatalogNodeContext("system")
+        item = self.knowledge_tree.currentItem()
+        if item is None:
+            return CatalogNodeContext("root")
+        mode = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
         if mode.startswith("subject:"):
-            subject_id = mode.split(":", 1)[1]
-            menu.addAction(
-                "新建一级章节",
-                lambda: self._new_chapter(subject_id, None),
-            )
-            menu.addSeparator()
-            menu.addAction("重命名科目", lambda: self._rename_subject(subject_id))
-            menu.addAction("科目上移", lambda: self._reorder_subject(subject_id, -1))
-            menu.addAction("科目下移", lambda: self._reorder_subject(subject_id, 1))
-            menu.addAction("删除科目", lambda: self._delete_subject(subject_id))
-        elif mode.startswith("uncategorized:"):
-            subject_id = mode.split(":", 1)[1]
-            menu.addAction(
-                "新建一级章节",
-                lambda: self._new_chapter(subject_id, None),
-            )
-        elif mode.startswith("chapter:"):
+            return CatalogNodeContext("subject", subject_id=mode.split(":", 1)[1])
+        if mode.startswith("chapter:"):
             _, subject_id, chapter_id = mode.split(":", 2)
-            menu.addAction(
-                "新建子章节",
-                lambda: self._new_chapter(subject_id, chapter_id),
+            return CatalogNodeContext("chapter", subject_id, chapter_id)
+        if mode.startswith("uncategorized:"):
+            return CatalogNodeContext("uncategorized")
+        return CatalogNodeContext("system")
+
+    def get_create_actions(self) -> tuple[CatalogAction, ...]:
+        """Return creation actions only; each action ID has one menu entry."""
+        context = self._catalog_node_context()
+        actions: list[CatalogAction] = []
+        if context.node_type == "root":
+            actions.append(CatalogAction("create_subject", "新建科目", self._new_subject))
+        elif context.node_type == "subject" and context.subject_id:
+            actions.append(CatalogAction(
+                "create_chapter", "新建一级章节",
+                lambda subject_id=context.subject_id: self._new_chapter(subject_id, None),
+            ))
+        elif context.node_type == "chapter" and context.subject_id and context.chapter_id:
+            actions.append(CatalogAction(
+                "create_chapter", "新建子章节",
+                lambda subject_id=context.subject_id, chapter_id=context.chapter_id: self._new_chapter(subject_id, chapter_id),
+            ))
+        actions.append(CatalogAction(
+            "create_tag", "新建标签", self._new_tag,
+            separator_before=bool(actions),
+        ))
+        return tuple(actions)
+
+    def get_manage_actions(self) -> tuple[CatalogAction, ...]:
+        """Return management actions only for a selected mutable directory node."""
+        context = self._catalog_node_context()
+        if context.node_type == "subject" and context.subject_id:
+            subject_id = context.subject_id
+            position, count = self._subject_position(subject_id)
+            deletable, delete_hint = self._subject_delete_state(subject_id)
+            return (
+                CatalogAction("rename_node", "重命名科目", lambda: self._rename_subject(subject_id)),
+                CatalogAction("move_node_up", "科目上移", lambda: self._reorder_subject(subject_id, -1), position > 0),
+                CatalogAction("move_node_down", "科目下移", lambda: self._reorder_subject(subject_id, 1), position >= 0 and position < count - 1),
+                CatalogAction("delete_node", "删除科目", lambda: self._delete_subject(subject_id), deletable, True, True, delete_hint),
             )
-            menu.addSeparator()
-            menu.addAction("重命名章节", lambda: self._rename_chapter(chapter_id))
-            menu.addAction(
-                "移动到其他上级",
-                lambda: self._move_chapter_dialog(subject_id, chapter_id),
+        if context.node_type == "chapter" and context.chapter_id:
+            chapter_id = context.chapter_id
+            position, count = self._chapter_position(chapter_id)
+            deletable, delete_hint = self._chapter_delete_state(chapter_id)
+            return (
+                CatalogAction("rename_node", "重命名章节", lambda: self._rename_chapter(chapter_id)),
+                CatalogAction("move_node_up", "章节上移", lambda: self._reorder_chapter(chapter_id, -1), position > 0),
+                CatalogAction("move_node_down", "章节下移", lambda: self._reorder_chapter(chapter_id, 1), position >= 0 and position < count - 1),
+                CatalogAction("delete_node", "删除章节", lambda: self._delete_chapter(context.subject_id or "", chapter_id), deletable, True, True, delete_hint),
             )
-            menu.addAction("章节上移", lambda: self._reorder_chapter(chapter_id, -1))
-            menu.addAction("章节下移", lambda: self._reorder_chapter(chapter_id, 1))
-            menu.addAction(
-                "删除章节",
-                lambda: self._delete_chapter(subject_id, chapter_id),
-            )
+        return ()
+
+    def _build_catalog_action_menu(self, actions: tuple[CatalogAction, ...]) -> QMenu:
+        menu = QMenu(self)
+        menu.setStyleSheet('QMenu::item[danger="true"] { color: #F54A45; }')
+        for spec in actions:
+            if spec.separator_before:
+                menu.addSeparator()
+            action = menu.addAction(spec.label, spec.callback)
+            action.setData(spec.action_id)
+            action.setEnabled(spec.enabled)
+            action.setProperty("danger", spec.danger)
+            if spec.disabled_hint:
+                action.setToolTip(spec.disabled_hint)
         return menu
+
+    def _update_catalog_action_buttons(self) -> None:
+        actions = self.get_manage_actions()
+        self.catalog_menu_button.setEnabled(bool(actions))
+        self.catalog_menu_button.setToolTip(
+            "管理当前目录" if actions else "请先选择一个科目或章节"
+        )
+
+    def _subject_position(self, subject_id: str) -> tuple[int, int]:
+        subjects = self.services.list_subjects()
+        return next((i for i, item in enumerate(subjects) if item.id == subject_id), -1), len(subjects)
+
+    def _find_chapter(self, chapter_id: str):
+        return next((
+            item for subject in self.services.list_subjects()
+            for item in self.services.list_chapters(subject.id)
+            if item.id == chapter_id
+        ), None)
+
+    def _chapter_position(self, chapter_id: str) -> tuple[int, int]:
+        chapter = self._find_chapter(chapter_id)
+        if chapter is None:
+            return -1, 0
+        siblings = [item for item in self.services.list_chapters(chapter.subject_id) if item.parent_id == chapter.parent_id]
+        return next((i for i, item in enumerate(siblings) if item.id == chapter_id), -1), len(siblings)
+
+    def _subject_delete_state(self, subject_id: str) -> tuple[bool, str]:
+        chapter_count = len(self.services.list_chapters(subject_id))
+        problem_count = len(self.services.list_problems(ProblemFilter(subject_id=subject_id)))
+        if chapter_count or problem_count:
+            return False, f"包含 {chapter_count} 个章节和 {problem_count} 道题目，当前删除规则仅允许删除空科目"
+        return True, ""
+
+    def _chapter_delete_state(self, chapter_id: str) -> tuple[bool, str]:
+        chapter = self._find_chapter(chapter_id)
+        if chapter is None:
+            return False, "章节不存在"
+        chapters = self.services.list_chapters(chapter.subject_id)
+        child_count = sum(item.parent_id == chapter_id for item in chapters)
+        problem_count = len(self.services.list_problems(ProblemFilter(chapter_id=chapter_id)))
+        if child_count or problem_count:
+            return False, f"包含 {child_count} 个子章节和 {problem_count} 道题目，当前删除规则仅允许删除空章节"
+        return True, ""
+
+    def _build_catalog_menu(self) -> QMenu:
+        return self._build_catalog_action_menu(self.get_manage_actions())
 
     def _refresh_catalog_to(self, mode: str) -> None:
         self._library_view = "browse"
@@ -3142,28 +3241,53 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法排序", str(exc))
 
     def _delete_subject(self, subject_id: str) -> None:
-        if (
-            QMessageBox.question(self, "删除科目", "确认删除这个空科目？")
-            != QMessageBox.StandardButton.Yes
+        subject = next((item for item in self.services.list_subjects() if item.id == subject_id), None)
+        if subject is None:
+            return
+        deletable, _hint = self._subject_delete_state(subject_id)
+        if not deletable:
+            QMessageBox.warning(self, "无法删除科目", "当前删除规则仅允许删除不含章节或题目的科目。")
+            return
+        chapter_count = len(self.services.list_chapters(subject_id))
+        problem_count = len(self.services.list_problems(ProblemFilter(subject_id=subject_id)))
+        if not ConfirmDialog.ask(
+            self,
+            f'删除科目“{subject.name}”？',
+            f"该科目包含：\n- {chapter_count} 个章节\n- {problem_count} 道题目\n\n"
+            "删除后不会影响任何题目。",
+            "确认删除",
         ):
             return
         try:
             self.services.delete_subject(subject_id)
             self._refresh_catalog_to("active")
         except DomainError as exc:
-            QMessageBox.warning(self, "无法删除", str(exc))
+            QMessageBox.warning(self, "无法删除科目", str(exc))
 
     def _delete_chapter(self, subject_id: str, chapter_id: str) -> None:
-        if (
-            QMessageBox.question(self, "删除章节", "确认删除这个空章节？")
-            != QMessageBox.StandardButton.Yes
+        chapter = self._find_chapter(chapter_id)
+        if chapter is None:
+            return
+        deletable, _hint = self._chapter_delete_state(chapter_id)
+        if not deletable:
+            QMessageBox.warning(self, "无法删除章节", "当前删除规则仅允许删除不含子章节或题目的章节。")
+            return
+        chapters = self.services.list_chapters(chapter.subject_id)
+        child_count = sum(item.parent_id == chapter_id for item in chapters)
+        problem_count = len(self.services.list_problems(ProblemFilter(chapter_id=chapter_id)))
+        if not ConfirmDialog.ask(
+            self,
+            f'删除章节“{chapter.name}”？',
+            f"该章节包含：\n- {child_count} 个子章节\n- {problem_count} 道题目\n\n"
+            "删除后不会影响任何题目。",
+            "确认删除",
         ):
             return
         try:
             self.services.delete_chapter(chapter_id)
             self._refresh_catalog_to(f"subject:{subject_id}")
         except DomainError as exc:
-            QMessageBox.warning(self, "无法删除", str(exc))
+            QMessageBox.warning(self, "无法删除章节", str(exc))
 
     def _move_selected_category(self) -> None:
         ids = self._selected_ids()
