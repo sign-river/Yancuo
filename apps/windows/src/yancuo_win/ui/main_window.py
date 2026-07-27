@@ -848,6 +848,7 @@ class MainWindow(QMainWindow):
         workspace_layout.setContentsMargins(0, 0, 0, 0)
         self.library_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.library_splitter.setObjectName("LibraryWorkspaceSplitter")
+        self.library_splitter.setHandleWidth(1)
         workspace_layout.addWidget(self.library_splitter)
 
         navigation = QWidget()
@@ -856,7 +857,7 @@ class MainWindow(QMainWindow):
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(0)
         nav_header = self._library_panel_header("\u77e5\u8bc6\u6d4f\u89c8", "")
-        nav_header.setFixedHeight(84)
+        nav_header.setFixedHeight(48)
         self.library_nav_title = nav_header.findChild(QLabel, "PanelTitle")
         nav_layout.addWidget(nav_header)
         self.library_nav_stack = QStackedWidget()
@@ -899,7 +900,8 @@ class MainWindow(QMainWindow):
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(0)
         list_header = self._library_panel_header("", "")
-        list_header.setFixedHeight(84)
+        list_header.setFixedHeight(48)
+        self.library_list_header = list_header
         list_header_layout = list_header.layout()
         self.library_breadcrumb = QLabel("\u9898\u5e93 / \u5168\u90e8\u6b63\u5f0f\u9898\u76ee")
         self.library_breadcrumb.setObjectName("LibraryBreadcrumb")
@@ -910,6 +912,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.library_count_label)
         self.library_list_hint = QLabel("\u6b63\u5f0f\u9898\u76ee \u00b7 \u53cc\u51fb\u6253\u5f00\u8be6\u60c5")
         self.library_list_hint.setObjectName("MutedLabel")
+        self.library_list_hint.setVisible(False)
         list_header_layout.addLayout(row)
         list_header_layout.addWidget(self.library_list_hint)
         center_layout.addWidget(list_header)
@@ -1493,6 +1496,8 @@ class MainWindow(QMainWindow):
     def refresh_nav(self) -> None:
         current_mode = self._nav_mode
         if self._library_view == "browse":
+            self.library_list_hint.setVisible(False)
+            self.library_list_header.setFixedHeight(48)
             self.library_nav_title.setText("知识浏览")
             self.library_view_hint.setText("按科目与知识结构浏览正式题目。")
             self.library_list_hint.setText("正式题目 · 双击打开详情")
@@ -1503,6 +1508,8 @@ class MainWindow(QMainWindow):
             self._refresh_knowledge_tree(current_mode)
             self._update_catalog_action_buttons()
         else:
+            self.library_list_hint.setVisible(True)
+            self.library_list_header.setFixedHeight(80)
             self.library_nav_title.setText("处理中心")
             self.library_view_hint.setText(
                 "集中查看常用题目视图，以及待整理、已归档和回收站题目。"
@@ -2047,6 +2054,10 @@ class MainWindow(QMainWindow):
 
     def _update_library_list_hint(self, result_count: int | None = None) -> None:
         query = self.search_edit.text().strip()
+        self.library_list_hint.setVisible(bool(query) or self._library_view != "browse")
+        self.library_list_header.setFixedHeight(
+            80 if query or self._library_view != "browse" else 48
+        )
         if query and result_count is not None:
             scope = self.search_scope_combo.currentText()
             if (

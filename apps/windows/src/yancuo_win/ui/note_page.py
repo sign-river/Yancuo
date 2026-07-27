@@ -651,6 +651,7 @@ class NotePage(QWidget):
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("NoteWorkspace")
         split.setChildrenCollapsible(False)
+        split.setHandleWidth(1)
 
         left = CardFrame()
         left.setObjectName("NoteLibraryPane")
@@ -684,6 +685,7 @@ class NotePage(QWidget):
         split.addWidget(left)
 
         self.empty_card = CardFrame()
+        self.empty_card.setObjectName("NoteEmptyPane")
         self.empty_card.add_title("选择一篇笔记")
         self.empty_card.add_hint("新建笔记后，可以按块写入标题、正文、公式或提示。")
         empty_new = primary_button("新建第一篇笔记")

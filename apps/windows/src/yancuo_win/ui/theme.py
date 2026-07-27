@@ -376,19 +376,28 @@ def app_stylesheet(theme: str = "light") -> str:
         font-weight: 600;
     }}
     QSplitter#ReviewPlanWorkspace::handle {{
-        background: transparent;
-        width: 12px;
+        background: {t.border};
+        width: 1px;
     }}
-    QWidget#PlanDirectoryPane, QWidget#PlanQueuePane {{
+    QSplitter#ReviewPlanBrowseWorkspace::handle {{
+        background: {t.border};
+        width: 1px;
+    }}
+    QSplitter#ReviewPlanWorkspace {{
         background: {t.card};
         border: 1px solid {t.border};
         border-radius: 8px;
+    }}
+    QWidget#PlanDirectoryPane, QWidget#PlanQueuePane {{
+        background: {t.card};
+        border: none;
+        border-radius: 0;
         padding: 12px;
     }}
     QWidget#PlanContentPane {{
         background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 8px;
+        border: none;
+        border-radius: 0;
         padding: 12px;
     }}
     QTreeWidget#PlanFolderTree, QListWidget#PlanSourceList, QListWidget#PlanQueueList {{
@@ -415,13 +424,23 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
 
     QSplitter#NoteWorkspace::handle {{
-        background: transparent;
-        width: 12px;
+        background: {t.border};
+        width: 1px;
     }}
-    QFrame#NoteLibraryPane, QStackedWidget#NoteDetailPane {{
+    QSplitter#NoteWorkspace {{
         background: {t.card};
         border: 1px solid {t.border};
         border-radius: 8px;
+    }}
+    QFrame#NoteLibraryPane, QStackedWidget#NoteDetailPane {{
+        background: {t.card};
+        border: none;
+        border-radius: 0;
+    }}
+    QFrame#NoteEmptyPane {{
+        background: {t.card};
+        border: none;
+        border-radius: 0;
     }}
     QListWidget#NoteList, QListWidget#NoteBlockList {{
         background: transparent;
