@@ -13,18 +13,21 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QMenu,
+    QScrollArea,
     QSplitter,
     QStackedWidget,
     QStatusBar,
+    QStyle,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -58,6 +61,7 @@ from yancuo_win.tasks.worker import AIJobWorker
 from yancuo_win.tasks.search_worker import AiSearchWorker
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.intake_page import IntakePage
+from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.note_page import NotePage
 from yancuo_win.ui.problem_detail import ProblemDetailPage
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
@@ -65,7 +69,12 @@ from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
 from yancuo_win.ui.settings_dialog import ServiceSettingsPage
 from yancuo_win.ui.widgets import (
+    AppHeader,
     CardFrame,
+    IconButton,
+    PageHeader,
+    SearchInput,
+    ToastMessage,
     button_row,
     danger_button,
     ghost_button,
@@ -122,11 +131,14 @@ class MainWindow(QMainWindow):
         self._ai_search_result: AiSearchResult | None = None
         self._ctx_buttons: list[QPushButton] = []
         self._detail_return_page = _PAGE_LIBRARY
+        self._sidebar_collapsed = False
 
         self.setWindowTitle("研错库")
+        self.setMinimumSize(760, 560)
         self.resize(1320, 840)
         self._build_central()
         self._build_status()
+        self.toast = ToastMessage(self)
         self.refresh_all()
         self._update_context_bar(False)
         self._refresh_focus_pages()
@@ -150,11 +162,22 @@ class MainWindow(QMainWindow):
     def _build_central(self) -> None:
         root = QWidget()
         root.setObjectName("PageRoot")
-        layout = QHBoxLayout(root)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        self.app_header = AppHeader()
+        self.sidebar_toggle = IconButton(
+            QStyle.StandardPixmap.SP_TitleBarShadeButton, "收起导航栏"
+        )
+        self.sidebar_toggle.clicked.connect(self._toggle_sidebar)
+        self.app_header.add_action(self.sidebar_toggle)
+        root_layout.addWidget(self.app_header)
+        layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        layout.addWidget(self._build_sidebar())
+        self.sidebar = self._build_sidebar()
+        layout.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_dashboard_page())
@@ -201,9 +224,41 @@ class MainWindow(QMainWindow):
         )
         self.stack.addWidget(self.problem_detail_page)
         layout.addWidget(self.stack, stretch=1)
+        root_layout.addLayout(layout, stretch=1)
 
         self.setCentralWidget(root)
         self.main_nav.setCurrentRow(0)
+        self._apply_sidebar_visibility()
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        self._apply_sidebar_visibility()
+
+    def _toggle_sidebar(self) -> None:
+        self._sidebar_collapsed = not self._sidebar_collapsed
+        self._apply_sidebar_visibility()
+
+    def _apply_sidebar_visibility(self) -> None:
+        if not hasattr(self, "sidebar"):
+            return
+        auto_hidden = self.width() < 900
+        visible = not auto_hidden and not self._sidebar_collapsed
+        self.sidebar.setVisible(visible)
+        self.sidebar_toggle.setToolTip(
+            "展开导航栏" if not visible else "收起导航栏"
+        )
+        self.sidebar_toggle.setAccessibleName(self.sidebar_toggle.toolTip())
+        self._apply_library_workspace_visibility()
+
+    def _apply_library_workspace_visibility(self) -> None:
+        if not hasattr(self, "library_property_panel"):
+            return
+        content_width = self.width() - (0 if self.sidebar.isHidden() else 200)
+        hide_property = content_width < 1120
+        hide_navigation = content_width < 860
+        self.library_property_panel.setVisible(not hide_property)
+        self.library_property_toggle.setVisible(hide_property)
+        self.library_navigation_panel.setVisible(not hide_navigation)
 
     def _build_sidebar(self) -> QFrame:
         side = QFrame()
@@ -249,6 +304,7 @@ class MainWindow(QMainWindow):
             return
         item = self.main_nav.item(row)
         page = item.data(Qt.ItemDataRole.UserRole) if item else _PAGE_LIBRARY
+        self.app_header.set_title(item.text() if item else "题库")
         self.stack.setCurrentIndex(int(page))
         if page == _PAGE_DASHBOARD:
             self._refresh_focus_pages()
@@ -284,6 +340,9 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
 
+    def _show_toast(self, message: str) -> None:
+        self.toast.show_message(message)
+
     # —— 工作台 ——
 
     def _build_dashboard_page(self) -> QWidget:
@@ -293,12 +352,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
 
-        title = QLabel("工作台")
-        title.setObjectName("PageTitle")
-        hint = QLabel("从一项明确任务开始，未完成的工作会在这里继续。")
-        hint.setObjectName("PageHint")
-        layout.addWidget(title)
-        layout.addWidget(hint)
+        layout.addWidget(PageHeader("工作台", "从一项明确任务开始，未完成的工作会在这里继续。"))
 
         self.dashboard_hero = QLabel("开始整理你的第一道错题")
         self.dashboard_hero.setObjectName("HeroBanner")
@@ -377,29 +431,24 @@ class MainWindow(QMainWindow):
 
     # —— 题库页 ——
 
-    def _build_library_page(self) -> QWidget:
+    def _build_library_page_legacy(self) -> QWidget:
         page = QWidget()
         page.setObjectName("PageRoot")
         outer = QVBoxLayout(page)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(12)
 
-        header = QHBoxLayout()
-        title = QLabel("题库")
-        title.setObjectName("PageTitle")
-        header.addWidget(title)
-        header.addStretch(1)
-
         btn_import = primary_button("AI 图片录题")
         btn_import.clicked.connect(self._show_ai_intake)
         btn_new = QPushButton("手动录题")
         btn_new.clicked.connect(self._show_manual_intake)
-        btn_more = QPushButton("更多 ▾")
+        btn_more = IconButton(QStyle.StandardPixmap.SP_TitleBarMenuButton, "更多题库操作")
         btn_more.clicked.connect(self._library_more_menu)
-        header.addWidget(btn_import)
-        header.addWidget(btn_new)
-        header.addWidget(btn_more)
-        outer.addLayout(header)
+        header = PageHeader("题库", "浏览知识目录、整理题目并进入复习计划。")
+        header.add_action(btn_new)
+        header.add_action(btn_import)
+        header.add_action(btn_more)
+        outer.addWidget(header)
 
         search_bar = QFrame()
         search_bar.setObjectName("SearchToolbar")
@@ -432,9 +481,7 @@ class MainWindow(QMainWindow):
         )
         search_row.addWidget(self.search_scope_combo)
 
-        self.search_edit = QLineEdit()
-        self.search_edit.setObjectName("SearchEdit")
-        self.search_edit.setPlaceholderText("搜索题目、答案、解析、标签、备注或来源…")
+        self.search_edit = SearchInput("搜索题目、答案、解析、标签、备注或来源")
         self.search_edit.returnPressed.connect(self._submit_library_search)
         self.search_edit.textEdited.connect(self._on_search_text_edited)
         search_row.addWidget(self.search_edit, stretch=1)
@@ -585,6 +632,259 @@ class MainWindow(QMainWindow):
         outer.addWidget(splitter, stretch=1)
         return page
 
+    # The compact library workspace supersedes the legacy card-per-column layout
+    # above. Keeping the behaviour methods below intact avoids changing data flows.
+    def _build_library_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("PageRoot")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(20, 20, 20, 16)
+        outer.setSpacing(12)
+
+        header = PageHeader("\u9898\u5e93", "\u6d4f\u89c8\u3001\u6574\u7406\u9898\u76ee\u5e76\u52a0\u5165\u590d\u4e60\u8ba1\u5212\u3002")
+        manual = QPushButton("\u624b\u52a8\u5f55\u9898")
+        manual.clicked.connect(self._show_manual_intake)
+        ai_intake = primary_button("AI \u56fe\u7247\u5f55\u9898")
+        ai_intake.clicked.connect(self._show_ai_intake)
+        imports = QPushButton("\u66f4\u591a\u5f55\u9898\u65b9\u5f0f \u25be")
+        imports.setToolTip("\u5bfc\u5165\u3001\u5bfc\u51fa\u548c\u6279\u91cf\u9898\u5e93\u64cd\u4f5c")
+        imports.clicked.connect(self._library_more_menu)
+        for button in (manual, ai_intake, imports):
+            button.setMinimumHeight(36)
+            button.setMinimumWidth(button.sizeHint().width() + 12)
+            header.add_action(button)
+        outer.addWidget(header)
+
+        search_bar = QFrame()
+        search_bar.setObjectName("SearchToolbar")
+        search_row = QHBoxLayout(search_bar)
+        search_row.setContentsMargins(8, 8, 8, 8)
+        search_row.setSpacing(8)
+        self.search_mode_group = QButtonGroup(self)
+        self.search_mode_group.setExclusive(True)
+        self.local_search_button = QPushButton("\u666e\u901a\u641c\u7d22")
+        self.ai_search_button = QPushButton("AI \u641c\u7d22")
+        self.ai_search_button.setToolTip("AI \u641c\u7d22\u4ec5\u4f1a\u53d1\u9001\u6709\u9650\u5019\u9009\u7684\u7ed3\u6784\u5316\u4fe1\u606f\u3002")
+        for button in (self.local_search_button, self.ai_search_button):
+            button.setObjectName("SearchModeButton")
+            button.setCheckable(True)
+            button.setMinimumHeight(36)
+            self.search_mode_group.addButton(button)
+            button.clicked.connect(self._on_search_mode_changed)
+            search_row.addWidget(button)
+        self.local_search_button.setChecked(True)
+        self.search_scope_combo = QComboBox()
+        self.search_scope_combo.setObjectName("SearchScopeCombo")
+        self.search_scope_combo.addItem("\u5f53\u524d\u8303\u56f4", "current")
+        self.search_scope_combo.addItem("\u5168\u90e8\u6b63\u5f0f\u9898\u76ee", "all_active")
+        self.search_scope_combo.setMinimumWidth(190)
+        self.search_scope_combo.setMinimumHeight(36)
+        self.search_scope_combo.currentIndexChanged.connect(self._on_search_scope_changed)
+        search_row.addWidget(self.search_scope_combo)
+        self.search_edit = SearchInput("\u641c\u7d22\u9898\u76ee\u3001\u7b54\u6848\u3001\u89e3\u6790\u3001\u6807\u7b7e\u3001\u5907\u6ce8\u6216\u6765\u6e90")
+        self.search_edit.setMinimumHeight(36)
+        self.search_edit.returnPressed.connect(self._submit_library_search)
+        self.search_edit.textEdited.connect(self._on_search_text_edited)
+        search_row.addWidget(self.search_edit, 1)
+        self.search_button = primary_button("\u641c\u7d22")
+        self.search_button.clicked.connect(self._submit_library_search)
+        clear_search = ghost_button("\u6e05\u7a7a")
+        clear_search.clicked.connect(self._clear_library_search)
+        for button in (self.search_button, clear_search):
+            button.setMinimumHeight(36)
+            button.setMinimumWidth(button.sizeHint().width() + 12)
+            search_row.addWidget(button)
+        outer.addWidget(search_bar)
+        self.search_privacy_hint = QLabel("\u666e\u901a\u641c\u7d22\u5b8c\u5168\u79bb\u7ebf\uff0c\u53ea\u67e5\u8be2\u672c\u5730\u7d22\u5f15\uff1bAI \u641c\u7d22\u4e0d\u4f1a\u53d1\u9001\u9898\u76ee\u6b63\u6587\u3002")
+        self.search_privacy_hint.setObjectName("MutedLabel")
+        outer.addWidget(self.search_privacy_hint)
+        # Kept as a non-visual compatibility field for the existing refresh flow.
+        self.library_view_hint = QLabel()
+
+        tabs = QHBoxLayout()
+        tabs.setSpacing(8)
+        self.library_view_group = QButtonGroup(self)
+        self.library_view_group.setExclusive(True)
+        self.library_browse_button = QPushButton("\u6d4f\u89c8\u9898\u5e93")
+        self.library_process_button = QPushButton("\u5904\u7406\u4e2d\u5fc3")
+        for button, view in ((self.library_browse_button, "browse"), (self.library_process_button, "process")):
+            button.setObjectName("LibraryViewButton")
+            button.setCheckable(True)
+            button.setMinimumHeight(36)
+            button.clicked.connect(lambda _checked=False, target=view: self._set_library_view(target))
+            self.library_view_group.addButton(button)
+            tabs.addWidget(button)
+        self.library_browse_button.setChecked(True)
+        tabs.addStretch(1)
+        self.library_property_toggle = QPushButton("\u5c5e\u6027")
+        self.library_property_toggle.setToolTip("\u663e\u793a\u9898\u76ee\u5c5e\u6027\u9762\u677f")
+        self.library_property_toggle.clicked.connect(self._show_library_property_panel)
+        self.library_property_toggle.hide()
+        tabs.addWidget(self.library_property_toggle)
+        outer.addLayout(tabs)
+
+        workspace = QFrame()
+        workspace.setObjectName("LibraryWorkspace")
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        self.library_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.library_splitter.setObjectName("LibraryWorkspaceSplitter")
+        workspace_layout.addWidget(self.library_splitter)
+
+        navigation = QWidget()
+        navigation.setObjectName("LibraryNavigationPanel")
+        nav_layout = QVBoxLayout(navigation)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(0)
+        nav_header = self._library_panel_header("\u77e5\u8bc6\u6d4f\u89c8", "\u5c55\u5f00\u79d1\u76ee\u4e0e\u7ae0\u8282\uff0c\u7236\u8282\u70b9\u5305\u542b\u5168\u90e8\u4e0b\u7ea7\u9898\u76ee")
+        self.library_nav_title = nav_header.findChild(QLabel, "PanelTitle")
+        self.library_nav_hint = nav_header.findChild(QLabel, "PanelHint")
+        nav_layout.addWidget(nav_header)
+        self.library_nav_stack = QStackedWidget()
+        self.knowledge_tree = QTreeWidget()
+        self.knowledge_tree.setObjectName("KnowledgeTree")
+        self.knowledge_tree.setHeaderHidden(True)
+        self.knowledge_tree.setIndentation(16)
+        self.knowledge_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.knowledge_tree.customContextMenuRequested.connect(self._show_catalog_context_menu)
+        self.knowledge_tree.currentItemChanged.connect(self._on_knowledge_nav_changed)
+        self.process_nav = QListWidget()
+        self.process_nav.setObjectName("FilterNav")
+        self.process_nav.currentItemChanged.connect(self._on_process_nav_changed)
+        self.library_nav_stack.addWidget(self.knowledge_tree)
+        self.library_nav_stack.addWidget(self.process_nav)
+        nav_layout.addWidget(self.library_nav_stack, 1)
+        nav_footer = QFrame()
+        nav_footer.setObjectName("LibraryPanelFooter")
+        nav_actions = QHBoxLayout(nav_footer)
+        nav_actions.setContentsMargins(12, 8, 12, 8)
+        self.new_subject_button = QPushButton("\uff0b \u65b0\u5efa")
+        self.new_subject_button.setToolTip("\u65b0\u5efa\u79d1\u76ee\u6216\u6807\u7b7e")
+        self.new_subject_button.clicked.connect(self._show_catalog_create_menu)
+        self.new_tag_button = QPushButton("\u7ba1\u7406 \u25be")
+        self.new_tag_button.setToolTip("\u7ba1\u7406\u5f53\u524d\u76ee\u5f55")
+        self.new_tag_button.clicked.connect(self._show_catalog_menu)
+        self.catalog_menu_button = self.new_tag_button
+        nav_actions.addWidget(self.new_subject_button)
+        nav_actions.addWidget(self.new_tag_button)
+        nav_actions.addStretch(1)
+        nav_layout.addWidget(nav_footer)
+        navigation.setMinimumWidth(190)
+        self.library_navigation_panel = navigation
+        self.library_splitter.addWidget(navigation)
+
+        center = QWidget()
+        center.setObjectName("LibraryListPanel")
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
+        list_header = self._library_panel_header("", "")
+        list_header_layout = list_header.layout()
+        self.library_breadcrumb = QLabel("\u9898\u5e93 / \u5168\u90e8\u6b63\u5f0f\u9898\u76ee")
+        self.library_breadcrumb.setObjectName("LibraryBreadcrumb")
+        self.library_count_label = QLabel("\u5171 0 \u9898")
+        self.library_count_label.setObjectName("MutedLabel")
+        row = QHBoxLayout()
+        row.addWidget(self.library_breadcrumb, 1)
+        row.addWidget(self.library_count_label)
+        self.library_list_hint = QLabel("\u6b63\u5f0f\u9898\u76ee \u00b7 \u53cc\u51fb\u6253\u5f00\u8be6\u60c5")
+        self.library_list_hint.setObjectName("MutedLabel")
+        list_header_layout.addLayout(row)
+        list_header_layout.addWidget(self.library_list_hint)
+        center_layout.addWidget(list_header)
+        self.problem_list = QListWidget()
+        self.problem_list.setObjectName("ProblemList")
+        self.problem_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.problem_list.itemSelectionChanged.connect(self._on_problem_selected)
+        self.problem_list.itemDoubleClicked.connect(self._open_selected_detail)
+        center_layout.addWidget(self.problem_list, 1)
+        self.context_bar = QFrame()
+        self.context_bar.setObjectName("ContextBar")
+        context_layout = QHBoxLayout(self.context_bar)
+        context_layout.setContentsMargins(12, 10, 12, 10)
+        context_layout.setSpacing(8)
+        self._ctx_buttons = []
+        for text, slot, primary in (("\u6253\u5f00\u8be6\u60c5", self._open_selected_detail, True), ("\u7f16\u8f91", self._edit_selected, False), ("\u52a0\u5165\u590d\u4e60\u8ba1\u5212", self._schedule_review, False)):
+            button = primary_button(text) if primary else QPushButton(text)
+            button.setMinimumHeight(36)
+            button.setMinimumWidth(button.sizeHint().width() + 12)
+            button.clicked.connect(slot)
+            self._ctx_buttons.append(button)
+            context_layout.addWidget(button)
+        self.context_more_button = QPushButton("\u66f4\u591a \u25be")
+        self.context_more_button.setToolTip("\u9898\u76ee\u72b6\u6001\u3001AI \u5904\u7406\u3001\u6574\u7406\u4e0e\u5220\u9664\u64cd\u4f5c")
+        self.context_more_button.setMinimumHeight(36)
+        self.context_more_button.clicked.connect(self._show_question_more_menu)
+        self._ctx_buttons.append(self.context_more_button)
+        context_layout.addWidget(self.context_more_button)
+        context_layout.addStretch(1)
+        center_layout.addWidget(self.context_bar)
+        center.setMinimumWidth(480)
+        self.library_splitter.addWidget(center)
+
+        property_panel = QWidget()
+        property_panel.setObjectName("LibraryPropertyPanel")
+        property_layout = QVBoxLayout(property_panel)
+        property_layout.setContentsMargins(0, 0, 0, 0)
+        property_layout.setSpacing(0)
+        property_header = self._library_panel_header("\u9898\u76ee\u5c5e\u6027", "")
+        property_layout.addWidget(property_header)
+        scroll = QScrollArea()
+        scroll.setObjectName("LibraryPropertyScroll")
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(16, 16, 16, 16)
+        content_layout.setSpacing(16)
+        self.detail = QLabel("\u9009\u4e2d\u4e00\u9053\u9898\u67e5\u770b\u8be6\u60c5")
+        self.detail.setObjectName("MutedLabel")
+        self.detail.setWordWrap(True)
+        self.detail.setAlignment(Qt.AlignmentFlag.AlignTop)
+        content_layout.addWidget(self.detail)
+        self.problem_preview_label = QLabel("\u539f\u9898\u9884\u89c8")
+        self.problem_preview_label.setObjectName("PropertySectionLabel")
+        self.problem_preview_label.hide()
+        content_layout.addWidget(self.problem_preview_label)
+        self.problem_preview = MathContentView()
+        self.problem_preview.setMinimumHeight(280)
+        self.problem_preview.hide()
+        content_layout.addWidget(self.problem_preview)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        property_layout.addWidget(scroll, 1)
+        property_panel.setMinimumWidth(260)
+        self.library_property_panel = property_panel
+        self.library_splitter.addWidget(property_panel)
+        self.library_splitter.setStretchFactor(0, 0)
+        self.library_splitter.setStretchFactor(1, 1)
+        self.library_splitter.setStretchFactor(2, 0)
+        self.library_splitter.setSizes([230, 640, 300])
+        outer.addWidget(workspace, 1)
+        return page
+
+    def _library_panel_header(self, title: str, hint: str) -> QFrame:
+        header = QFrame()
+        header.setObjectName("LibraryPanelHeader")
+        layout = QVBoxLayout(header)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setSpacing(2)
+        if title:
+            title_label = QLabel(title)
+            title_label.setObjectName("PanelTitle")
+            layout.addWidget(title_label)
+        if hint:
+            hint_label = QLabel(hint)
+            hint_label.setObjectName("PanelHint")
+            hint_label.setWordWrap(True)
+            layout.addWidget(hint_label)
+        return header
+
+    def _show_library_property_panel(self) -> None:
+        self.library_property_panel.show()
+        self.library_property_toggle.hide()
+        self.library_splitter.setSizes([190, 480, 300])
+
     def _set_library_view(self, view: str) -> None:
         if view not in {"browse", "process"}:
             raise ValueError(f"unknown library view: {view}")
@@ -619,25 +919,59 @@ class MainWindow(QMainWindow):
         else:
             menu.exec(self.cursor().pos())
 
+    def _show_catalog_create_menu(self) -> None:
+        menu = QMenu(self)
+        menu.addAction("\u65b0\u5efa\u79d1\u76ee", self._new_subject)
+        menu.addAction("\u65b0\u5efa\u6807\u7b7e", self._new_tag)
+        menu.exec(self.new_subject_button.mapToGlobal(self.new_subject_button.rect().bottomLeft()))
+
+    def _build_question_more_menu(self) -> QMenu:
+        menu = QMenu(self)
+        selected = bool(self._selected_ids())
+        active = selected and self._nav_mode != "trashed"
+        status_menu = menu.addSection("\u9898\u76ee\u72b6\u6001")
+        status_menu.setEnabled(False)
+        promote = menu.addAction("\u8bbe\u4e3a\u6b63\u5f0f\u9898", self._promote_selected)
+        promote.setEnabled(active)
+        restore = menu.addAction("\u6062\u590d", self._restore_selected)
+        restore.setEnabled(selected and self._nav_mode == "trashed")
+        menu.addSeparator()
+        ai_section = menu.addSection("AI \u5904\u7406")
+        ai_section.setEnabled(False)
+        ai = menu.addAction("AI \u8865\u5168", self._ai_recognize)
+        ai.setEnabled(active)
+        undo = menu.addAction("\u64a4\u9500 AI \u4fee\u6539", self._undo_ai)
+        undo.setEnabled(active)
+        menu.addSeparator()
+        organize_section = menu.addSection("\u6574\u7406")
+        organize_section.setEnabled(False)
+        move = menu.addAction("\u79fb\u52a8\u5206\u7c7b", self._move_selected_category)
+        move.setEnabled(active)
+        menu.addSeparator()
+        if self._nav_mode == "trashed":
+            purge = menu.addAction("\u6e05\u7a7a\u56de\u6536\u7ad9", self._purge_trash)
+            purge.setEnabled(True)
+        delete = menu.addAction("\u5220\u9664", self._trash_selected)
+        delete.setEnabled(active)
+        delete.setProperty("danger", True)
+        return menu
+
+    def _show_question_more_menu(self) -> None:
+        menu = self._build_question_more_menu()
+        menu.exec(self.context_more_button.mapToGlobal(self.context_more_button.rect().bottomLeft()))
+
+    def _copy_selected_problem_id(self) -> None:
+        problem_id = self._require_one()
+        if problem_id:
+            QApplication.clipboard().setText(problem_id)
+            self.status.showMessage("\u5df2\u590d\u5236\u9898\u76ee ID", 2500)
+
     def _update_context_bar(self, has_selection: bool) -> None:
         self.context_bar.setVisible(has_selection or self._nav_mode == "trashed")
         for btn in self._ctx_buttons:
-            label = btn.text()
-            if label == "清空回收站":
-                btn.setVisible(self._nav_mode == "trashed")
-                btn.setEnabled(True)
-            elif label == "恢复":
-                btn.setEnabled(has_selection and self._nav_mode == "trashed")
-            elif label in (
-                "入正式库",
-                "加入复习计划",
-                "AI 补全",
-                "撤销 AI 修改",
-                "移动分类",
-            ):
-                btn.setEnabled(has_selection and self._nav_mode != "trashed")
-            else:
-                btn.setEnabled(has_selection)
+            btn.setEnabled(has_selection)
+        if hasattr(self, "copy_problem_id_button"):
+            self.copy_problem_id_button.setEnabled(has_selection)
 
     # —— 复习 / AI / 数据 / 设置页 ——
 
@@ -657,12 +991,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        title = QLabel("设置")
-        title.setObjectName("PageTitle")
-        hint = QLabel("账户、服务配置与数据维护集中管理。")
-        hint.setObjectName("PageHint")
-        layout.addWidget(title)
-        layout.addWidget(hint)
+        layout.addWidget(
+            PageHeader("设置", "账户、服务配置与数据维护集中管理。")
+        )
 
         self.settings_tabs = QTabWidget()
         self.settings_tabs.addTab(self._build_account_page(), "账户")
@@ -679,12 +1010,14 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(16)
 
-        title = QLabel("数据")
-        title.setObjectName("PageTitle")
-        hint = QLabel("备份与迁移 · 不是每题实时同步")
-        hint.setObjectName("PageHint")
-        lay.addWidget(title)
-        lay.addWidget(hint)
+        lay.addWidget(
+            PageHeader("数据与同步", "备份、迁移和同步集中管理，不会逐题实时上传。")
+        )
+        workspace = QGridLayout()
+        workspace.setHorizontalSpacing(16)
+        workspace.setVerticalSpacing(16)
+        workspace.setColumnStretch(0, 1)
+        workspace.setColumnStretch(1, 1)
 
         pack = CardFrame()
         pack.add_title("完整备份包")
@@ -698,7 +1031,7 @@ class MainWindow(QMainWindow):
         p4 = QPushButton("恢复 zip")
         p4.clicked.connect(self._restore_backup)
         pack.body.addLayout(button_row(p1, p2, p3, p4))
-        lay.addWidget(pack)
+        workspace.addWidget(pack, 0, 0)
 
         share = CardFrame()
         share.add_title("分享与工作区")
@@ -712,7 +1045,6 @@ class MainWindow(QMainWindow):
         s4 = QPushButton("导入工作区")
         s4.clicked.connect(self._import_workspace)
         share.body.addLayout(button_row(s1, s2, s3, s4))
-        lay.addWidget(share)
 
         cloud = CardFrame()
         cloud.add_title("云备份")
@@ -726,14 +1058,14 @@ class MainWindow(QMainWindow):
         c4 = QPushButton("拉取合并")
         c4.clicked.connect(self._sync_pull)
         cloud.body.addLayout(button_row(c1, c2, c3, c4))
-        lay.addWidget(cloud)
+        workspace.addWidget(cloud, 0, 1)
+        workspace.addWidget(share, 1, 0)
 
         path_card = CardFrame()
         path_card.add_title("数据目录")
         self.data_path_label = QLabel(str(self.runtime.paths.root))
         self.data_path_label.setWordWrap(True)
         path_card.body.addWidget(self.data_path_label)
-        lay.addWidget(path_card)
 
         search_card = CardFrame()
         search_card.add_title("本地搜索索引")
@@ -744,7 +1076,9 @@ class MainWindow(QMainWindow):
         rebuild_search = ghost_button("检查并重建搜索索引")
         rebuild_search.clicked.connect(self._rebuild_search_index)
         search_card.body.addLayout(button_row(rebuild_search))
-        lay.addWidget(search_card)
+        workspace.addWidget(search_card, 1, 1)
+        workspace.addWidget(path_card, 2, 0, 1, 2)
+        lay.addLayout(workspace)
         lay.addStretch(1)
         return page
 
@@ -1719,6 +2053,7 @@ class MainWindow(QMainWindow):
                 ),
             )
         self._on_problem_selected()
+        self.library_count_label.setText(f"\u5171 {len(problems)} \u9898")
         self._update_library_list_hint(len(problems))
         self._update_status()
 
@@ -1837,6 +2172,8 @@ class MainWindow(QMainWindow):
         self._update_context_bar(has)
         if not items:
             self._selected_problem_id = None
+            self.problem_preview.hide()
+            self.problem_preview_label.hide()
             self.detail.setText("选中一道题查看详情")
             self.detail.setObjectName("MutedLabel")
             self.detail.style().unpolish(self.detail)
@@ -1847,6 +2184,8 @@ class MainWindow(QMainWindow):
         p = self.services.get_problem(pid)
         if not p:
             self.detail.setText("题目不存在")
+            self.problem_preview.hide()
+            self.problem_preview_label.hide()
             return
         assets = "\n".join(
             f"· {a.role}: {a.relative_path}{' (不可变)' if a.is_immutable else ''}"
@@ -1867,14 +2206,27 @@ class MainWindow(QMainWindow):
             f"<small>{status} · P{p.priority} · r{p.revision}</small><br><br>"
             f"{ai_reason}"
             f"<b>标签</b><br>{tags}<br><br>"
-            f"<b>原题预览</b><br>"
-            f"{(p.question_markdown or '（空）')[:300]}<br><br>"
             f"<b>附件</b><br>{assets.replace(chr(10), '<br>')}<br><br>"
             f"<small>ID {p.id}</small>"
         )
         self.detail.setTextFormat(Qt.TextFormat.RichText)
         self.detail.style().unpolish(self.detail)
         self.detail.style().polish(self.detail)
+        self.problem_preview_label.show()
+        self.problem_preview.show()
+        self.problem_preview.set_problem(
+            {
+                "title": p.title or "（无标题题目）",
+                "question_markdown": p.question_markdown,
+                "question_latex": p.question_latex,
+                "problem_type": p.problem_type,
+                "priority": p.priority,
+            },
+            tag_names=(tag.name for tag in (p.tags or [])),
+            include_answers=False,
+            show_header=False,
+            show_answer_notice=False,
+        )
 
     def _selected_ids(self) -> list[str]:
         return [
@@ -1951,13 +2303,13 @@ class MainWindow(QMainWindow):
                 current_page if 0 <= current_page <= _PAGE_SETTINGS else _PAGE_LIBRARY
             )
         return_labels = {
-            _PAGE_DASHBOARD: "← 返回工作台",
-            _PAGE_LIBRARY: "← 返回题库",
-            _PAGE_REVIEW: "← 返回复习",
-            _PAGE_SETTINGS: "← 返回设置",
+            _PAGE_DASHBOARD: "返回工作台",
+            _PAGE_LIBRARY: "返回题库",
+            _PAGE_REVIEW: "返回复习",
+            _PAGE_SETTINGS: "返回设置",
         }
         self.problem_detail_page.set_back_text(
-            return_labels.get(self._detail_return_page, "← 返回")
+            return_labels.get(self._detail_return_page, "返回")
         )
         self._selected_problem_id = problem_id
         self.problem_detail_page.set_problem(
@@ -2019,6 +2371,7 @@ class MainWindow(QMainWindow):
             )
             self._open_problem_detail(problem_id)
             self._refresh_focus_pages()
+            self._show_toast("已加入当日题目复习计划")
             self.statusBar().showMessage("已加入当日题目复习计划")
         except DomainError as exc:
             QMessageBox.warning(self, "无法加入复习", str(exc))
@@ -2028,6 +2381,7 @@ class MainWindow(QMainWindow):
             self.services.add_to_daily_review_plan(
                 "note", note_id, self.services.review_plan_date()
             )
+            self._show_toast("已加入当日笔记复习计划")
             self.statusBar().showMessage("已加入当日笔记复习计划")
         except DomainError as exc:
             QMessageBox.warning(self, "无法加入复习计划", str(exc))

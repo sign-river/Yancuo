@@ -862,6 +862,23 @@ class StudyRecord(Base):
     study_session: Mapped[StudySession | None] = relationship(back_populates="records")
 
 
+class NoteStudyRecord(Base):
+    """An immutable completion record for read-only note review."""
+
+    __tablename__ = "note_study_records"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    note_id: Mapped[str] = mapped_column(
+        ForeignKey("note_documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    review_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("review_plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
 class ProblemConversation(Base):
     """A problem-scoped AI discussion, independent from the problem notes field."""
 

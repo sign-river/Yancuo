@@ -8,9 +8,11 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from latex2mathml import converter
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
-from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtCore import QBuffer, QIODevice, QMargins, QTimer, Qt
+from PySide6.QtPdf import QPdfDocument
+from PySide6.QtPdfWidgets import QPdfView
+from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtWebEngineCore import QWebEnginePage
 
 from yancuo_win.ui.theme import current_theme_name, get_theme_manager, theme_tokens
 
@@ -419,19 +421,115 @@ def build_note_html(
 </html>"""
 
 
-class MathContentView(QWebEngineView):
-    """Read-only embedded browser used by every formula-bearing UI."""
+class MathContentView(QWidget):
+    """Render formula-rich HTML off-screen and display it with native Qt PDF.
+
+    ``QWebEngineView`` creates a Chromium child window that can briefly surface
+    or steal focus on Windows.  A windowless ``QWebEnginePage`` still gives us
+    accurate MathML rendering; its in-memory PDF output is displayed by
+    ``QPdfView``, so navigation never creates a Chromium UI window.
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.last_html = ""
         self._last_render: dict[str, Any] | None = None
         self._last_note_render: dict[str, Any] | None = None
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
-        self.page().setBackgroundColor(Qt.GlobalColor.transparent)
+        self._document: QPdfDocument | None = None
+        self._document_buffer: QBuffer | None = None
+        self._renderer: QWebEnginePage | None = None
+        self._render_generation = 0
+        self._render_scheduled = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._view = QPdfView(self)
+        self._view.setPageMode(QPdfView.PageMode.MultiPage)
+        self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        self._view.setPageSpacing(0)
+        self._view.setDocumentMargins(QMargins())
+        self._view.hide()
+        layout.addWidget(self._view)
         manager = get_theme_manager(QApplication.instance())
         if manager is not None:
             manager.theme_changed.connect(self._on_theme_changed)
+
+    def showEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().showEvent(event)
+        self._schedule_render()
+
+    def _schedule_render(self) -> None:
+        if not self.last_html or not self.isVisible() or self._render_scheduled:
+            return
+        self._render_scheduled = True
+        QTimer.singleShot(0, self._start_render)
+
+    def _start_render(self) -> None:
+        self._render_scheduled = False
+        if not self.last_html or not self.isVisible():
+            return
+
+        self._render_generation += 1
+        generation = self._render_generation
+        if self._renderer is not None:
+            self._renderer.deleteLater()
+
+        page = QWebEnginePage(self)
+        page.setBackgroundColor(Qt.GlobalColor.transparent)
+        page.loadFinished.connect(
+            lambda ok, target=page, token=generation: self._html_loaded(
+                target, token, ok
+            )
+        )
+        self._renderer = page
+        page.setHtml(self.last_html)
+
+    def _html_loaded(
+        self, page: QWebEnginePage, generation: int, loaded: bool
+    ) -> None:
+        if page is not self._renderer or generation != self._render_generation:
+            page.deleteLater()
+            return
+        if not loaded:
+            self._renderer = None
+            page.deleteLater()
+            return
+        page.printToPdf(
+            lambda data, target=page, token=generation: self._pdf_ready(
+                target, token, data
+            )
+        )
+
+    def _pdf_ready(self, page: QWebEnginePage, generation: int, data) -> None:  # noqa: ANN001
+        if page is not self._renderer or generation != self._render_generation:
+            page.deleteLater()
+            return
+        self._renderer = None
+        page.deleteLater()
+        if not data:
+            return
+
+        buffer = QBuffer(self)
+        buffer.setData(data)
+        buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        document = QPdfDocument(self)
+        load_result = document.load(buffer)
+        # PySide 6.8 exposes this overload as void, while older bindings return
+        # QPdfDocument.Error.  In both cases pageCount confirms a usable result.
+        if load_result not in (None, QPdfDocument.Error.None_) or document.pageCount() < 1:
+            document.deleteLater()
+            buffer.deleteLater()
+            return
+
+        previous_document = self._document
+        previous_buffer = self._document_buffer
+        self._document = document
+        self._document_buffer = buffer
+        self._view.setDocument(document)
+        self._view.show()
+        if previous_document is not None:
+            previous_document.deleteLater()
+        if previous_buffer is not None:
+            previous_buffer.deleteLater()
 
     def set_problem(
         self,
@@ -475,7 +573,7 @@ class MathContentView(QWebEngineView):
                 tag_names=self._last_note_render["tag_names"],
                 theme=current_theme_name(),
             )
-            self.setHtml(self.last_html)
+            self._schedule_render()
             return
         if self._last_render is None:
             return
@@ -487,7 +585,7 @@ class MathContentView(QWebEngineView):
             show_answer_notice=self._last_render["show_answer_notice"],
             theme=current_theme_name(),
         )
-        self.setHtml(self.last_html)
+        self._schedule_render()
 
     def _on_theme_changed(self, _theme: str) -> None:
         self._render_last()

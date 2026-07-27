@@ -47,7 +47,13 @@ from yancuo_win.application.intake_service import (
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.worker import AIJobWorker, RegionRecognitionWorker
 from yancuo_win.ui.math_content import MathContentView
-from yancuo_win.ui.widgets import CardFrame, danger_button, ghost_button, primary_button
+from yancuo_win.ui.widgets import (
+    CardFrame,
+    PageHeader,
+    danger_button,
+    ghost_button,
+    primary_button,
+)
 
 
 _PAGE_MANUAL = 0
@@ -686,21 +692,11 @@ class IntakePage(QWidget):
         scroll.setWidget(widget)
         return scroll
 
-    def _header(self, title_text: str, hint_text: str, back_slot) -> QHBoxLayout:
-        header = QHBoxLayout()
-        back = ghost_button("← 返回")
+    def _header(self, title_text: str, hint_text: str, back_slot) -> PageHeader:
+        header = PageHeader(title_text, hint_text)
+        back = ghost_button("返回")
         back.clicked.connect(back_slot)
-        header.addWidget(back)
-        labels = QVBoxLayout()
-        title = QLabel(title_text)
-        title.setObjectName("PageTitle")
-        hint = QLabel(hint_text)
-        hint.setObjectName("PageHint")
-        hint.setWordWrap(True)
-        labels.addWidget(title)
-        labels.addWidget(hint)
-        header.addLayout(labels)
-        header.addStretch(1)
+        header.add_leading(back)
         return header
 
     def _page(self) -> tuple[QWidget, QVBoxLayout]:
@@ -713,7 +709,7 @@ class IntakePage(QWidget):
 
     def _build_manual(self) -> QWidget:
         page, layout = self._page()
-        layout.addLayout(
+        layout.addWidget(
             self._header(
                 "手动录题",
                 "内容会自动保存为草稿；只有点击“确认入库”才会创建正式题目。",
@@ -759,7 +755,7 @@ class IntakePage(QWidget):
 
     def _build_ai_upload(self) -> QWidget:
         page, layout = self._page()
-        layout.addLayout(
+        layout.addWidget(
             self._header(
                 "AI 录题 · 上传",
                 "添加图片并说明目标特征，例如“红圈处是错题”或“只提取第 3 题”。",
@@ -842,7 +838,7 @@ class IntakePage(QWidget):
 
     def _build_processing(self) -> QWidget:
         page, layout = self._page()
-        layout.addLayout(
+        layout.addWidget(
             self._header(
                 "AI 录题 · 后台处理中",
                 "可以返回题库，任务仍会继续；再次从题库进入即可查看当前进度。",
@@ -885,7 +881,7 @@ class IntakePage(QWidget):
 
     def _build_confirmation(self) -> QWidget:
         page, layout = self._page()
-        layout.addLayout(
+        layout.addWidget(
             self._header(
                 "AI 录题 · 确认结果",
                 "先在“阅读预览”核对公式和内容；如需调整，切换到“编辑字段”后再入库。",

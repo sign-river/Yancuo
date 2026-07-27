@@ -33,7 +33,7 @@ from yancuo_win.domain.review_rules import REVIEW_GRADES
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.review_plan_builder import ReviewPlanBuilder
-from yancuo_win.ui.widgets import CardFrame, ghost_button, primary_button
+from yancuo_win.ui.widgets import CardFrame, PageHeader, ghost_button, primary_button
 
 
 class ReviewPage(QWidget):
@@ -93,15 +93,11 @@ class ReviewPage(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
-        header = QHBoxLayout()
-        back = ghost_button("← 返回复习")
+        header = PageHeader(title_text)
+        back = ghost_button("返回复习")
         back.clicked.connect(self.show_home)
-        header.addWidget(back)
-        title = QLabel(title_text)
-        title.setObjectName("PageTitle")
-        header.addWidget(title)
-        header.addStretch(1)
-        layout.addLayout(header)
+        header.add_leading(back)
+        layout.addWidget(header)
         return page, layout
 
     @staticmethod
@@ -143,25 +139,16 @@ class ReviewPage(QWidget):
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(14)
 
-        header = QHBoxLayout()
-        titles = QVBoxLayout()
-        title = QLabel("今日复习")
-        title.setObjectName("PageTitle")
-        self.progress_label = QLabel("")
-        self.progress_label.setObjectName("PageHint")
-        titles.addWidget(title)
-        titles.addWidget(self.progress_label)
-        header.addLayout(titles)
-        header.addStretch(1)
-
-        back = ghost_button("← 返回复习工作台")
+        header = PageHeader("复习会话")
+        self.progress_label = header.description
+        self.progress_label.setVisible(True)
+        back = ghost_button("返回复习")
         back.clicked.connect(self.show_home)
-        header.addWidget(back)
-
         self.detail_button = QPushButton("打开题目详情")
         self.detail_button.clicked.connect(self._open_current_detail)
-        header.addWidget(self.detail_button)
-        root.addLayout(header)
+        header.add_leading(back)
+        header.add_action(self.detail_button)
+        root.addWidget(header)
 
         self.hero = QLabel("今日待复习")
         self.hero.setObjectName("HeroBanner")
@@ -208,7 +195,7 @@ class ReviewPage(QWidget):
         self.grade_card.body.addLayout(tools)
 
         nav = QHBoxLayout()
-        previous = ghost_button("← 上一题")
+        previous = ghost_button("上一题")
         previous.clicked.connect(self._previous)
         skip = QPushButton("暂时跳过 / 下一题")
         skip.clicked.connect(self._skip)
@@ -227,12 +214,9 @@ class ReviewPage(QWidget):
         root.setSpacing(14)
         self.home_layout = root
 
-        title = QLabel("复习")
-        title.setObjectName("PageTitle")
-        hint = QLabel("设置本次复习范围后开始。答题与评分会在独立会话中完成。")
-        hint.setObjectName("PageHint")
-        root.addWidget(title)
-        root.addWidget(hint)
+        root.addWidget(
+            PageHeader("复习", "选择计划后开始；答题与笔记阅读在独立会话中完成。")
+        )
 
         self.review_overview = QLabel()
         self.review_overview.setObjectName("HeroBanner")
@@ -610,12 +594,25 @@ class ReviewPage(QWidget):
     def _complete_note(self) -> None:
         if not self._note_queue:
             return
+        note = self._current_note()
+        if note is None:
+            return
+        try:
+            self.services.record_note_review(
+                note.id, review_plan_id=self._selected_plan_id
+            )
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
         self._note_queue.pop(self._index)
         if self._note_queue:
             self._index %= len(self._note_queue)
         else:
             self._index = 0
+        self._session_completed += 1
+        self.status_message.emit("已记录笔记阅读完成")
         self._render()
+        self.queue_changed.emit()
 
     def _toggle_answer(self) -> None:
         if not self._current():

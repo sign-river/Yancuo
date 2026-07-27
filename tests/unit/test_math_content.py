@@ -2,11 +2,77 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QByteArray, QObject, Signal
+from PySide6.QtWidgets import QApplication, QWidget
+
+import yancuo_win.ui.math_content as math_content_module
 from yancuo_win.ui.math_content import (
+    MathContentView,
     build_note_html,
     build_problem_html,
     render_math_text,
 )
+
+
+class _PageStub(QObject):
+    loadFinished = Signal(bool)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.html = ""
+        self.pdf_callback = None
+
+    def setBackgroundColor(self, _color) -> None:  # noqa: ANN001, N802
+        pass
+
+    def setHtml(self, value: str) -> None:  # noqa: N802
+        self.html = value
+
+    def printToPdf(self, callback) -> None:  # noqa: ANN001, N802
+        self.pdf_callback = callback
+
+
+class _DocumentStub(QObject):
+    class Error:
+        None_ = 0
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.loaded = False
+
+    def load(self, _device) -> int:  # noqa: ANN001
+        self.loaded = True
+        return self.Error.None_
+
+    def pageCount(self) -> int:  # noqa: N802
+        return 1 if self.loaded else 0
+
+
+class _PdfViewStub(QWidget):
+    class PageMode:
+        MultiPage = 1
+
+    class ZoomMode:
+        FitToWidth = 1
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.current_document = None
+
+    def setPageMode(self, _mode) -> None:  # noqa: ANN001, N802
+        pass
+
+    def setZoomMode(self, _mode) -> None:  # noqa: ANN001, N802
+        pass
+
+    def setPageSpacing(self, _spacing: int) -> None:  # noqa: N802
+        pass
+
+    def setDocumentMargins(self, _margins) -> None:  # noqa: ANN001, N802
+        pass
+
+    def setDocument(self, document) -> None:  # noqa: ANN001, N802
+        self.current_document = document
 
 
 def test_render_math_text_converts_inline_and_display_latex_to_mathml() -> None:
@@ -19,6 +85,46 @@ def test_render_math_text_converts_inline_and_display_latex_to_mathml() -> None:
     assert 'display="block"' in rendered
     assert "<mfrac>" in rendered
     assert r"\frac" not in rendered
+
+
+def test_reader_swaps_in_only_fully_rendered_documents(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(math_content_module, "QWebEnginePage", _PageStub)
+    monkeypatch.setattr(math_content_module, "QPdfDocument", _DocumentStub)
+    monkeypatch.setattr(math_content_module, "QPdfView", _PdfViewStub)
+
+    reader = MathContentView()
+    reader.set_message("第一版", "内容")
+    reader.show()
+    app.processEvents()
+
+    pdf_view = reader._view
+    first_page = reader._renderer
+    assert first_page is not None
+    assert pdf_view.isHidden()
+
+    first_page.loadFinished.emit(True)
+    assert first_page.pdf_callback is not None
+    assert pdf_view.isHidden()
+    first_page.pdf_callback(QByteArray(b"first document"))
+    first_document = reader._document
+    assert pdf_view.current_document is first_document
+    assert pdf_view.isVisible()
+
+    reader.set_message("第二版", "新内容")
+    app.processEvents()
+    second_page = reader._renderer
+    assert second_page is not None
+    assert second_page is not first_page
+    assert pdf_view.current_document is first_document
+    assert pdf_view.isVisible()
+
+    second_page.loadFinished.emit(True)
+    second_page.pdf_callback(QByteArray(b"second document"))
+    assert reader._document is not first_document
+    assert pdf_view.current_document is reader._document
+    assert pdf_view.isVisible()
+    reader.close()
 
 
 def test_render_math_text_escapes_non_math_user_content() -> None:

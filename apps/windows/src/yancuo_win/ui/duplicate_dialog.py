@@ -5,12 +5,12 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QLabel,
     QTextEdit,
     QVBoxLayout,
 )
 
 from yancuo_win.application.services import AppServices
+from yancuo_win.ui.widgets import EmptyState, PageHeader
 
 
 class DuplicateDialog(QDialog):
@@ -25,7 +25,11 @@ class DuplicateDialog(QDialog):
         self.setWindowTitle("重复题检测（仅提示）")
         self.resize(640, 480)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("疑似重复不会自动删除，请人工决定保留/合并。"))
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+        layout.addWidget(
+            PageHeader("重复题检测", "疑似重复不会自动删除，请人工决定保留或合并。")
+        )
         view = QTextEdit()
         view.setReadOnly(True)
         lines: list[str] = []
@@ -44,9 +48,12 @@ class DuplicateDialog(QDialog):
                     f"- {item['score']:.2f}  {item['title'] or '(无标题)'}  {item['problem_id']}"
                 )
         if not hash_groups and not similar:
-            lines.append("\n未发现重复提示。")
-        view.setPlainText("\n".join(lines))
-        layout.addWidget(view)
+            layout.addWidget(
+                EmptyState("未发现重复题", "当前范围内没有需要人工确认的重复提示。")
+            )
+        else:
+            view.setPlainText("\n".join(lines))
+            layout.addWidget(view)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
         layout.addWidget(buttons)

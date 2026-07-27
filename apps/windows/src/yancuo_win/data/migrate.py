@@ -406,6 +406,16 @@ def _migrate_to_v18(engine: Engine) -> None:
     logger.info("migrated database to schema_version=18")
 
 
+def _migrate_to_v19(engine: Engine) -> None:
+    """Add immutable completion records for read-only note review."""
+
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        set_schema_version(session, 19)
+        session.commit()
+    logger.info("migrated database to schema_version=19")
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -468,6 +478,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     16: _migrate_to_v16,
     17: _migrate_to_v17,
     18: _migrate_to_v18,
+    19: _migrate_to_v19,
 }
 
 
@@ -549,6 +560,8 @@ def verify_core_tables(engine: Engine) -> list[str]:
         required.update({"problem_conversations", "problem_messages"})
     if get_schema_version(engine) >= 18:
         required.update({"review_plans", "review_plan_items", "review_waiting_items"})
+    if get_schema_version(engine) >= 19:
+        required.add("note_study_records")
     with engine.connect() as conn:
         rows = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table'")

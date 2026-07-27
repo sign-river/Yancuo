@@ -32,6 +32,8 @@ from yancuo_win.data.models import (
     IntakeCandidateRecord,
     NoteAsset,
     NoteIntakeAsset,
+    NoteDocument,
+    NoteStudyRecord,
     Problem,
     ProblemOrigin,
     Prompt,
@@ -1391,7 +1393,12 @@ class AppServices:
                 ReviewWaitingItem.content_type == content_type
             ).order_by(ReviewWaitingItem.created_at)).all())
 
-    def create_review_plan_from_waiting_queue(self, content_type: str, name: str) -> ReviewPlan:
+    def create_review_plan_from_waiting_queue(
+        self,
+        content_type: str,
+        name: str,
+        source_ids: Iterable[str] | None = None,
+    ) -> ReviewPlan:
         content_type = self._validate_review_content_type(content_type)
         name = name.strip()
         if not name:
@@ -1402,6 +1409,12 @@ class AppServices:
             ).order_by(ReviewWaitingItem.created_at)).all())
             if not waiting:
                 raise DomainError("等待队列为空")
+            if source_ids is not None:
+                requested_order = list(dict.fromkeys(source_ids))
+                waiting_by_source = {item.source_id: item for item in waiting}
+                if set(requested_order) != set(waiting_by_source):
+                    raise DomainError("计划草稿已变化，请刷新后再创建")
+                waiting = [waiting_by_source[source_id] for source_id in requested_order]
             plan = ReviewPlan(id=new_id("review_plan"), name=name, content_type=content_type, kind="explicit")
             session.add(plan)
             session.flush()
@@ -1668,6 +1681,40 @@ class AppServices:
         with self.session() as s:
             records = list(s.scalars(select(StudyRecord).where(StudyRecord.study_session_id == study_session_id).order_by(StudyRecord.graded_at)).all())
             s.expunge_all()
+            return records
+
+    def record_note_review(
+        self, note_id: str, *, review_plan_id: str | None = None
+    ) -> NoteStudyRecord:
+        """Persist one completion without applying problem-style scoring rules."""
+
+        with self.session() as session:
+            note = session.get(NoteDocument, note_id)
+            if note is None or note.status == "trashed":
+                raise DomainError("笔记不存在或已移入回收站")
+            if review_plan_id and session.get(ReviewPlan, review_plan_id) is None:
+                raise DomainError("复习计划不存在")
+            record = NoteStudyRecord(
+                id=new_id("note_study_record"),
+                note_id=note_id,
+                review_plan_id=review_plan_id,
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            session.expunge(record)
+            return record
+
+    def note_study_records(self, note_id: str) -> list[NoteStudyRecord]:
+        with self.session() as session:
+            records = list(
+                session.scalars(
+                    select(NoteStudyRecord)
+                    .where(NoteStudyRecord.note_id == note_id)
+                    .order_by(NoteStudyRecord.completed_at.desc())
+                ).all()
+            )
+            session.expunge_all()
             return records
 
     def export_study_session_csv(self, study_session_id: str, dest: Path) -> Path:

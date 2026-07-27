@@ -11,14 +11,17 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QScrollArea,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from yancuo_win.application.services import AppServices
 from yancuo_win.data.models import Problem
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.ui.widgets import CardFrame, PageHeader
 
 
 class ProblemEditorDialog(QDialog):
@@ -30,6 +33,18 @@ class ProblemEditorDialog(QDialog):
         self.resize(720, 640)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+        layout.addWidget(
+            PageHeader("编辑题目", "修改题目内容、分类和复习状态；保存后立即同步到题库。")
+        )
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 8, 0)
+        body_layout.setSpacing(12)
         form = QFormLayout()
 
         self.title_edit = QLineEdit(problem.title or "")
@@ -81,12 +96,19 @@ class ProblemEditorDialog(QDialog):
         self.error = QTextEdit(problem.error_analysis or "")
         self.notes = QTextEdit(problem.notes or "")
 
-        layout.addLayout(form)
-        layout.addWidget(QLabel("原题"))
-        layout.addWidget(self.question)
-        layout.addWidget(QLabel("LaTeX"))
-        layout.addWidget(self.latex)
+        basic = CardFrame()
+        basic.add_title("基本信息")
+        basic.body.addLayout(form)
+        body_layout.addWidget(basic)
+        content = CardFrame()
+        content.add_title("题干")
+        content.body.addWidget(self.question)
+        content.body.addWidget(QLabel("LaTeX（可选）"))
+        content.body.addWidget(self.latex)
+        body_layout.addWidget(content)
         row = QHBoxLayout()
+        answers = CardFrame()
+        answers.add_title("作答与答案")
         left = QVBoxLayout()
         left.addWidget(QLabel("我的作答"))
         left.addWidget(self.user_answer)
@@ -95,13 +117,20 @@ class ProblemEditorDialog(QDialog):
         right.addWidget(self.correct)
         row.addLayout(left)
         row.addLayout(right)
-        layout.addLayout(row)
-        layout.addWidget(QLabel("解析"))
-        layout.addWidget(self.solution)
-        layout.addWidget(QLabel("错因"))
-        layout.addWidget(self.error)
-        layout.addWidget(QLabel("备注"))
-        layout.addWidget(self.notes)
+        answers.body.addLayout(row)
+        body_layout.addWidget(answers)
+        analysis = CardFrame()
+        analysis.add_title("解析与复盘")
+        analysis.body.addWidget(QLabel("解析"))
+        analysis.body.addWidget(self.solution)
+        analysis.body.addWidget(QLabel("错因"))
+        analysis.body.addWidget(self.error)
+        analysis.body.addWidget(QLabel("备注"))
+        analysis.body.addWidget(self.notes)
+        body_layout.addWidget(analysis)
+        body_layout.addStretch(1)
+        scroll.setWidget(body)
+        layout.addWidget(scroll, stretch=1)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel

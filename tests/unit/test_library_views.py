@@ -117,6 +117,41 @@ def test_settings_page_consolidates_account_services_and_data(window: MainWindow
     assert window.settings_tabs.currentIndex() == 1
 
 
+def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+
+    window.resize(860, 700)
+    window._apply_sidebar_visibility()
+    app.processEvents()
+    assert window.minimumWidth() == 760
+    assert window.sidebar.isHidden()
+    assert window.library_property_panel.isHidden()
+    assert not window.library_property_toggle.isHidden()
+
+    builder = window.review_page.plan_builder_page
+    builder._set_narrow_layout(True)
+    app.processEvents()
+    assert not builder.draft_toggle.isHidden()
+    assert builder.queue_pane.isHidden()
+
+    builder._show_draft_view()
+    assert builder.browse_workspace.isHidden()
+    assert not builder.queue_pane.isHidden()
+
+    builder._show_browse_view()
+    assert not builder.browse_workspace.isHidden()
+    assert builder.queue_pane.isHidden()
+
+    window.resize(1320, 840)
+    window._apply_sidebar_visibility()
+    app.processEvents()
+    assert not window.sidebar.isHidden()
+    assert not window.library_property_panel.isHidden()
+
+
 def _select_mode(window: MainWindow, mode: str) -> None:
     if window._library_view == "browse":
         item = window._find_knowledge_item(mode)
@@ -258,7 +293,15 @@ def test_catalog_menu_and_editor_use_valid_full_paths(window: MainWindow) -> Non
         "章节下移",
         "删除章节",
     }.issubset(actions)
-    assert any(button.text() == "移动分类" for button in window._ctx_buttons)
+    assert [button.text() for button in window._ctx_buttons] == [
+        "打开详情",
+        "编辑",
+        "加入复习计划",
+        "更多 ▾",
+    ]
+    more_actions = [action.text() for action in window._build_question_more_menu().actions()]
+    assert "移动分类" in more_actions
+    assert more_actions[-1] == "删除"
 
     problem = next(
         problem

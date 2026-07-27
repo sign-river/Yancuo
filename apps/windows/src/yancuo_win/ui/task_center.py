@@ -10,12 +10,12 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
-    QPushButton,
     QVBoxLayout,
 )
 
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.tasks.worker import AIJobWorker
+from yancuo_win.ui.widgets import PageHeader, danger_button, default_button, primary_button
 
 
 class TaskCenterDialog(QDialog):
@@ -27,17 +27,21 @@ class TaskCenterDialog(QDialog):
         self.resize(640, 420)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+        layout.addWidget(PageHeader("AI 任务中心", "查看后台识别任务、进度和当日估算费用。"))
         self.summary = QLabel("")
+        self.summary.setObjectName("MutedLabel")
         layout.addWidget(self.summary)
         self.list = QListWidget()
         layout.addWidget(self.list)
 
         row = QHBoxLayout()
-        refresh = QPushButton("刷新")
+        refresh = default_button("刷新")
         refresh.clicked.connect(self.refresh)
-        run_btn = QPushButton("运行选中任务")
+        run_btn = primary_button("运行选中任务")
         run_btn.clicked.connect(self._run_selected)
-        cancel_btn = QPushButton("取消运行中")
+        cancel_btn = danger_button("取消运行中")
         cancel_btn.clicked.connect(self._cancel_running)
         row.addWidget(refresh)
         row.addWidget(run_btn)

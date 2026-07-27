@@ -37,7 +37,7 @@ from yancuo_win.infrastructure.credentials import (
     mask_secret,
     set_secret,
 )
-from yancuo_win.ui.widgets import CardFrame, button_row, primary_button
+from yancuo_win.ui.widgets import CardFrame, PageHeader, button_row, primary_button
 from yancuo_win.ui.theme import apply_app_theme, get_theme_manager
 
 
@@ -47,12 +47,12 @@ class ServiceSettingsPage(QWidget):
         self.runtime = runtime
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setContentsMargins(24, 20, 24, 20)
         outer.setSpacing(12)
 
-        title = QLabel("服务与外观")
-        title.setObjectName("PageTitle")
-        outer.addWidget(title)
+        outer.addWidget(
+            PageHeader("服务与外观", "管理本机外观、AI 能力与云端备份连接。")
+        )
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)

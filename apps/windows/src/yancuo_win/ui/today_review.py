@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPushButton,
     QVBoxLayout,
 )
 
@@ -17,6 +16,7 @@ from yancuo_win.application.services import AppServices
 from yancuo_win.domain.review_rules import REVIEW_GRADES
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.math_content import MathContentView
+from yancuo_win.ui.widgets import CardFrame, PageHeader, default_button, primary_button
 
 
 class TodayReviewDialog(QDialog):
@@ -29,7 +29,11 @@ class TodayReviewDialog(QDialog):
         self.resize(720, 560)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+        layout.addWidget(PageHeader("今日复习", "查看到期题目，独立思考后再显示答案并评分。"))
         self.progress = QLabel("")
+        self.progress.setObjectName("PageHint")
         layout.addWidget(self.progress)
 
         self.hide_answer = QCheckBox("隐藏答案与解析")
@@ -40,22 +44,24 @@ class TodayReviewDialog(QDialog):
         self.body = MathContentView()
         layout.addWidget(self.body)
 
+        grade_card = CardFrame()
+        grade_card.add_title("掌握程度")
         grade_row = QHBoxLayout()
-        grade_row.addWidget(QLabel("打分："))
         for grade, label in REVIEW_GRADES.items():
-            btn = QPushButton(f"{grade} {label}")
+            btn = primary_button(f"{grade} {label}")
             btn.clicked.connect(lambda _=False, g=grade: self._grade(g))
             grade_row.addWidget(btn)
-        layout.addLayout(grade_row)
+        grade_card.body.addLayout(grade_row)
 
         nav = QHBoxLayout()
-        prev_btn = QPushButton("上一题")
+        prev_btn = default_button("上一题")
         prev_btn.clicked.connect(self._prev)
-        next_btn = QPushButton("跳过/下一题")
+        next_btn = default_button("跳过 / 下一题")
         next_btn.clicked.connect(self._next)
         nav.addWidget(prev_btn)
         nav.addWidget(next_btn)
-        layout.addLayout(nav)
+        grade_card.body.addLayout(nav)
+        layout.addWidget(grade_card)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)

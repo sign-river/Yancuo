@@ -48,7 +48,14 @@ from yancuo_win.tasks.note_worker import NoteExtractionWorker
 from yancuo_win.tasks.note_search_worker import NoteAiSearchWorker
 from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.math_content import MathContentView
-from yancuo_win.ui.widgets import CardFrame, danger_button, ghost_button, primary_button
+from yancuo_win.ui.widgets import (
+    CardFrame,
+    PageHeader,
+    SearchInput,
+    danger_button,
+    ghost_button,
+    primary_button,
+)
 
 _STATUS_LABELS = {
     "inbox": "待整理",
@@ -627,32 +634,28 @@ class NotePage(QWidget):
         root.setContentsMargins(16, 16, 16, 12)
         root.setSpacing(12)
 
-        header = QHBoxLayout()
-        titles = QVBoxLayout()
-        title = QLabel("笔记")
-        title.setObjectName("PageTitle")
-        titles.addWidget(title)
-        hint = QLabel("用可编辑的内容块整理公式、概念和学习记录。")
-        hint.setObjectName("PageHint")
-        titles.addWidget(hint)
-        header.addLayout(titles)
-        header.addStretch(1)
         self.new_note_button = primary_button("新建笔记")
         self.new_note_button.clicked.connect(self._create_note)
-        header.addWidget(self.new_note_button)
-        ai_note_button = primary_button("AI 图片录入")
+        ai_note_button = QPushButton("AI 图片录入")
         ai_note_button.clicked.connect(self._start_ai_extraction)
-        header.addWidget(ai_note_button)
         self.resume_draft_button = ghost_button("继续草稿")
         self.resume_draft_button.clicked.connect(self._resume_note_draft)
-        header.addWidget(self.resume_draft_button)
-        root.addLayout(header)
+        header = PageHeader(
+            "笔记", "用可编辑的内容块整理公式、概念和学习记录。"
+        )
+        header.add_action(self.resume_draft_button)
+        header.add_action(ai_note_button)
+        header.add_action(self.new_note_button)
+        root.addWidget(header)
 
         split = QSplitter(Qt.Orientation.Horizontal)
+        split.setObjectName("NoteWorkspace")
         split.setChildrenCollapsible(False)
 
         left = CardFrame()
+        left.setObjectName("NoteLibraryPane")
         left.setMinimumWidth(230)
+        left.setMaximumWidth(320)
         left.add_title("笔记库")
         self.status_filter = QComboBox()
         for label, status in (
@@ -665,9 +668,7 @@ class NotePage(QWidget):
             self.status_filter.addItem(label, status)
         self.status_filter.currentIndexChanged.connect(self.reload)
         left.body.addWidget(self.status_filter)
-        self.note_search_edit = QLineEdit()
-        self.note_search_edit.setObjectName("NoteSearchEdit")
-        self.note_search_edit.setPlaceholderText("离线搜索标题、内容、标签或合集…")
+        self.note_search_edit = SearchInput("搜索标题、内容、标签或合集")
         self.note_search_edit.textChanged.connect(self.reload)
         self.note_search_edit.returnPressed.connect(self._submit_note_search)
         left.body.addWidget(self.note_search_edit)
@@ -687,9 +688,13 @@ class NotePage(QWidget):
         self.empty_card.add_hint("新建笔记后，可以按块写入标题、正文、公式或提示。")
         empty_new = primary_button("新建第一篇笔记")
         empty_new.clicked.connect(self._create_note)
-        self.empty_card.body.addWidget(empty_new)
+        empty_actions = QHBoxLayout()
+        empty_actions.addWidget(empty_new)
+        empty_actions.addStretch(1)
+        self.empty_card.body.addLayout(empty_actions)
 
         self.detail_stack = QStackedWidget()
+        self.detail_stack.setObjectName("NoteDetailPane")
         self.detail_stack.addWidget(self.empty_card)
         self.detail_stack.addWidget(self._build_detail())
         split.addWidget(self.detail_stack)

@@ -104,7 +104,7 @@ def test_answer_control_lives_in_grade_card_and_unlocks_grading(
 
 
 def test_review_workbench_collects_session_options(monkeypatch) -> None:
-    app = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])
     monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
     page = review_page_module.ReviewPage(_ServicesStub())
 

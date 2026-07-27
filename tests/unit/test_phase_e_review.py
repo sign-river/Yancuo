@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from yancuo_win.application.bootstrap import bootstrap_runtime
+from yancuo_win.application.note_service import NoteService
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.review_rules import (
@@ -119,6 +120,45 @@ def test_daily_review_plan_has_stable_name_and_deduplicates_items(services: AppS
     assert plan is not None
     assert plan.name == "2026年7月26日 复习计划"
     assert [item.source_id for item in plan.items] == [problem.id]
+
+
+def test_explicit_review_plan_uses_the_draft_order_selected_by_the_user(
+    services: AppServices,
+) -> None:
+    first = services.create_problem(title="第一题", status="active")
+    second = services.create_problem(title="第二题", status="active")
+    third = services.create_problem(title="第三题", status="active")
+    services.add_to_review_waiting_queue(
+        "problem", [first.id, second.id, third.id]
+    )
+
+    plan = services.create_review_plan_from_waiting_queue(
+        "problem", "排序计划", [third.id, first.id, second.id]
+    )
+
+    saved = services.get_review_plan(plan.id)
+    assert saved is not None
+    assert [item.source_id for item in saved.items] == [
+        third.id,
+        first.id,
+        second.id,
+    ]
+    assert services.list_review_waiting_ids("problem") == []
+
+
+def test_note_review_completion_is_persisted_without_problem_scoring(
+    services: AppServices,
+) -> None:
+    notes = NoteService(services.runtime)
+    note = notes.create_note(title="泰勒展开", status="active")
+    services.add_to_review_waiting_queue("note", [note.id])
+    plan = services.create_review_plan_from_waiting_queue("note", "公式笔记")
+
+    record = services.record_note_review(note.id, review_plan_id=plan.id)
+
+    assert record.note_id == note.id
+    assert record.review_plan_id == plan.id
+    assert [item.id for item in services.note_study_records(note.id)] == [record.id]
 
 
 def test_import_duplicate_tip_no_second_copy(

@@ -25,7 +25,12 @@ from yancuo_win.data.models import Problem
 from yancuo_win.tasks.worker import ProblemChatWorker
 from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.math_content import MathContentView
-from yancuo_win.ui.widgets import CardFrame, ghost_button, primary_button
+from yancuo_win.ui.widgets import (
+    CardFrame,
+    PageHeader,
+    ghost_button,
+    primary_button,
+)
 
 
 class _DetailImage(QLabel):
@@ -92,35 +97,29 @@ class ProblemDetailPage(QWidget):
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(14)
 
-        header = QHBoxLayout()
-        self.back_button = ghost_button("← 返回题库")
+        self.back_button = ghost_button("返回题库")
         self.back_button.clicked.connect(self.back_requested.emit)
-        header.addWidget(self.back_button)
-        titles = QVBoxLayout()
-        self.title_label = QLabel("题目详情")
-        self.title_label.setObjectName("PageTitle")
-        self.meta_label = QLabel("")
-        self.meta_label.setObjectName("PageHint")
-        titles.addWidget(self.title_label)
-        titles.addWidget(self.meta_label)
-        header.addLayout(titles)
-        header.addStretch(1)
         edit = primary_button("编辑题目")
         edit.clicked.connect(self._request_edit)
-        header.addWidget(edit)
         self.view_image_button = ghost_button("查看原图")
         self.view_image_button.clicked.connect(self._view_original_image)
-        header.addWidget(self.view_image_button)
         self.chat_button = ghost_button("AI 讨论")
         self.chat_button.clicked.connect(self._toggle_chat)
         self.chat_button.setEnabled(chat is not None)
-        header.addWidget(self.chat_button)
-        root.addLayout(header)
+        header = PageHeader("题目详情")
+        self.title_label = header.title
+        self.meta_label = header.description
+        self.meta_label.setVisible(True)
+        header.add_leading(self.back_button)
+        header.add_action(self.view_image_button)
+        header.add_action(self.chat_button)
+        header.add_action(edit)
+        root.addWidget(header)
 
         actions = QHBoxLayout()
-        previous = ghost_button("← 上一题")
+        previous = ghost_button("上一题")
         previous.clicked.connect(self.previous_requested.emit)
-        next_button = ghost_button("下一题 →")
+        next_button = ghost_button("下一题")
         next_button.clicked.connect(self.next_requested.emit)
         actions.addWidget(previous)
         actions.addWidget(next_button)

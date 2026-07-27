@@ -45,12 +45,12 @@ class ThemeTokens:
 
 LIGHT_THEME = ThemeTokens(
     name="light",
-    bg="#F5F7FA",
-    sidebar="#EEF2F8",
+    bg="#F5F6F7",
+    sidebar="#F7F8FA",
     card="#FFFFFF",
-    border="#E5EAF2",
+    border="#DEE0E3",
     text="#1F2329",
-    muted="#8F959E",
+    muted="#646A73",
     primary="#3370FF",
     primary_hover="#2860E1",
     primary_pressed="#1F54C9",
@@ -58,11 +58,11 @@ LIGHT_THEME = ThemeTokens(
     danger_bg="#FEF0F0",
     danger_border="#F8B9B7",
     nav_text="#FFFFFF",
-    list_hover="#F0F4FF",
+    list_hover="#F5F6F7",
     list_selected="#E8F0FF",
     input_disabled="#F0F2F5",
     upload_bg="#F8FAFD",
-    hover_border="#C9D4E8",
+    hover_border="#B8C8ED",
     progress_bg="#EEF2F8",
     scrollbar="#D0D7E2",
     chip_bg="#EAF0FF",
@@ -147,6 +147,7 @@ def app_stylesheet(theme: str = "light") -> str:
     QWidget {{
         color: {t.text};
         font-size: 13px;
+        font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
     }}
     QMainWindow, QDialog, QMenu, QTabWidget::pane {{
         background: {t.bg};
@@ -174,6 +175,15 @@ def app_stylesheet(theme: str = "light") -> str:
     QFrame#AppSidebar {{
         background: {t.sidebar};
         border-right: 1px solid {t.border};
+    }}
+    QFrame#AppHeader {{
+        background: {t.card};
+        border-bottom: 1px solid {t.border};
+    }}
+    QLabel#AppHeaderTitle {{
+        font-size: 16px;
+        font-weight: 600;
+        color: {t.text};
     }}
     QLabel#BrandTitle {{
         font-size: 18px;
@@ -203,8 +213,8 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.list_hover};
     }}
     QListWidget#MainNav::item:selected {{
-        background: {t.primary};
-        color: {t.nav_text};
+        background: {t.list_selected};
+        color: {t.primary};
         font-weight: 600;
     }}
 
@@ -214,11 +224,11 @@ def app_stylesheet(theme: str = "light") -> str:
     QFrame#CardFrame {{
         background: {t.card};
         border: 1px solid {t.border};
-        border-radius: 12px;
+        border-radius: 8px;
     }}
     QLabel#PageTitle {{
         font-size: 20px;
-        font-weight: 700;
+        font-weight: 600;
         color: {t.text};
     }}
     QLabel#PageHint, QLabel#MutedLabel {{
@@ -230,6 +240,21 @@ def app_stylesheet(theme: str = "light") -> str:
         font-weight: 600;
         color: {t.text};
     }}
+    QLabel#StatusTag, QLabel#StatusTagActive, QLabel#StatusTagSuccess,
+    QLabel#StatusTagWarning, QLabel#StatusTagDanger, QLabel#StatusTagMuted {{
+        min-height: 20px;
+        max-height: 20px;
+        padding: 0 6px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 400;
+    }}
+    QLabel#StatusTag {{ background: {t.tag_bg}; color: {t.tag_text}; }}
+    QLabel#StatusTagActive {{ background: {t.list_selected}; color: {t.primary}; }}
+    QLabel#StatusTagSuccess {{ background: #EAF7EE; color: #237A3B; }}
+    QLabel#StatusTagWarning {{ background: #FFF6E5; color: #9B6500; }}
+    QLabel#StatusTagDanger {{ background: {t.danger_bg}; color: {t.danger}; }}
+    QLabel#StatusTagMuted {{ background: {t.input_disabled}; color: {t.muted}; }}
     QLabel#LibraryBreadcrumb {{
         color: {t.primary};
         font-size: 12px;
@@ -248,10 +273,11 @@ def app_stylesheet(theme: str = "light") -> str:
         color: {t.fallback_text};
     }}
     QLabel#HeroBanner {{
-        background: {t.primary};
-        color: white;
-        border-radius: 12px;
-        padding: 18px 20px;
+        background: {t.card};
+        color: {t.text};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+        padding: 16px 20px;
         font-size: 16px;
         font-weight: 600;
     }}
@@ -264,6 +290,78 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.card};
         border: 1px solid {t.border};
         border-radius: 10px;
+    }}
+    QFrame#LibraryWorkspace {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+    }}
+    QSplitter#LibraryWorkspaceSplitter::handle {{
+        background: {t.border};
+        width: 1px;
+    }}
+    QWidget#LibraryNavigationPanel, QWidget#LibraryListPanel,
+    QWidget#LibraryPropertyPanel {{
+        background: {t.card};
+        border: none;
+    }}
+    QFrame#LibraryPanelHeader {{
+        min-height: 48px;
+        background: {t.card};
+        border: none;
+        border-bottom: 1px solid {t.border};
+    }}
+    QLabel#PanelTitle {{
+        color: {t.text};
+        font-size: 14px;
+        font-weight: 600;
+    }}
+    QLabel#PanelHint, QLabel#PropertySectionLabel {{
+        color: {t.muted};
+        font-size: 12px;
+    }}
+    QFrame#LibraryPanelFooter {{
+        min-height: 48px;
+        max-height: 48px;
+        background: {t.card};
+        border: none;
+        border-top: 1px solid {t.border};
+    }}
+    QListWidget#ProblemList, QListWidget#FilterNav, QTreeWidget#KnowledgeTree {{
+        background: {t.card};
+        border: none;
+        border-radius: 0;
+        outline: none;
+        padding: 6px;
+    }}
+    QListWidget#ProblemList::item {{
+        min-height: 58px;
+        padding: 8px 10px;
+        margin: 1px 0;
+        border-radius: 6px;
+    }}
+    QListWidget#ProblemList::item:hover {{ background: {t.list_hover}; }}
+    QListWidget#ProblemList::item:selected {{ background: {t.list_selected}; color: {t.text}; }}
+    QScrollArea#LibraryPropertyScroll {{ background: {t.card}; border: none; }}
+    QFrame#ContextBar {{
+        min-height: 56px;
+        background: {t.card};
+        border: none;
+        border-top: 1px solid {t.border};
+        border-radius: 0;
+    }}
+    QPushButton#SearchModeButton {{ min-height: 36px; max-height: 36px; }}
+    QPushButton#LibraryViewButton {{
+        min-height: 36px;
+        border: none;
+        border-bottom: 2px solid transparent;
+        border-radius: 0;
+    }}
+    QPushButton#LibraryViewButton:checked {{
+        color: {t.primary};
+        background: transparent;
+        border-bottom-color: {t.primary};
+        font-weight: 600;
     }}
     QSplitter#ReviewPlanWorkspace::handle {{
         background: transparent;
@@ -300,6 +398,41 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
     QTreeWidget#PlanFolderTree::item:selected, QListWidget#PlanSourceList::item:selected,
     QListWidget#PlanQueueList::item:selected {{
+        background: {t.list_selected};
+        color: {t.text};
+    }}
+
+    QSplitter#NoteWorkspace::handle {{
+        background: transparent;
+        width: 12px;
+    }}
+    QFrame#NoteLibraryPane, QStackedWidget#NoteDetailPane {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+    }}
+    QListWidget#NoteList, QListWidget#NoteBlockList {{
+        background: transparent;
+        border: none;
+        outline: none;
+        padding: 4px 0;
+    }}
+    QListWidget#NoteList::item {{
+        min-height: 48px;
+        padding: 8px 10px;
+        margin: 1px 0;
+        border-radius: 6px;
+    }}
+    QListWidget#NoteBlockList::item {{
+        min-height: 34px;
+        padding: 6px 8px;
+        margin: 1px 0;
+        border-radius: 6px;
+    }}
+    QListWidget#NoteList::item:hover, QListWidget#NoteBlockList::item:hover {{
+        background: {t.list_hover};
+    }}
+    QListWidget#NoteList::item:selected, QListWidget#NoteBlockList::item:selected {{
         background: {t.list_selected};
         color: {t.text};
     }}
@@ -361,8 +494,9 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.card};
         color: {t.text};
         border: 1px solid {t.border};
-        border-radius: 8px;
-        padding: 7px 10px;
+        border-radius: 6px;
+        padding: 6px 10px;
+        min-height: 22px;
         selection-background-color: {t.list_selected};
     }}
     QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
@@ -384,7 +518,7 @@ def app_stylesheet(theme: str = "light") -> str:
         alternate-background-color: {t.sidebar};
         color: {t.text};
         border: 1px solid {t.border};
-        gridline-color: {t.border};
+        gridline-color: transparent;
         selection-background-color: {t.list_selected};
         selection-color: {t.text};
     }}
@@ -392,9 +526,10 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.sidebar};
         color: {t.text};
         border: none;
-        border-right: 1px solid {t.border};
         border-bottom: 1px solid {t.border};
-        padding: 6px 8px;
+        padding: 8px 12px;
+        font-size: 12px;
+        font-weight: 500;
     }}
     QLineEdit#SearchEdit {{
         background: {t.card};
@@ -403,14 +538,24 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 8px 14px;
         min-height: 20px;
     }}
+    QLineEdit#SearchInput {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 6px;
+        padding: 6px 8px;
+        min-height: 22px;
+    }}
+    QLineEdit#SearchInput:focus {{
+        border-color: {t.primary};
+    }}
 
     QPushButton {{
         background: {t.card};
         color: {t.text};
         border: 1px solid {t.border};
-        border-radius: 8px;
-        padding: 8px 14px;
-        min-height: 18px;
+        border-radius: 6px;
+        padding: 6px 12px;
+        min-height: 20px;
     }}
     QPushButton:hover {{
         background: {t.list_hover};
@@ -435,6 +580,11 @@ def app_stylesheet(theme: str = "light") -> str:
     QPushButton#PrimaryButton:pressed {{
         background: {t.primary_pressed};
     }}
+    QPushButton#PrimaryButton:disabled {{
+        background: {t.input_disabled};
+        color: {t.muted};
+        border: 1px solid {t.border};
+    }}
     QPushButton#DangerButton {{
         background: {t.card};
         color: {t.danger};
@@ -453,15 +603,22 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.list_hover};
         border-radius: 8px;
     }}
+    QPushButton#IconButton {{
+        padding: 0;
+        min-width: 32px;
+        max-width: 32px;
+        min-height: 32px;
+        max-height: 32px;
+    }}
     QPushButton#LibraryViewButton {{
         min-width: 92px;
-        background: {t.card};
+        background: transparent;
         color: {t.muted};
     }}
     QPushButton#LibraryViewButton:checked {{
-        background: {t.primary};
-        color: white;
-        border-color: {t.primary};
+        background: transparent;
+        color: {t.primary};
+        border-bottom-color: {t.primary};
         font-weight: 600;
     }}
     QPushButton#SearchModeButton {{
@@ -474,21 +631,33 @@ def app_stylesheet(theme: str = "light") -> str:
         border-color: {t.primary};
         font-weight: 600;
     }}
+    QPushButton#SegmentButton {{
+        background: {t.card};
+        color: {t.muted};
+        min-width: 72px;
+    }}
+    QPushButton#SegmentButton:checked {{
+        background: {t.list_selected};
+        color: {t.primary};
+        border-color: {t.primary};
+        font-weight: 600;
+    }}
 
     QTabWidget::pane {{
-        border: 1px solid {t.border};
+        border: none;
         background: {t.card};
     }}
     QTabBar::tab {{
-        background: {t.sidebar};
+        background: transparent;
         color: {t.muted};
-        border: 1px solid {t.border};
-        padding: 8px 14px;
+        border: none;
+        border-bottom: 2px solid transparent;
+        padding: 8px 12px;
     }}
     QTabBar::tab:selected {{
-        background: {t.card};
+        background: transparent;
         color: {t.primary};
-        border-bottom-color: {t.card};
+        border-bottom-color: {t.primary};
         font-weight: 600;
     }}
     QTabBar::tab:hover:!selected {{
@@ -528,6 +697,38 @@ def app_stylesheet(theme: str = "light") -> str:
     QSplitter::handle {{
         background: transparent;
         width: 6px;
+    }}
+    QFrame#BatchActionBar {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+    }}
+    QFrame#ToastMessage {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 6px;
+    }}
+    QLabel#ToastText {{
+        color: {t.text};
+        font-size: 13px;
+    }}
+    QFrame#LoadingSkeleton {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+    }}
+    QFrame#SkeletonLineLong, QFrame#SkeletonLineShort {{
+        background: {t.input_disabled};
+        border: none;
+        border-radius: 4px;
+    }}
+    QFrame#SkeletonLineShort {{
+        max-width: 40%;
+    }}
+    QDialog {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 8px;
     }}
     """
 

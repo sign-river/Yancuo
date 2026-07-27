@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QLabel
 
+import yancuo_win.ui.widgets as widgets_module
 from yancuo_win.ui.theme import (
     DARK_THEME,
     LIGHT_THEME,
@@ -12,6 +14,23 @@ from yancuo_win.ui.theme import (
     normalize_theme_mode,
     resolve_theme_mode,
 )
+
+
+def test_page_header_does_not_show_children_during_construction(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    visibility_requests: list[bool] = []
+
+    class TrackingLabel(QLabel):
+        def setVisible(self, visible: bool) -> None:  # noqa: N802
+            visibility_requests.append(visible)
+            super().setVisible(visible)
+
+    monkeypatch.setattr(widgets_module, "QLabel", TrackingLabel)
+    header = widgets_module.PageHeader("标题", "说明")
+
+    assert True not in visibility_requests
+    header.close()
+    app.processEvents()
 
 
 def test_explicit_theme_ignores_system_color_scheme() -> None:

@@ -10,10 +10,11 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
     QVBoxLayout,
 )
+
+from yancuo_win.ui.widgets import PageHeader, default_button
 
 
 class ImageViewerDialog(QDialog):
@@ -34,14 +35,17 @@ class ImageViewerDialog(QDialog):
         self.resize(1000, 760)
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(12)
+        root.addWidget(PageHeader("原始图片", "缩放和查看录入时保存的不可变原图。"))
         controls = QHBoxLayout()
-        zoom_out = QPushButton("－")
+        zoom_out = default_button("缩小")
         zoom_out.clicked.connect(lambda: self._zoom(0.8))
-        reset = QPushButton("100%")
+        reset = default_button("重置缩放")
         reset.clicked.connect(self._reset)
-        zoom_in = QPushButton("＋")
+        zoom_in = default_button("放大")
         zoom_in.clicked.connect(lambda: self._zoom(1.25))
-        fit = QPushButton("适应窗口")
+        fit = default_button("适应窗口")
         fit.clicked.connect(self._fit)
         self.scale_label = QLabel("")
         for button in (zoom_out, reset, zoom_in, fit):

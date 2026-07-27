@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
-    QPushButton,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -23,6 +22,13 @@ from PySide6.QtWidgets import (
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.services import AppServices
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.ui.widgets import (
+    ConfirmDialog,
+    PageHeader,
+    danger_button,
+    default_button,
+    primary_button,
+)
 
 
 class ReviewDialog(QDialog):
@@ -34,26 +40,39 @@ class ReviewDialog(QDialog):
         self.resize(960, 640)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+        layout.addWidget(
+            PageHeader("待确认变更", "逐项核对 AI 或外部导入建议，再决定接受、覆盖或保留本地内容。")
+        )
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         left_box = QWidget()
         left = QVBoxLayout(left_box)
-        left.addWidget(QLabel("待审核"))
+        left_title = QLabel("待审核")
+        left_title.setObjectName("SectionTitle")
+        left.addWidget(left_title)
         self.list = QListWidget()
         self.list.currentItemChanged.connect(self._on_select)
         left.addWidget(self.list)
 
         right_box = QWidget()
         right = QVBoxLayout(right_box)
-        right.addWidget(QLabel("原图路径 / 题目信息"))
+        meta_title = QLabel("题目来源与信息")
+        meta_title.setObjectName("SectionTitle")
+        right.addWidget(meta_title)
         self.meta = QLabel("")
         self.meta.setWordWrap(True)
         right.addWidget(self.meta)
-        right.addWidget(QLabel("字段差异（before → after）"))
+        diff_title = QLabel("字段差异")
+        diff_title.setObjectName("SectionTitle")
+        right.addWidget(diff_title)
         self.diff_view = QTextEdit()
         self.diff_view.setReadOnly(True)
         right.addWidget(self.diff_view)
-        right.addWidget(QLabel("不确定字段"))
+        uncertain_title = QLabel("不确定字段")
+        uncertain_title.setObjectName("SectionTitle")
+        right.addWidget(uncertain_title)
         self.uncertain = QTextEdit()
         self.uncertain.setReadOnly(True)
         self.uncertain.setMaximumHeight(120)
@@ -66,14 +85,15 @@ class ReviewDialog(QDialog):
         layout.addWidget(splitter)
 
         row = QHBoxLayout()
-        for text, slot in (
-            ("接受", self._accept),
-            ("强制采用外部", self._force_accept),
-            ("保留内部/拒绝", self._reject),
-            ("刷新", self.refresh),
-        ):
-            btn = QPushButton(text)
-            btn.clicked.connect(slot)
+        accept = primary_button("接受变更")
+        accept.clicked.connect(self._accept)
+        force = danger_button("强制采用外部")
+        force.clicked.connect(self._force_accept)
+        reject = default_button("保留本地内容")
+        reject.clicked.connect(self._reject)
+        refresh = default_button("刷新")
+        refresh.clicked.connect(self.refresh)
+        for btn in (accept, force, reject, refresh):
             row.addWidget(btn)
         layout.addLayout(row)
 
@@ -161,9 +181,11 @@ class ReviewDialog(QDialog):
         rid = self._current_id()
         if not rid:
             return
-        if (
-            QMessageBox.question(self, "确认", "强制采用外部版本并覆盖库内当前内容？")
-            != QMessageBox.StandardButton.Yes
+        if not ConfirmDialog.ask(
+            self,
+            "确认强制采用外部版本",
+            "将覆盖题库中的当前内容，并保留版本记录。",
+            "强制采用",
         ):
             return
         try:
