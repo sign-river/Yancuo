@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 import yancuo_win.ui.intake_page as intake_page_module
 import yancuo_win.ui.note_page as note_page_module
@@ -127,8 +127,7 @@ def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
     app.processEvents()
     assert window.minimumWidth() == 760
     assert window.sidebar.isHidden()
-    assert window.library_property_panel.isHidden()
-    assert not window.library_property_toggle.isHidden()
+    assert not window.library_navigation_panel.isHidden()
 
     builder = window.review_page.plan_builder_page
     builder._set_narrow_layout(True)
@@ -148,7 +147,7 @@ def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
     window._apply_sidebar_visibility()
     app.processEvents()
     assert not window.sidebar.isHidden()
-    assert not window.library_property_panel.isHidden()
+    assert not window.library_navigation_panel.isHidden()
 
 
 def _select_mode(window: MainWindow, mode: str) -> None:
@@ -167,10 +166,13 @@ def _select_mode(window: MainWindow, mode: str) -> None:
 
 
 def _problem_titles(window: MainWindow) -> list[str]:
-    return [
-        window.problem_list.item(index).text().splitlines()[0]
-        for index in range(window.problem_list.count())
-    ]
+    titles: list[str] = []
+    for index in range(window.problem_list.count()):
+        widget = window.problem_list.itemWidget(window.problem_list.item(index))
+        title = widget.findChild(QLabel, "QuestionItemTitle") if widget else None
+        assert title is not None
+        titles.append(title.toolTip())
+    return titles
 
 
 def _wait_for_ai_search(window: MainWindow, timeout: float = 3.0) -> None:
@@ -219,6 +221,32 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
     window._set_library_view("process")
     assert window._nav_mode == "archived"
     assert _problem_titles(window) == ["归档题"]
+
+
+def test_question_preview_expands_inline_and_remains_single(window: MainWindow) -> None:
+    first = window.problem_list.item(0)
+    second = window.problem_list.item(1)
+    first_id = str(first.data(Qt.ItemDataRole.UserRole))
+    second_id = str(second.data(Qt.ItemDataRole.UserRole))
+
+    window._toggle_question_expansion(first)
+    assert window._expanded_question_id == first_id
+    expanded = window.problem_list.itemWidget(window.problem_list.item(0))
+    assert expanded is not None
+    assert window.problem_list.item(0).text() == ""
+    preview_titles = expanded.findChildren(QLabel, "InlinePreviewTitle")
+    assert len(preview_titles) == 1
+    assert preview_titles[0].text() == "题目"
+
+    window._toggle_question_expansion(window.problem_list.item(1))
+    assert window._expanded_question_id == second_id
+    assert window._expanded_question_id != first_id
+
+    window._toggle_question_expansion(window.problem_list.item(1))
+    assert window._expanded_question_id is None
+    collapsed = window.problem_list.itemWidget(window.problem_list.item(1))
+    assert collapsed is not None
+    assert not collapsed.findChildren(QLabel, "InlinePreviewTitle")
 
 
 def test_due_navigation_returns_to_processing_center(window: MainWindow) -> None:
@@ -422,7 +450,7 @@ def test_ai_search_runs_in_background_and_displays_reason(
 
     assert _problem_titles(window) == ["二重积分题"]
     assert "AI 推荐" in window.library_list_hint.text()
-    assert "Mock：本地候选" in window.problem_list.item(0).text()
+    assert "Mock：本地候选" in window.problem_list.item(0).toolTip()
     assert "字段：" in window.search_privacy_hint.text()
     assert "正确答案" not in window.search_privacy_hint.text()
 

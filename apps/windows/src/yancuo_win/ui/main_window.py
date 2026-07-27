@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from html import escape
 import os
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -121,6 +121,125 @@ class CatalogAction:
     disabled_hint: str = ""
 
 
+class _InlineQuestionItem(QWidget):
+    """One question row with one header and an optional inline preview."""
+
+    def __init__(
+        self,
+        problem: Problem,
+        *,
+        expanded: bool,
+        on_toggle: Callable[[], None],
+        on_action: Callable[[str], None],
+        on_more: Callable[[QPushButton], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._on_toggle = on_toggle
+        self._on_open = lambda: on_action("detail")
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(180)
+        self._click_timer.timeout.connect(self._on_toggle)
+        self.setObjectName("InlineQuestionItem")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 12)
+        layout.setSpacing(6)
+        header = QHBoxLayout()
+        title = QLabel(problem.title or "(无标题题目)")
+        title.setObjectName("QuestionItemTitle")
+        title.setWordWrap(False)
+        title.setToolTip(title.text())
+        self._title_label = title
+        self._title_text = title.text()
+        header.addWidget(title, 1)
+        chevron = QLabel("⌃" if expanded else "⌄")
+        chevron.setObjectName("QuestionChevron")
+        header.addWidget(chevron)
+        layout.addLayout(header)
+        status = _STATUS_LABELS.get(problem.status, problem.status)
+        tags = [tag.name for tag in (problem.tags or [])]
+        tag_text = " · ".join(tags[:3])
+        if len(tags) > 3:
+            tag_text += f" · +{len(tags) - 3}"
+        meta = f"{status} · P{problem.priority}"
+        if problem.problem_type:
+            meta += f" · {problem.problem_type}"
+        if tag_text:
+            meta += f" · {tag_text}"
+        metadata = QLabel(meta)
+        metadata.setObjectName("MutedLabel")
+        metadata.setWordWrap(False)
+        metadata.setToolTip(meta)
+        self._metadata_label = metadata
+        self._metadata_text = meta
+        layout.addWidget(metadata)
+        if not expanded:
+            self.setFixedHeight(64)
+            return
+
+        preview_title = QLabel("题目")
+        preview_title.setObjectName("InlinePreviewTitle")
+        layout.addWidget(preview_title)
+        reader = MathContentView()
+        reader.setMinimumHeight(180)
+        reader.setMaximumHeight(460)
+        question_markdown = problem.question_markdown or ""
+        if problem.question_latex and problem.question_latex not in question_markdown:
+            question_markdown = (
+                f"{question_markdown}\n\n$$\n{problem.question_latex}\n$$".strip()
+            )
+        reader.set_problem(
+            {
+                "question_markdown": question_markdown,
+            },
+            include_answers=False,
+            show_header=False,
+            show_answer_notice=False,
+        )
+        layout.addWidget(reader)
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        for text, action, primary in (
+            ("打开详情", "detail", True),
+            ("编辑", "edit", False),
+            ("加入复习计划", "review", False),
+        ):
+            button = primary_button(text) if primary else QPushButton(text)
+            button.clicked.connect(lambda _checked=False, target=action: on_action(target))
+            actions.addWidget(button)
+        more = QPushButton("更多 ▾")
+        more.clicked.connect(lambda _checked=False, button=more: on_more(button))
+        actions.addWidget(more)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        for label, text_value in (
+            (self._title_label, self._title_text),
+            (self._metadata_label, self._metadata_text),
+        ):
+            label.setText(
+                QFontMetrics(label.font()).elidedText(
+                    text_value, Qt.TextElideMode.ElideRight, max(label.width(), 0)
+                )
+            )
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._click_timer.start()
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001, N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._click_timer.stop()
+            self._on_open()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, runtime: RuntimeContext) -> None:
         super().__init__()
@@ -146,6 +265,7 @@ class MainWindow(QMainWindow):
         self._knowledge_scroll_value = 0
         self._nav_mode = "active"
         self._selected_problem_id: str | None = None
+        self._expanded_question_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
         self._ai_search_worker: AiSearchWorker | None = None
         self._ai_search_query = ""
@@ -274,13 +394,10 @@ class MainWindow(QMainWindow):
         self._apply_library_workspace_visibility()
 
     def _apply_library_workspace_visibility(self) -> None:
-        if not hasattr(self, "library_property_panel"):
+        if not hasattr(self, "library_navigation_panel"):
             return
         content_width = self.width() - (0 if self.sidebar.isHidden() else 200)
-        hide_property = content_width < 1120
         hide_navigation = content_width < 860
-        self.library_property_panel.setVisible(not hide_property)
-        self.library_property_toggle.setVisible(hide_property)
         self.library_navigation_panel.setVisible(not hide_navigation)
 
     def _build_sidebar(self) -> QFrame:
@@ -739,11 +856,6 @@ class MainWindow(QMainWindow):
             tabs.addWidget(button)
         self.library_browse_button.setChecked(True)
         tabs.addStretch(1)
-        self.library_property_toggle = QPushButton("\u5c5e\u6027")
-        self.library_property_toggle.setToolTip("\u663e\u793a\u9898\u76ee\u5c5e\u6027\u9762\u677f")
-        self.library_property_toggle.clicked.connect(self._show_library_property_panel)
-        self.library_property_toggle.hide()
-        tabs.addWidget(self.library_property_toggle)
         outer.addLayout(tabs)
 
         workspace = QFrame()
@@ -817,72 +929,15 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(list_header)
         self.problem_list = QListWidget()
         self.problem_list.setObjectName("ProblemList")
-        self.problem_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.problem_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.problem_list.itemSelectionChanged.connect(self._on_problem_selected)
         self.problem_list.itemDoubleClicked.connect(self._open_selected_detail)
         center_layout.addWidget(self.problem_list, 1)
-        self.context_bar = QFrame()
-        self.context_bar.setObjectName("ContextBar")
-        context_layout = QHBoxLayout(self.context_bar)
-        context_layout.setContentsMargins(12, 10, 12, 10)
-        context_layout.setSpacing(8)
-        self._ctx_buttons = []
-        for text, slot, primary in (("\u6253\u5f00\u8be6\u60c5", self._open_selected_detail, True), ("\u7f16\u8f91", self._edit_selected, False), ("\u52a0\u5165\u590d\u4e60\u8ba1\u5212", self._schedule_review, False)):
-            button = primary_button(text) if primary else QPushButton(text)
-            button.setMinimumHeight(36)
-            button.setMinimumWidth(button.sizeHint().width() + 12)
-            button.clicked.connect(slot)
-            self._ctx_buttons.append(button)
-            context_layout.addWidget(button)
-        self.context_more_button = QPushButton("\u66f4\u591a \u25be")
-        self.context_more_button.setToolTip("\u9898\u76ee\u72b6\u6001\u3001AI \u5904\u7406\u3001\u6574\u7406\u4e0e\u5220\u9664\u64cd\u4f5c")
-        self.context_more_button.setMinimumHeight(36)
-        self.context_more_button.clicked.connect(self._show_question_more_menu)
-        self._ctx_buttons.append(self.context_more_button)
-        context_layout.addWidget(self.context_more_button)
-        context_layout.addStretch(1)
-        center_layout.addWidget(self.context_bar)
-        center.setMinimumWidth(480)
+        center.setMinimumWidth(650)
         self.library_splitter.addWidget(center)
-
-        property_panel = QWidget()
-        property_panel.setObjectName("LibraryPropertyPanel")
-        property_layout = QVBoxLayout(property_panel)
-        property_layout.setContentsMargins(0, 0, 0, 0)
-        property_layout.setSpacing(0)
-        property_header = self._library_panel_header("\u9898\u76ee\u5c5e\u6027", "")
-        property_layout.addWidget(property_header)
-        scroll = QScrollArea()
-        scroll.setObjectName("LibraryPropertyScroll")
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidgetResizable(True)
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(16, 16, 16, 16)
-        content_layout.setSpacing(16)
-        self.detail = QLabel("\u9009\u4e2d\u4e00\u9053\u9898\u67e5\u770b\u8be6\u60c5")
-        self.detail.setObjectName("MutedLabel")
-        self.detail.setWordWrap(True)
-        self.detail.setAlignment(Qt.AlignmentFlag.AlignTop)
-        content_layout.addWidget(self.detail)
-        self.problem_preview_label = QLabel("\u539f\u9898\u9884\u89c8")
-        self.problem_preview_label.setObjectName("PropertySectionLabel")
-        self.problem_preview_label.hide()
-        content_layout.addWidget(self.problem_preview_label)
-        self.problem_preview = MathContentView()
-        self.problem_preview.setMinimumHeight(280)
-        self.problem_preview.hide()
-        content_layout.addWidget(self.problem_preview)
-        content_layout.addStretch(1)
-        scroll.setWidget(content)
-        property_layout.addWidget(scroll, 1)
-        property_panel.setMinimumWidth(260)
-        self.library_property_panel = property_panel
-        self.library_splitter.addWidget(property_panel)
         self.library_splitter.setStretchFactor(0, 0)
         self.library_splitter.setStretchFactor(1, 1)
-        self.library_splitter.setStretchFactor(2, 0)
-        self.library_splitter.setSizes([230, 640, 300])
+        self.library_splitter.setSizes([230, 900])
         outer.addWidget(workspace, 1)
         return page
 
@@ -902,11 +957,6 @@ class MainWindow(QMainWindow):
             hint_label.setWordWrap(True)
             layout.addWidget(hint_label)
         return header
-
-    def _show_library_property_panel(self) -> None:
-        self.library_property_panel.show()
-        self.library_property_toggle.hide()
-        self.library_splitter.setSizes([190, 480, 300])
 
     def _set_library_view(self, view: str) -> None:
         if view not in {"browse", "process"}:
@@ -977,9 +1027,13 @@ class MainWindow(QMainWindow):
         delete.setProperty("danger", True)
         return menu
 
-    def _show_question_more_menu(self) -> None:
+    def _show_question_more_menu(self, sender: QPushButton | None = None) -> None:
         menu = self._build_question_more_menu()
-        menu.exec(self.context_more_button.mapToGlobal(self.context_more_button.rect().bottomLeft()))
+        anchor = sender
+        if anchor is not None:
+            menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        else:
+            menu.exec(self.cursor().pos())
 
     def _copy_selected_problem_id(self) -> None:
         problem_id = self._require_one()
@@ -988,9 +1042,9 @@ class MainWindow(QMainWindow):
             self.status.showMessage("\u5df2\u590d\u5236\u9898\u76ee ID", 2500)
 
     def _update_context_bar(self, has_selection: bool) -> None:
-        self.context_bar.setVisible(has_selection or self._nav_mode == "trashed")
-        for btn in self._ctx_buttons:
-            btn.setEnabled(has_selection)
+        # Question actions live in the expanded row.  Keep this method as the
+        # central selection hook used by the existing command handlers.
+        return
         if hasattr(self, "copy_problem_id_button"):
             self.copy_problem_id_button.setEnabled(has_selection)
 
@@ -2021,13 +2075,81 @@ class MainWindow(QMainWindow):
         return f"{title}\n{line2}"
 
     def _make_problem_item(self, problem: Problem) -> QListWidgetItem:
+        # The custom widget is the sole visual renderer.  Keeping text on the
+        # QListWidgetItem paints a second title and metadata layer underneath it.
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, problem.id)
+        item.setToolTip(self._problem_item_tooltip(problem))
+        return item
+
+    def _problem_item_tooltip(self, problem: Problem) -> str:
         text = self._problem_item_text(problem)
         match = self._ai_search_matches.get(problem.id)
         if match is not None and self._is_ai_search_mode():
             text += f"\nAI {match.score:.0%} · {match.reason}"
-        item = QListWidgetItem(text)
-        item.setData(Qt.ItemDataRole.UserRole, problem.id)
-        return item
+        return text
+
+    def _make_inline_question_widget(self, problem: Problem) -> _InlineQuestionItem:
+        return _InlineQuestionItem(
+            problem,
+            expanded=problem.id == self._expanded_question_id,
+            on_toggle=lambda problem_id=problem.id: self._toggle_question_by_id(problem_id),
+            on_action=lambda action, problem_id=problem.id: self._run_inline_action(
+                problem_id, action
+            ),
+            on_more=lambda button, problem_id=problem.id: self._show_inline_more_menu(
+                problem_id, button
+            ),
+        )
+
+    def _set_inline_question_widget(
+        self, item: QListWidgetItem, problem: Problem
+    ) -> None:
+        old_widget = self.problem_list.itemWidget(item)
+        if old_widget is not None:
+            self.problem_list.removeItemWidget(item)
+            old_widget.hide()
+            old_widget.setParent(None)
+            old_widget.deleteLater()
+        widget = self._make_inline_question_widget(problem)
+        item.setSizeHint(widget.sizeHint())
+        self.problem_list.setItemWidget(item, widget)
+
+    def _select_problem_id(self, problem_id: str) -> None:
+        _row, item = self._find_problem_item(problem_id)
+        if item is None:
+            return
+        self.problem_list.setCurrentItem(item)
+        item.setSelected(True)
+        self._selected_problem_id = problem_id
+
+    def _run_inline_action(self, problem_id: str, action: str) -> None:
+        self._select_problem_id(problem_id)
+        {
+            "detail": self._open_selected_detail,
+            "edit": self._edit_selected,
+            "review": self._schedule_review,
+        }[action]()
+
+    def _show_inline_more_menu(self, problem_id: str, button: QPushButton) -> None:
+        self._select_problem_id(problem_id)
+        self._show_question_more_menu(button)
+
+    def _toggle_question_expansion(self, item: QListWidgetItem) -> None:
+        problem_id = str(item.data(Qt.ItemDataRole.UserRole))
+        self._toggle_question_by_id(problem_id)
+
+    def _toggle_question_by_id(self, problem_id: str) -> None:
+        self._expanded_question_id = (
+            None if self._expanded_question_id == problem_id else problem_id
+        )
+        self._select_problem_id(problem_id)
+        self.refresh_problems(preserve_view=True)
+        _row, refreshed = self._find_problem_item(problem_id)
+        if refreshed is not None:
+            self.problem_list.scrollToItem(
+                refreshed, QListWidget.ScrollHint.EnsureVisible
+            )
 
     def _find_problem_item(self, problem_id: str) -> tuple[int, QListWidgetItem | None]:
         for index in range(self.problem_list.count()):
@@ -2050,11 +2172,15 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "搜索或筛选失败", str(exc))
             return
+        visible_ids = {problem.id for problem in problems}
+        if self._expanded_question_id not in visible_ids:
+            self._expanded_question_id = None
         self.problem_list.blockSignals(True)
         self.problem_list.clear()
         for p in problems:
             item = self._make_problem_item(p)
             self.problem_list.addItem(item)
+            self._set_inline_question_widget(item, p)
             if p.id in selected_ids:
                 item.setSelected(True)
             if p.id == current_id:
@@ -2105,12 +2231,10 @@ class MainWindow(QMainWindow):
         elif matching is not None and item is None:
             item = self._make_problem_item(matching)
             self.problem_list.insertItem(0, item)
+            self._set_inline_question_widget(item, matching)
         elif matching is not None and item is not None:
-            text = self._problem_item_text(matching)
-            match = self._ai_search_matches.get(matching.id)
-            if match is not None and self._is_ai_search_mode():
-                text += f"\nAI {match.score:.0%} · {match.reason}"
-            item.setText(text)
+            item.setToolTip(self._problem_item_tooltip(matching))
+            self._set_inline_question_widget(item, matching)
         if select and item is not None and matching is not None:
             self.problem_list.clearSelection()
             self.problem_list.setCurrentItem(item)
@@ -2123,6 +2247,8 @@ class MainWindow(QMainWindow):
             self._refresh_focus_pages()
 
     def _remove_problem_items(self, problem_ids: list[str]) -> None:
+        if self._expanded_question_id in problem_ids:
+            self._expanded_question_id = None
         rows = sorted(
             (
                 row
@@ -2190,61 +2316,9 @@ class MainWindow(QMainWindow):
         self._update_context_bar(has)
         if not items:
             self._selected_problem_id = None
-            self.problem_preview.hide()
-            self.problem_preview_label.hide()
-            self.detail.setText("选中一道题查看详情")
-            self.detail.setObjectName("MutedLabel")
-            self.detail.style().unpolish(self.detail)
-            self.detail.style().polish(self.detail)
             return
         pid = items[0].data(Qt.ItemDataRole.UserRole)
         self._selected_problem_id = pid
-        p = self.services.get_problem(pid)
-        if not p:
-            self.detail.setText("题目不存在")
-            self.problem_preview.hide()
-            self.problem_preview_label.hide()
-            return
-        assets = "\n".join(
-            f"· {a.role}: {a.relative_path}{' (不可变)' if a.is_immutable else ''}"
-            for a in (p.assets or [])
-        ) or "（无）"
-        tags = ", ".join(t.name for t in (p.tags or [])) or "（无）"
-        status = _STATUS_LABELS.get(p.status, p.status)
-        match = self._ai_search_matches.get(p.id)
-        ai_reason = (
-            f"<b>AI 匹配原因</b><br>{escape(match.reason)}"
-            f"<br><small>推荐分数 {match.score:.0%}</small><br><br>"
-            if match is not None and self._is_ai_search_mode()
-            else ""
-        )
-        self.detail.setObjectName("")
-        self.detail.setText(
-            f"<b>{p.title or '（无标题）'}</b><br>"
-            f"<small>{status} · P{p.priority} · r{p.revision}</small><br><br>"
-            f"{ai_reason}"
-            f"<b>标签</b><br>{tags}<br><br>"
-            f"<b>附件</b><br>{assets.replace(chr(10), '<br>')}<br><br>"
-            f"<small>ID {p.id}</small>"
-        )
-        self.detail.setTextFormat(Qt.TextFormat.RichText)
-        self.detail.style().unpolish(self.detail)
-        self.detail.style().polish(self.detail)
-        self.problem_preview_label.show()
-        self.problem_preview.show()
-        self.problem_preview.set_problem(
-            {
-                "title": p.title or "（无标题题目）",
-                "question_markdown": p.question_markdown,
-                "question_latex": p.question_latex,
-                "problem_type": p.problem_type,
-                "priority": p.priority,
-            },
-            tag_names=(tag.name for tag in (p.tags or [])),
-            include_answers=False,
-            show_header=False,
-            show_answer_notice=False,
-        )
 
     def _selected_ids(self) -> list[str]:
         return [

@@ -300,8 +300,7 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.border};
         width: 1px;
     }}
-    QWidget#LibraryNavigationPanel, QWidget#LibraryListPanel,
-    QWidget#LibraryPropertyPanel {{
+    QWidget#LibraryNavigationPanel, QWidget#LibraryListPanel {{
         background: {t.card};
         border: none;
     }}
@@ -316,7 +315,7 @@ def app_stylesheet(theme: str = "light") -> str:
         font-size: 14px;
         font-weight: 600;
     }}
-    QLabel#PanelHint, QLabel#PropertySectionLabel {{
+    QLabel#PanelHint {{
         color: {t.muted};
         font-size: 12px;
     }}
@@ -342,14 +341,14 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
     QListWidget#ProblemList::item:hover {{ background: {t.list_hover}; }}
     QListWidget#ProblemList::item:selected {{ background: {t.list_selected}; color: {t.text}; }}
-    QScrollArea#LibraryPropertyScroll {{ background: {t.card}; border: none; }}
-    QFrame#ContextBar {{
-        min-height: 56px;
+    QWidget#InlineQuestionItem {{
         background: {t.card};
-        border: none;
-        border-top: 1px solid {t.border};
-        border-radius: 0;
+        border: 1px solid {t.border};
+        border-radius: 6px;
     }}
+    QLabel#QuestionItemTitle {{ color: {t.text}; font-size: 15px; font-weight: 600; }}
+    QLabel#QuestionChevron {{ color: {t.muted}; font-size: 18px; }}
+    QLabel#InlinePreviewTitle {{ color: {t.primary}; font-size: 13px; font-weight: 600; margin-top: 8px; }}
     QPushButton#SearchModeButton {{ min-height: 36px; max-height: 36px; }}
     QPushButton#LibraryViewButton {{
         min-height: 36px;
@@ -450,12 +449,7 @@ def app_stylesheet(theme: str = "light") -> str:
         margin: 1px 0;
         border-radius: 8px;
     }}
-    QListWidget#ProblemList::item {{
-        min-height: 52px;
-        padding: 10px 12px;
-        margin: 2px 4px;
-        border-radius: 8px;
-    }}
+    QListWidget#ProblemList::item {{ min-height: 0; padding: 0; margin: 3px 4px; border-radius: 6px; }}
     QListWidget#FilterNav::item:hover, QListWidget#ProblemList::item:hover,
     QTreeWidget#KnowledgeTree::item:hover {{
         background: {t.list_hover};
