@@ -7,8 +7,9 @@
 
 ```powershell
 cd apps/windows
-pip install -e ".[dev]"
-python -m yancuo_win
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m yancuo_win
 ```
 
 ### 首次启用 Faro AI
@@ -51,7 +52,7 @@ python -m yancuo_win
 
 ```powershell
 cd apps/windows
-py -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
 .\.venv\Scripts\python -m pip install ".[dev]"
 .\.venv\Scripts\python -m ruff check src ../../tests

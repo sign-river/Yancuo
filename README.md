@@ -91,8 +91,10 @@
 
 ```powershell
 cd apps/windows
-pip install -e ".[dev]"
-python -m yancuo_win
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m yancuo_win
 ```
 
 首次使用真实 AI：打开“设置”，粘贴 Faro Key 并保存，填写模型广场中支持图片输入的模型 ID，依次点击“测试 Faro 连接”和“保存并应用 AI 设置”。密钥只保存在 Windows 凭据管理器；也可在启动前设置临时环境变量 `FARO_API_KEY`。
