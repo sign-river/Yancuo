@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QMenu,
-    QScrollArea,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -130,13 +129,12 @@ class _InlineQuestionItem(QWidget):
         *,
         expanded: bool,
         on_toggle: Callable[[], None],
-        on_action: Callable[[str], None],
-        on_more: Callable[[QPushButton], None],
+        on_open: Callable[[], None],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_toggle = on_toggle
-        self._on_open = lambda: on_action("detail")
+        self._on_open = on_open
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(180)
@@ -182,8 +180,7 @@ class _InlineQuestionItem(QWidget):
         preview_title.setObjectName("InlinePreviewTitle")
         layout.addWidget(preview_title)
         reader = MathContentView()
-        reader.setMinimumHeight(180)
-        reader.setMaximumHeight(460)
+        reader.setObjectName("InlineQuestionPreview")
         question_markdown = problem.question_markdown or ""
         if problem.question_latex and problem.question_latex not in question_markdown:
             question_markdown = (
@@ -198,21 +195,6 @@ class _InlineQuestionItem(QWidget):
             show_answer_notice=False,
         )
         layout.addWidget(reader)
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-        for text, action, primary in (
-            ("打开详情", "detail", True),
-            ("编辑", "edit", False),
-            ("加入复习计划", "review", False),
-        ):
-            button = primary_button(text) if primary else QPushButton(text)
-            button.clicked.connect(lambda _checked=False, target=action: on_action(target))
-            actions.addWidget(button)
-        more = QPushButton("更多 ▾")
-        more.clicked.connect(lambda _checked=False, button=more: on_more(button))
-        actions.addWidget(more)
-        actions.addStretch(1)
-        layout.addLayout(actions)
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
@@ -933,6 +915,34 @@ class MainWindow(QMainWindow):
         self.problem_list.itemSelectionChanged.connect(self._on_problem_selected)
         self.problem_list.itemDoubleClicked.connect(self._open_selected_detail)
         center_layout.addWidget(self.problem_list, 1)
+
+        self.question_action_bar = QFrame()
+        self.question_action_bar.setObjectName("QuestionActionBar")
+        self.question_action_bar.setFixedHeight(56)
+        action_layout = QHBoxLayout(self.question_action_bar)
+        action_layout.setContentsMargins(16, 8, 16, 8)
+        action_layout.setSpacing(8)
+        self.question_detail_button = primary_button("打开详情")
+        self.question_detail_button.clicked.connect(self._open_selected_detail)
+        self.question_edit_button = QPushButton("编辑")
+        self.question_edit_button.clicked.connect(self._edit_selected)
+        self.question_review_button = QPushButton("加入复习计划")
+        self.question_review_button.clicked.connect(self._schedule_review)
+        self.question_more_button = QPushButton("更多 ▾")
+        self.question_more_button.clicked.connect(
+            lambda: self._show_question_more_menu(self.question_more_button)
+        )
+        self._question_action_buttons = (
+            self.question_detail_button,
+            self.question_edit_button,
+            self.question_review_button,
+            self.question_more_button,
+        )
+        for button in self._question_action_buttons:
+            button.setFixedHeight(32)
+            action_layout.addWidget(button)
+        action_layout.addStretch(1)
+        center_layout.addWidget(self.question_action_bar)
         center.setMinimumWidth(650)
         self.library_splitter.addWidget(center)
         self.library_splitter.setStretchFactor(0, 0)
@@ -1042,9 +1052,8 @@ class MainWindow(QMainWindow):
             self.status.showMessage("\u5df2\u590d\u5236\u9898\u76ee ID", 2500)
 
     def _update_context_bar(self, has_selection: bool) -> None:
-        # Question actions live in the expanded row.  Keep this method as the
-        # central selection hook used by the existing command handlers.
-        return
+        for button in getattr(self, "_question_action_buttons", ()):
+            button.setEnabled(has_selection)
         if hasattr(self, "copy_problem_id_button"):
             self.copy_problem_id_button.setEnabled(has_selection)
 
@@ -2094,12 +2103,7 @@ class MainWindow(QMainWindow):
             problem,
             expanded=problem.id == self._expanded_question_id,
             on_toggle=lambda problem_id=problem.id: self._toggle_question_by_id(problem_id),
-            on_action=lambda action, problem_id=problem.id: self._run_inline_action(
-                problem_id, action
-            ),
-            on_more=lambda button, problem_id=problem.id: self._show_inline_more_menu(
-                problem_id, button
-            ),
+            on_open=lambda problem_id=problem.id: self._open_problem_detail(problem_id),
         )
 
     def _set_inline_question_widget(
@@ -2123,17 +2127,9 @@ class MainWindow(QMainWindow):
         item.setSelected(True)
         self._selected_problem_id = problem_id
 
-    def _run_inline_action(self, problem_id: str, action: str) -> None:
+    def _open_problem_detail(self, problem_id: str) -> None:
         self._select_problem_id(problem_id)
-        {
-            "detail": self._open_selected_detail,
-            "edit": self._edit_selected,
-            "review": self._schedule_review,
-        }[action]()
-
-    def _show_inline_more_menu(self, problem_id: str, button: QPushButton) -> None:
-        self._select_problem_id(problem_id)
-        self._show_question_more_menu(button)
+        self._open_selected_detail()
 
     def _toggle_question_expansion(self, item: QListWidgetItem) -> None:
         problem_id = str(item.data(Qt.ItemDataRole.UserRole))

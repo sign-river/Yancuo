@@ -344,11 +344,23 @@ def app_stylesheet(theme: str = "light") -> str:
     QWidget#InlineQuestionItem {{
         background: {t.card};
         border: 1px solid {t.border};
-        border-radius: 6px;
+        border-radius: 8px;
     }}
     QLabel#QuestionItemTitle {{ color: {t.text}; font-size: 15px; font-weight: 600; }}
     QLabel#QuestionChevron {{ color: {t.muted}; font-size: 18px; }}
-    QLabel#InlinePreviewTitle {{ color: {t.primary}; font-size: 13px; font-weight: 600; margin-top: 8px; }}
+    QLabel#InlinePreviewTitle {{
+        color: {t.primary};
+        font-size: 13px;
+        font-weight: 600;
+        margin-top: 6px;
+        padding-top: 14px;
+        border-top: 1px solid {t.border};
+    }}
+    QFrame#QuestionActionBar {{
+        background: {t.card};
+        border: none;
+        border-top: 1px solid {t.border};
+    }}
     QPushButton#SearchModeButton {{ min-height: 36px; max-height: 36px; }}
     QPushButton#LibraryViewButton {{
         min-height: 36px;
