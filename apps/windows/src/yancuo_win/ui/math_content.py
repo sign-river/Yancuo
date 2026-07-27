@@ -171,6 +171,7 @@ def build_problem_html(
     include_answers: bool = True,
     show_header: bool = True,
     show_answer_notice: bool = True,
+    fit_content: bool = False,
     theme: str = "light",
 ) -> str:
     """Build a complete, self-contained HTML problem document."""
@@ -247,7 +248,7 @@ def build_problem_html(
 <style>
   :root {{ color-scheme: {colors.name}; }}
   * {{ box-sizing: border-box; }}
-  html, body {{ margin: 0; min-height: 100%; background: {colors.bg}; color: {colors.text}; }}
+  html, body {{ margin: 0; {"" if fit_content else "min-height: 100%;"} background: {colors.bg}; color: {colors.text}; }}
   body {{
     padding: 24px;
     font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
@@ -664,6 +665,7 @@ class MathContentView(QWidget):
             include_answers=self._last_render["include_answers"],
             show_header=self._last_render["show_header"],
             show_answer_notice=self._last_render["show_answer_notice"],
+            fit_content=self._fit_content_height,
             theme=current_theme_name(),
         )
         self._schedule_render()

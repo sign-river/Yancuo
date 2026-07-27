@@ -362,7 +362,11 @@ def app_stylesheet(theme: str = "light") -> str:
         border: none;
         border-top: 1px solid {t.border};
     }}
-    QPushButton#SearchModeButton {{ min-height: 36px; max-height: 36px; }}
+    QPushButton#SearchModeButton {{
+        min-height: 20px;
+        max-height: 20px;
+        padding: 5px 12px;
+    }}
     QPushButton#LibraryViewButton {{
         min-height: 36px;
         border: none;
@@ -564,12 +568,20 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 8px 14px;
         min-height: 20px;
     }}
+    QComboBox#SearchScopeCombo {{
+        background: {t.card};
+        border: 1px solid {t.border};
+        border-radius: 6px;
+        padding: 5px 8px;
+        min-height: 20px;
+    }}
     QLineEdit#SearchInput {{
         background: {t.card};
         border: 1px solid {t.border};
         border-radius: 6px;
-        padding: 6px 8px;
-        min-height: 22px;
+        padding: 5px 8px;
+        min-height: 20px;
+        max-height: 20px;
     }}
     QLineEdit#SearchInput:focus {{
         border-color: {t.primary};
