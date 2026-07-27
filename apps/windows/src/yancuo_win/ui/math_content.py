@@ -8,7 +8,8 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from latex2mathml import converter
-from PySide6.QtCore import QBuffer, QIODevice, QMargins, QTimer, Qt
+from PySide6.QtCore import QBuffer, QIODevice, QMargins, QMarginsF, QSize, QSizeF, QTimer, Qt, Signal
+from PySide6.QtGui import QPageLayout, QPageSize
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
@@ -430,6 +431,8 @@ class MathContentView(QWidget):
     ``QPdfView``, so navigation never creates a Chromium UI window.
     """
 
+    content_height_changed = Signal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.last_html = ""
@@ -440,6 +443,8 @@ class MathContentView(QWidget):
         self._renderer: QWebEnginePage | None = None
         self._render_generation = 0
         self._render_scheduled = False
+        self._fit_content_height = False
+        self._content_height: int | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._view = QPdfView(self)
@@ -452,6 +457,23 @@ class MathContentView(QWidget):
         manager = get_theme_manager(QApplication.instance())
         if manager is not None:
             manager.theme_changed.connect(self._on_theme_changed)
+
+    def set_fit_content_height(self, enabled: bool = True) -> None:
+        """Make this reader grow with the rendered document instead of scrolling."""
+
+        self._fit_content_height = enabled
+        policy = (
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if enabled
+            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._view.setVerticalScrollBarPolicy(policy)
+        self._view.setHorizontalScrollBarPolicy(policy)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        if self._fit_content_height and self._content_height is not None:
+            return QSize(0, self._content_height)
+        return super().sizeHint()
 
     def showEvent(self, event) -> None:  # noqa: ANN001, N802
         super().showEvent(event)
@@ -493,11 +515,46 @@ class MathContentView(QWidget):
             self._renderer = None
             page.deleteLater()
             return
-        page.printToPdf(
-            lambda data, target=page, token=generation: self._pdf_ready(
-                target, token, data
+        if self._fit_content_height:
+            page.runJavaScript(
+                "Math.ceil(document.body.scrollHeight)",
+                lambda height, target=page, token=generation: self._print_content_pdf(
+                    target, token, height
+                ),
             )
+            return
+        self._print_pdf(page, generation)
+
+    def _print_content_pdf(self, page: QWebEnginePage, generation: int, height) -> None:  # noqa: ANN001
+        if page is not self._renderer or generation != self._render_generation:
+            return
+        content_height = max(80, int(height or 0))
+        # Chromium uses 96 CSS pixels per inch. The custom page height removes
+        # the PDF reader's otherwise independent vertical viewport.
+        page_size = QPageSize(
+            QSizeF(210, content_height * 25.4 / 96 + 4),
+            QPageSize.Unit.Millimeter,
         )
+        layout = QPageLayout(
+            page_size,
+            QPageLayout.Orientation.Portrait,
+            QMarginsF(),
+        )
+        self._print_pdf(page, generation, layout)
+
+    def _print_pdf(
+        self,
+        page: QWebEnginePage,
+        generation: int,
+        layout: QPageLayout | None = None,
+    ) -> None:
+        def callback(data, target=page, token=generation) -> None:  # noqa: ANN001
+            self._pdf_ready(target, token, data)
+
+        if layout is None:
+            page.printToPdf(callback)
+        else:
+            page.printToPdf(callback, layout)
 
     def _pdf_ready(self, page: QWebEnginePage, generation: int, data) -> None:  # noqa: ANN001
         if page is not self._renderer or generation != self._render_generation:
@@ -526,10 +583,34 @@ class MathContentView(QWidget):
         self._document_buffer = buffer
         self._view.setDocument(document)
         self._view.show()
+        if self._fit_content_height:
+            self._update_content_height()
         if previous_document is not None:
             previous_document.deleteLater()
         if previous_buffer is not None:
             previous_buffer.deleteLater()
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        if self._fit_content_height and self._document is not None:
+            self._update_content_height()
+
+    def _update_content_height(self) -> None:
+        if self._document is None or self._document.pageCount() < 1:
+            return
+        width = max(self.width(), 1)
+        height = 0.0
+        for page_number in range(self._document.pageCount()):
+            page_size = self._document.pagePointSize(page_number)
+            if page_size.width() > 0:
+                height += width * page_size.height() / page_size.width()
+        new_height = max(1, round(height))
+        if new_height == self._content_height:
+            return
+        self._content_height = new_height
+        self.setFixedHeight(new_height)
+        self.updateGeometry()
+        self.content_height_changed.emit()
 
     def set_problem(
         self,

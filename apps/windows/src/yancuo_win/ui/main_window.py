@@ -181,6 +181,8 @@ class _InlineQuestionItem(QWidget):
         layout.addWidget(preview_title)
         reader = MathContentView()
         reader.setObjectName("InlineQuestionPreview")
+        reader.set_fit_content_height()
+        reader.content_height_changed.connect(self.updateGeometry)
         question_markdown = problem.question_markdown or ""
         if problem.question_latex and problem.question_latex not in question_markdown:
             question_markdown = (
@@ -853,9 +855,9 @@ class MainWindow(QMainWindow):
         nav_layout = QVBoxLayout(navigation)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(0)
-        nav_header = self._library_panel_header("\u77e5\u8bc6\u6d4f\u89c8", "\u5c55\u5f00\u79d1\u76ee\u4e0e\u7ae0\u8282\uff0c\u7236\u8282\u70b9\u5305\u542b\u5168\u90e8\u4e0b\u7ea7\u9898\u76ee")
+        nav_header = self._library_panel_header("\u77e5\u8bc6\u6d4f\u89c8", "")
+        nav_header.setFixedHeight(84)
         self.library_nav_title = nav_header.findChild(QLabel, "PanelTitle")
-        self.library_nav_hint = nav_header.findChild(QLabel, "PanelHint")
         nav_layout.addWidget(nav_header)
         self.library_nav_stack = QStackedWidget()
         self.knowledge_tree = QTreeWidget()
@@ -873,6 +875,7 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.library_nav_stack, 1)
         nav_footer = QFrame()
         nav_footer.setObjectName("LibraryPanelFooter")
+        nav_footer.setFixedHeight(56)
         nav_actions = QHBoxLayout(nav_footer)
         nav_actions.setContentsMargins(12, 8, 12, 8)
         self.new_subject_button = QPushButton("\uff0b \u65b0\u5efa")
@@ -896,6 +899,7 @@ class MainWindow(QMainWindow):
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(0)
         list_header = self._library_panel_header("", "")
+        list_header.setFixedHeight(84)
         list_header_layout = list_header.layout()
         self.library_breadcrumb = QLabel("\u9898\u5e93 / \u5168\u90e8\u6b63\u5f0f\u9898\u76ee")
         self.library_breadcrumb.setObjectName("LibraryBreadcrumb")
@@ -1490,7 +1494,6 @@ class MainWindow(QMainWindow):
         current_mode = self._nav_mode
         if self._library_view == "browse":
             self.library_nav_title.setText("知识浏览")
-            self.library_nav_hint.setText("展开科目与章节，父节点包含全部下级题目")
             self.library_view_hint.setText("按科目与知识结构浏览正式题目。")
             self.library_list_hint.setText("正式题目 · 双击打开详情")
             self.new_subject_button.setVisible(True)
@@ -1501,7 +1504,6 @@ class MainWindow(QMainWindow):
             self._update_catalog_action_buttons()
         else:
             self.library_nav_title.setText("处理中心")
-            self.library_nav_hint.setText("查看常用题目视图与生命周期状态")
             self.library_view_hint.setText(
                 "集中查看常用题目视图，以及待整理、已归档和回收站题目。"
             )
@@ -2116,8 +2118,23 @@ class MainWindow(QMainWindow):
             old_widget.setParent(None)
             old_widget.deleteLater()
         widget = self._make_inline_question_widget(problem)
+        reader = widget.findChild(MathContentView)
+        if reader is not None and hasattr(reader, "content_height_changed"):
+            reader.content_height_changed.connect(
+                lambda target=item, source=widget: self._sync_inline_question_size(
+                    target, source
+                )
+            )
         item.setSizeHint(widget.sizeHint())
         self.problem_list.setItemWidget(item, widget)
+
+    def _sync_inline_question_size(
+        self, item: QListWidgetItem, widget: _InlineQuestionItem
+    ) -> None:
+        if self.problem_list.itemWidget(item) is not widget:
+            return
+        item.setSizeHint(widget.sizeHint())
+        self.problem_list.doItemsLayout()
 
     def _select_problem_id(self, problem_id: str) -> None:
         _row, item = self._find_problem_item(problem_id)

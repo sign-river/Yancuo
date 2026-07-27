@@ -320,8 +320,8 @@ def app_stylesheet(theme: str = "light") -> str:
         font-size: 12px;
     }}
     QFrame#LibraryPanelFooter {{
-        min-height: 48px;
-        max-height: 48px;
+        min-height: 56px;
+        max-height: 56px;
         background: {t.card};
         border: none;
         border-top: 1px solid {t.border};
@@ -342,9 +342,10 @@ def app_stylesheet(theme: str = "light") -> str:
     QListWidget#ProblemList::item:hover {{ background: {t.list_hover}; }}
     QListWidget#ProblemList::item:selected {{ background: {t.list_selected}; color: {t.text}; }}
     QWidget#InlineQuestionItem {{
-        background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 8px;
+        background: transparent;
+        border: none;
+        border-bottom: 1px solid {t.border};
+        border-radius: 0;
     }}
     QLabel#QuestionItemTitle {{ color: {t.text}; font-size: 15px; font-weight: 600; }}
     QLabel#QuestionChevron {{ color: {t.muted}; font-size: 18px; }}
@@ -450,18 +451,18 @@ def app_stylesheet(theme: str = "light") -> str:
 
     QListWidget#FilterNav, QListWidget#ProblemList, QTreeWidget#KnowledgeTree {{
         background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 12px;
+        border: none;
+        border-radius: 0;
         outline: none;
-        padding: 6px;
+        padding: 0;
     }}
     QListWidget#FilterNav::item, QTreeWidget#KnowledgeTree::item {{
         height: 34px;
         padding: 6px 10px;
-        margin: 1px 0;
-        border-radius: 8px;
+        margin: 0;
+        border-radius: 0;
     }}
-    QListWidget#ProblemList::item {{ min-height: 0; padding: 0; margin: 3px 4px; border-radius: 6px; }}
+    QListWidget#ProblemList::item {{ min-height: 0; padding: 0; margin: 0; border-radius: 0; }}
     QListWidget#FilterNav::item:hover, QListWidget#ProblemList::item:hover,
     QTreeWidget#KnowledgeTree::item:hover {{
         background: {t.list_hover};
