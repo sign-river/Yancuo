@@ -172,6 +172,7 @@ def build_problem_html(
     show_header: bool = True,
     show_answer_notice: bool = True,
     fit_content: bool = False,
+    compact: bool = False,
     theme: str = "light",
 ) -> str:
     """Build a complete, self-contained HTML problem document."""
@@ -250,29 +251,29 @@ def build_problem_html(
   * {{ box-sizing: border-box; }}
   html, body {{ margin: 0; {"" if fit_content else "min-height: 100%;"} background: {colors.bg}; color: {colors.text}; }}
   body {{
-    padding: 24px;
+    padding: {16 if compact else 24}px;
     font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
-    font-size: 16px;
-    line-height: 1.8;
+    font-size: {14 if compact else 16}px;
+    line-height: {1.65 if compact else 1.8};
   }}
-  .problem-header {{ margin: 0 0 18px; }}
-  .eyebrow {{ color: {colors.primary}; font-size: 13px; font-weight: 700; letter-spacing: .08em; }}
-  h1 {{ margin: 4px 0 12px; font-size: 26px; line-height: 1.35; }}
-  h2 {{ margin: 0 0 12px; font-size: 17px; line-height: 1.4; }}
-  .meta-row {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-  .reader-meta {{ margin: 0 0 14px; }}
-  .meta-chip, .tag {{ padding: 4px 10px; border-radius: 999px; background: {colors.chip_bg}; color: {colors.chip_text}; font-size: 13px; }}
+  .problem-header {{ margin: 0 0 {12 if compact else 18}px; }}
+  .eyebrow {{ color: {colors.primary}; font-size: {12 if compact else 13}px; font-weight: 700; letter-spacing: .08em; }}
+  h1 {{ margin: 4px 0 {8 if compact else 12}px; font-size: {22 if compact else 26}px; line-height: 1.35; }}
+  h2 {{ margin: 0 0 {8 if compact else 12}px; font-size: {16 if compact else 17}px; line-height: 1.4; }}
+  .meta-row {{ display: flex; flex-wrap: wrap; gap: {6 if compact else 8}px; }}
+  .reader-meta {{ margin: 0 0 {10 if compact else 14}px; }}
+  .meta-chip, .tag {{ padding: {2 if compact else 4}px {8 if compact else 10}px; border-radius: 999px; background: {colors.chip_bg}; color: {colors.chip_text}; font-size: {12 if compact else 13}px; }}
   .tag {{ background: {colors.tag_bg}; color: {colors.tag_text}; }}
   .content-card {{
-    margin: 0 0 14px; padding: 18px 20px; background: {colors.card};
+    margin: 0 0 {10 if compact else 14}px; padding: {14 if compact else 18}px {16 if compact else 20}px; background: {colors.card};
     border: 1px solid {colors.border}; border-radius: 12px;
   }}
   .rich-text {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
   .rich-text math {{
     font-family: "Cambria Math", "STIX Two Math", serif;
-    font-size: 1.18em;
+    font-size: {1.08 if compact else 1.18}em;
   }}
-  .rich-text math[display="block"] {{ margin: .85em 0; text-align: left; }}
+  .rich-text math[display="block"] {{ margin: {'.55em' if compact else '.85em'} 0; text-align: left; }}
   .empty {{ color: {colors.muted}; }}
   .answer-hidden {{
     margin: 0 0 14px; padding: 14px 18px; border: 1px dashed {colors.border};
@@ -445,6 +446,7 @@ class MathContentView(QWidget):
         self._render_generation = 0
         self._render_scheduled = False
         self._fit_content_height = False
+        self._compact = False
         self._content_height: int | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -470,6 +472,13 @@ class MathContentView(QWidget):
         )
         self._view.setVerticalScrollBarPolicy(policy)
         self._view.setHorizontalScrollBarPolicy(policy)
+
+    def set_compact(self, enabled: bool = True) -> None:
+        """Use the denser reader scale for constrained workflow screens."""
+        if self._compact == enabled:
+            return
+        self._compact = enabled
+        self._render_last()
 
     def sizeHint(self) -> QSize:  # noqa: N802
         if self._fit_content_height and self._content_height is not None:
@@ -621,6 +630,7 @@ class MathContentView(QWidget):
         include_answers: bool = True,
         show_header: bool = True,
         show_answer_notice: bool = True,
+        compact: bool = False,
     ) -> None:
         self._last_note_render = None
         self._last_render = {
@@ -629,6 +639,7 @@ class MathContentView(QWidget):
             "include_answers": include_answers,
             "show_header": show_header,
             "show_answer_notice": show_answer_notice,
+            "compact": compact,
         }
         self._render_last()
 
@@ -666,6 +677,7 @@ class MathContentView(QWidget):
             show_header=self._last_render["show_header"],
             show_answer_notice=self._last_render["show_answer_notice"],
             fit_content=self._fit_content_height,
+            compact=self._last_render["compact"] or self._compact,
             theme=current_theme_name(),
         )
         self._schedule_render()

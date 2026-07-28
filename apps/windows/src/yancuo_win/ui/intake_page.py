@@ -32,7 +32,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QSplitter,
     QStackedWidget,
     QTabWidget,
     QTextEdit,
@@ -896,25 +895,62 @@ class IntakePage(QWidget):
         layout.addWidget(
             self._header(
                 "AI 录题 · 确认结果",
-                "先在“阅读预览”核对公式和内容；如需调整，切换到“编辑字段”后再入库。",
+                "",
                 self.library_requested.emit,
             )
         )
-        self.candidate_counter = QLabel("")
-        self.candidate_counter.setObjectName("PageHint")
-        layout.addWidget(self.candidate_counter)
-        self.structure_suggestion_label = QLabel("")
-        self.structure_suggestion_label.setWordWrap(True)
-        self.structure_suggestion_label.setObjectName("PageHint")
-        layout.addWidget(self.structure_suggestion_label)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.ai_result_tabs = QTabWidget()
+        self.ai_result_tabs.setObjectName("AIResultTabs")
 
-        left = CardFrame()
-        left.add_title("原始图片与识别提示")
-        left.add_hint(
-            "蓝框表示当前题目的原图来源区域，仅用于核对、裁切定位和保存；"
-            "调整蓝框不会自动重新调用 AI。"
+        preview_host = QWidget()
+        preview_layout = QVBoxLayout(preview_host)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        self.ai_result_preview = MathContentView()
+        self.ai_result_preview.setMinimumSize(QSize(520, 440))
+        preview_layout.addWidget(self.ai_result_preview)
+        self.ai_result_tabs.addTab(preview_host, "阅读预览")
+
+        form_host = QWidget()
+        form_layout = QVBoxLayout(form_host)
+        form_layout.setContentsMargins(0, 0, 8, 0)
+        self.ai_form = ProblemForm(self.intake)
+        self.ai_form.changed.connect(self._queue_ai_preview)
+        form_layout.addWidget(self.ai_form)
+        self.ai_result_tabs.addTab(self._scroll(form_host), "编辑字段")
+        self.ai_result_tabs.addTab(
+            self._build_image_tools_tab(), "原图范围与重识别"
         )
+        self.ai_result_tabs.currentChanged.connect(self._on_ai_result_tab_changed)
+        layout.addWidget(self.ai_result_tabs, stretch=1)
+
+        actions = QHBoxLayout()
+        previous = QPushButton("上一题")
+        previous.clicked.connect(lambda: self._move_candidate(-1))
+        next_button = QPushButton("下一题")
+        next_button.clicked.connect(lambda: self._move_candidate(1))
+        split = QPushButton("拆分当前候选")
+        split.clicked.connect(self._split_candidate)
+        merge = QPushButton("与下一题合并")
+        merge.clicked.connect(self._merge_with_next_candidate)
+        skip = danger_button("删除错误候选")
+        skip.clicked.connect(self._reject_candidate)
+        confirm = primary_button("确认入库")
+        confirm.clicked.connect(self._commit_candidate)
+        commit_set = QPushButton("作为题组入库")
+        commit_set.clicked.connect(self._commit_candidates_as_set)
+        actions.addWidget(previous)
+        actions.addWidget(next_button)
+        actions.addWidget(split)
+        actions.addWidget(merge)
+        actions.addStretch(1)
+        actions.addWidget(skip)
+        actions.addWidget(commit_set)
+        actions.addWidget(confirm)
+        layout.addLayout(actions)
+        return page
+
+    def _build_image_tools_tab(self) -> QScrollArea:
+        """Build the dedicated source-image and recognition adjustment tab."""
         # The image tools can be taller than the available confirmation pane.
         # Keep them in a single scrollable work area so controls never paint
         # over the preview when the window height is constrained.
@@ -984,58 +1020,7 @@ class IntakePage(QWidget):
         self.uncertain_label.setObjectName("PageHint")
         image_tools_layout.addWidget(self.uncertain_label)
         image_tools_layout.addStretch(1)
-        left.body.addWidget(self._scroll(image_tools), stretch=1)
-        splitter.addWidget(left)
-
-        self.ai_result_tabs = QTabWidget()
-        self.ai_result_tabs.setObjectName("AIResultTabs")
-
-        preview_host = QWidget()
-        preview_layout = QVBoxLayout(preview_host)
-        preview_layout.setContentsMargins(0, 0, 0, 0)
-        self.ai_result_preview = MathContentView()
-        self.ai_result_preview.setMinimumSize(QSize(520, 440))
-        preview_layout.addWidget(self.ai_result_preview)
-        self.ai_result_tabs.addTab(preview_host, "阅读预览")
-
-        form_host = QWidget()
-        form_layout = QVBoxLayout(form_host)
-        form_layout.setContentsMargins(0, 0, 8, 0)
-        self.ai_form = ProblemForm(self.intake)
-        self.ai_form.changed.connect(self._queue_ai_preview)
-        form_layout.addWidget(self.ai_form)
-        self.ai_result_tabs.addTab(self._scroll(form_host), "编辑字段")
-        self.ai_result_tabs.currentChanged.connect(self._on_ai_result_tab_changed)
-        splitter.addWidget(self.ai_result_tabs)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-        layout.addWidget(splitter, stretch=1)
-
-        actions = QHBoxLayout()
-        previous = QPushButton("上一题")
-        previous.clicked.connect(lambda: self._move_candidate(-1))
-        next_button = QPushButton("下一题")
-        next_button.clicked.connect(lambda: self._move_candidate(1))
-        split = QPushButton("拆分当前候选")
-        split.clicked.connect(self._split_candidate)
-        merge = QPushButton("与下一题合并")
-        merge.clicked.connect(self._merge_with_next_candidate)
-        skip = danger_button("删除错误候选")
-        skip.clicked.connect(self._reject_candidate)
-        confirm = primary_button("确认入库")
-        confirm.clicked.connect(self._commit_candidate)
-        commit_set = QPushButton("作为题组入库")
-        commit_set.clicked.connect(self._commit_candidates_as_set)
-        actions.addWidget(previous)
-        actions.addWidget(next_button)
-        actions.addWidget(split)
-        actions.addWidget(merge)
-        actions.addStretch(1)
-        actions.addWidget(skip)
-        actions.addWidget(commit_set)
-        actions.addWidget(confirm)
-        layout.addLayout(actions)
-        return page
+        return self._scroll(image_tools)
 
     def _build_done(self) -> QWidget:
         page, layout = self._page()
@@ -1536,30 +1521,6 @@ class IntakePage(QWidget):
             return
         self.candidate_index %= len(self.ai_candidates)
         candidate = self.ai_candidates[self.candidate_index]
-        self.candidate_counter.setText(
-            f"待确认 {self.candidate_index + 1} / {len(self.ai_candidates)}"
-        )
-        suggestions = self.intake.structure_suggestions(self.ai_job_id or "")
-        if suggestions:
-            labels = {
-                "single": "单题",
-                "independent": "独立题",
-                "composite": "复合题",
-                "continuation": "跨页续文",
-            }
-            lines = [
-                "AI 结构建议（仅提示，不会自动改变图片分组或入库方式）："
-            ]
-            for suggestion in suggestions:
-                signals = "、".join(suggestion.signals)
-                lines.append(
-                    f"建议 {labels[suggestion.layout_kind]} · {suggestion.subquestion_count} 题 · "
-                    f"置信度 {suggestion.confidence:.0%}。{suggestion.rationale}"
-                    + (f" 信号：{signals}" if signals else "")
-                )
-            self.structure_suggestion_label.setText("\n".join(lines))
-        else:
-            self.structure_suggestion_label.clear()
         self.ai_form.set_values(candidate.fields)
         self._refresh_ai_preview()
         self.image_preview.set_path(candidate.original_image)
@@ -1626,6 +1587,7 @@ class IntakePage(QWidget):
             fields,
             tag_names=self.ai_form.tag_names(),
             include_answers=True,
+            compact=True,
         )
 
     def _move_candidate(self, delta: int) -> None:
@@ -1671,13 +1633,14 @@ class IntakePage(QWidget):
 
     def _show_region_label(self, region: dict[str, float]) -> None:
         if region:
-            self.region_label.setText(
+            text = (
                 "当前题目区域："
                 f"x {region['x']:.1%} · y {region['y']:.1%} · "
                 f"宽 {region['width']:.1%} · 高 {region['height']:.1%}"
             )
         else:
-            self.region_label.setText("当前题目区域：整张原图")
+            text = "当前题目区域：整张原图"
+        self.region_label.setText(text)
 
     def _save_drawn_region(self, region: dict[str, float]) -> None:
         if not self.ai_candidates:
