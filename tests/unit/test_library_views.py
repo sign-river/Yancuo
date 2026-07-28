@@ -234,9 +234,7 @@ def test_question_preview_expands_inline_and_remains_single(window: MainWindow) 
     expanded = window.problem_list.itemWidget(window.problem_list.item(0))
     assert expanded is not None
     assert window.problem_list.item(0).text() == ""
-    preview_titles = expanded.findChildren(QLabel, "InlinePreviewTitle")
-    assert len(preview_titles) == 1
-    assert preview_titles[0].text() == "题目"
+    assert not expanded.findChildren(QLabel, "InlinePreviewTitle")
 
     window._toggle_question_expansion(window.problem_list.item(1))
     assert window._expanded_question_id == second_id

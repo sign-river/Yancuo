@@ -750,6 +750,7 @@ class ProblemIntakeService:
         *,
         user_instruction: str = "",
         recognition_mode: str = "auto",
+        use_recognition_cache: bool = True,
     ) -> AiIntakeSession:
         """Import images as staging records and start a job-scoped intake."""
 
@@ -769,7 +770,12 @@ class ProblemIntakeService:
                 mode="ai",
                 status="draft",
                 user_instruction=user_instruction.strip(),
-                draft_json=json.dumps({"recognition_mode": recognition_mode}),
+                draft_json=json.dumps(
+                    {
+                        "recognition_mode": recognition_mode,
+                        "use_recognition_cache": use_recognition_cache,
+                    }
+                ),
             )
             session.add(intake_session)
             session.flush()

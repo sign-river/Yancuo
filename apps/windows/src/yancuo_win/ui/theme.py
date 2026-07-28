@@ -45,10 +45,10 @@ class ThemeTokens:
 
 LIGHT_THEME = ThemeTokens(
     name="light",
-    bg="#F5F6F7",
+    bg="#F5F6F8",
     sidebar="#F7F8FA",
     card="#FFFFFF",
-    border="#DEE0E3",
+    border="#E8EAED",
     text="#1F2329",
     muted="#646A73",
     primary="#3370FF",
@@ -162,18 +162,45 @@ def app_stylesheet(theme: str = "light") -> str:
         border-top: 1px solid {t.border};
         padding: 4px 10px;
     }}
-    QToolTip, QMenu {{
+    QToolTip {{
         background: {t.card};
         color: {t.text};
         border: 1px solid {t.border};
         padding: 6px 8px;
     }}
+    QMenu {{
+        background: {t.card};
+        color: {t.text};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+        padding: 6px;
+    }}
+    QMenu::item {{
+        min-width: 144px;
+        padding: 8px 24px 8px 12px;
+        margin: 1px 0;
+        border-radius: 6px;
+    }}
     QMenu::item:selected {{
         background: {t.list_selected};
+        color: {t.primary};
+    }}
+    QMenu::item:disabled {{
+        color: {t.muted};
+        background: transparent;
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background: {t.border};
+        margin: 6px 8px;
     }}
 
     QFrame#AppSidebar {{
         background: {t.sidebar};
+        border-right: 1px solid {t.border};
+    }}
+    QFrame#SidebarToggleRail {{
+        background: {t.bg};
         border-right: 1px solid {t.border};
     }}
     QFrame#AppHeader {{
@@ -206,7 +233,7 @@ def app_stylesheet(theme: str = "light") -> str:
         height: 40px;
         padding: 8px 14px;
         margin: 2px 0;
-        border-radius: 8px;
+        border-radius: 10px;
         color: {t.text};
     }}
     QListWidget#MainNav::item:hover {{
@@ -348,14 +375,22 @@ def app_stylesheet(theme: str = "light") -> str:
         border-radius: 0;
     }}
     QLabel#QuestionItemTitle {{ color: {t.text}; font-size: 15px; font-weight: 600; }}
-    QLabel#QuestionChevron {{ color: {t.muted}; font-size: 18px; }}
-    QLabel#InlinePreviewTitle {{
-        color: {t.primary};
-        font-size: 13px;
-        font-weight: 600;
-        margin-top: 6px;
-        padding-top: 14px;
-        border-top: 1px solid {t.border};
+    QPushButton#QuestionChevron {{
+        background: transparent;
+        border: none;
+        min-width: 28px;
+        max-width: 28px;
+        min-height: 28px;
+        max-height: 28px;
+        padding: 4px;
+    }}
+    QPushButton#QuestionChevron:hover {{ background: {t.list_hover}; border-radius: 6px; }}
+    QLabel#QuestionMetaTag {{
+        background: {t.tag_bg};
+        color: {t.tag_text};
+        border-radius: 4px;
+        padding: 2px 6px;
+        font-size: 12px;
     }}
     QFrame#QuestionActionBar {{
         background: {t.card};
@@ -481,7 +516,7 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
     QListWidget#FilterNav::item, QTreeWidget#KnowledgeTree::item {{
         height: 34px;
-        padding: 6px 10px;
+        padding: 8px 12px;
         margin: 0;
         border-radius: 0;
     }}
@@ -524,7 +559,7 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.card};
         color: {t.text};
         border: 1px solid {t.border};
-        border-radius: 6px;
+        border-radius: 8px;
         padding: 6px 10px;
         min-height: 22px;
         selection-background-color: {t.list_selected};
@@ -662,6 +697,7 @@ def app_stylesheet(theme: str = "light") -> str:
     QPushButton#SearchModeButton {{
         min-width: 78px;
         color: {t.muted};
+        border-radius: 6px;
     }}
     QPushButton#SearchModeButton:checked {{
         background: {t.list_selected};

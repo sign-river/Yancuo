@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QPoint, QTimer, Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
@@ -70,7 +70,6 @@ from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
 from yancuo_win.ui.settings_dialog import ServiceSettingsPage
 from yancuo_win.ui.widgets import (
-    AppHeader,
     CardFrame,
     ConfirmDialog,
     IconButton,
@@ -141,8 +140,8 @@ class _InlineQuestionItem(QWidget):
         self._click_timer.timeout.connect(self._on_toggle)
         self.setObjectName("InlineQuestionItem")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 12)
-        layout.setSpacing(6)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
         header = QHBoxLayout()
         title = QLabel(problem.title or "(无标题题目)")
         title.setObjectName("QuestionItemTitle")
@@ -151,34 +150,32 @@ class _InlineQuestionItem(QWidget):
         self._title_label = title
         self._title_text = title.text()
         header.addWidget(title, 1)
-        chevron = QLabel("⌃" if expanded else "⌄")
+        chevron = QPushButton()
         chevron.setObjectName("QuestionChevron")
+        chevron.setIcon(self.style().standardIcon(
+            QStyle.StandardPixmap.SP_ArrowUp if expanded else QStyle.StandardPixmap.SP_ArrowDown
+        ))
+        chevron.setToolTip("收起原题预览" if expanded else "展开原题预览")
+        chevron.clicked.connect(on_toggle)
         header.addWidget(chevron)
         layout.addLayout(header)
         status = _STATUS_LABELS.get(problem.status, problem.status)
-        tags = [tag.name for tag in (problem.tags or [])]
-        tag_text = " · ".join(tags[:3])
-        if len(tags) > 3:
-            tag_text += f" · +{len(tags) - 3}"
-        meta = f"{status} · P{problem.priority}"
+        metadata = QHBoxLayout()
+        metadata.setSpacing(8)
+        values = [status, f"P{problem.priority}"]
         if problem.problem_type:
-            meta += f" · {problem.problem_type}"
-        if tag_text:
-            meta += f" · {tag_text}"
-        metadata = QLabel(meta)
-        metadata.setObjectName("MutedLabel")
-        metadata.setWordWrap(False)
-        metadata.setToolTip(meta)
-        self._metadata_label = metadata
-        self._metadata_text = meta
-        layout.addWidget(metadata)
+            values.append(problem.problem_type)
+        values.extend(tag.name for tag in (problem.tags or [])[:3])
+        for value in values:
+            tag = QLabel(value)
+            tag.setObjectName("QuestionMetaTag")
+            metadata.addWidget(tag)
+        metadata.addStretch(1)
+        layout.addLayout(metadata)
         if not expanded:
-            self.setFixedHeight(64)
+            self.setFixedHeight(72)
             return
 
-        preview_title = QLabel("题目")
-        preview_title.setObjectName("InlinePreviewTitle")
-        layout.addWidget(preview_title)
         reader = MathContentView()
         reader.setObjectName("InlineQuestionPreview")
         reader.set_fit_content_height()
@@ -200,15 +197,13 @@ class _InlineQuestionItem(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
-        for label, text_value in (
-            (self._title_label, self._title_text),
-            (self._metadata_label, self._metadata_text),
-        ):
-            label.setText(
-                QFontMetrics(label.font()).elidedText(
-                    text_value, Qt.TextElideMode.ElideRight, max(label.width(), 0)
-                )
+        self._title_label.setText(
+            QFontMetrics(self._title_label.font()).elidedText(
+                self._title_text,
+                Qt.TextElideMode.ElideRight,
+                max(self._title_label.width(), 0),
             )
+        )
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -274,11 +269,11 @@ class MainWindow(QMainWindow):
         self.intake_page.shutdown()
         if self._ai_worker and self._ai_worker.isRunning():
             self._ai_worker.cancel()
-            self._ai_worker.wait(3000)
+            self._ai_worker.wait(300)
         if self._ai_search_worker and self._ai_search_worker.isRunning():
             worker = self._ai_search_worker
             worker.cancel()
-            if not worker.wait(3000):
+            if not worker.wait(300):
                 worker.setParent(None)
                 worker.finished.connect(worker.deleteLater)
             self._ai_search_worker = None
@@ -292,19 +287,29 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        self.app_header = AppHeader()
         self.sidebar_toggle = IconButton(
             QStyle.StandardPixmap.SP_TitleBarShadeButton, "收起导航栏"
         )
         self.sidebar_toggle.clicked.connect(self._toggle_sidebar)
-        self.app_header.add_action(self.sidebar_toggle)
-        root_layout.addWidget(self.app_header)
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         self.sidebar = self._build_sidebar()
         layout.addWidget(self.sidebar)
+
+        self.sidebar_rail = QFrame()
+        self.sidebar_rail.setObjectName("SidebarToggleRail")
+        self.sidebar_rail.setFixedWidth(40)
+        rail_layout = QVBoxLayout(self.sidebar_rail)
+        rail_layout.setContentsMargins(4, 16, 4, 0)
+        self.sidebar_expand_button = IconButton(
+            QStyle.StandardPixmap.SP_TitleBarUnshadeButton, "展开导航栏"
+        )
+        self.sidebar_expand_button.clicked.connect(self._toggle_sidebar)
+        rail_layout.addWidget(self.sidebar_expand_button)
+        rail_layout.addStretch(1)
+        layout.addWidget(self.sidebar_rail)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_dashboard_page())
@@ -371,10 +376,11 @@ class MainWindow(QMainWindow):
         auto_hidden = self.width() < 900
         visible = not auto_hidden and not self._sidebar_collapsed
         self.sidebar.setVisible(visible)
-        self.sidebar_toggle.setToolTip(
-            "展开导航栏" if not visible else "收起导航栏"
-        )
-        self.sidebar_toggle.setAccessibleName(self.sidebar_toggle.toolTip())
+        self.sidebar_rail.setVisible(not visible)
+        self.sidebar_toggle.setToolTip("收起导航栏")
+        self.sidebar_toggle.setAccessibleName("收起导航栏")
+        self.sidebar_expand_button.setToolTip("展开导航栏")
+        self.sidebar_expand_button.setAccessibleName("展开导航栏")
         self._apply_library_workspace_visibility()
 
     def _apply_library_workspace_visibility(self) -> None:
@@ -392,11 +398,17 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(14, 18, 14, 14)
         lay.setSpacing(4)
 
+        brand_row = QHBoxLayout()
+        brand_row.setContentsMargins(0, 0, 0, 0)
+        brand_row.setSpacing(8)
         brand = QLabel("研错库")
         brand.setObjectName("BrandTitle")
+        brand_row.addWidget(brand)
+        brand_row.addStretch(1)
+        brand_row.addWidget(self.sidebar_toggle)
         sub = QLabel("本地优先错题本")
         sub.setObjectName("BrandSubtitle")
-        lay.addWidget(brand)
+        lay.addLayout(brand_row)
         lay.addWidget(sub)
 
         self.main_nav = QListWidget()
@@ -428,7 +440,6 @@ class MainWindow(QMainWindow):
             return
         item = self.main_nav.item(row)
         page = item.data(Qt.ItemDataRole.UserRole) if item else _PAGE_LIBRARY
-        self.app_header.set_title(item.text() if item else "题库")
         self.stack.setCurrentIndex(int(page))
         if page == _PAGE_DASHBOARD:
             self._refresh_focus_pages()
@@ -765,12 +776,13 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(20, 20, 20, 16)
         outer.setSpacing(12)
 
-        header = PageHeader("\u9898\u5e93", "")
+        header = PageHeader("\u9898\u5e93 / \u5168\u90e8\u6b63\u5f0f\u9898\u76ee", "")
+        self.library_page_title = header.title
         manual = QPushButton("\u624b\u52a8\u5f55\u9898")
         manual.clicked.connect(self._show_manual_intake)
         ai_intake = primary_button("AI \u56fe\u7247\u5f55\u9898")
         ai_intake.clicked.connect(self._show_ai_intake)
-        imports = QPushButton("\u66f4\u591a\u5f55\u9898\u65b9\u5f0f \u25be")
+        imports = QPushButton("\u66f4\u591a \u25be")
         imports.setToolTip("\u5bfc\u5165\u3001\u5bfc\u51fa\u548c\u6279\u91cf\u9898\u5e93\u64cd\u4f5c")
         imports.clicked.connect(self._library_more_menu)
         for button in (manual, ai_intake, imports):
@@ -782,9 +794,9 @@ class MainWindow(QMainWindow):
         search_bar = QFrame()
         search_bar.setObjectName("SearchToolbar")
         search_row = QHBoxLayout(search_bar)
-        search_bar.setFixedHeight(40)
-        search_row.setContentsMargins(4, 3, 4, 3)
-        search_row.setSpacing(4)
+        search_bar.setFixedHeight(44)
+        search_row.setContentsMargins(8, 4, 8, 4)
+        search_row.setSpacing(8)
         self.search_mode_group = QButtonGroup(self)
         self.search_mode_group.setExclusive(True)
         self.local_search_button = QPushButton("\u666e\u901a\u641c\u7d22")
@@ -793,7 +805,7 @@ class MainWindow(QMainWindow):
         for button in (self.local_search_button, self.ai_search_button):
             button.setObjectName("SearchModeButton")
             button.setCheckable(True)
-            button.setFixedHeight(32)
+            button.setFixedHeight(36)
             self.search_mode_group.addButton(button)
             button.clicked.connect(self._on_search_mode_changed)
             search_row.addWidget(button)
@@ -804,30 +816,34 @@ class MainWindow(QMainWindow):
         self.search_scope_combo.addItem("\u5168\u90e8\u6b63\u5f0f\u9898\u76ee", "all_active")
         self.search_scope_combo.setMaxVisibleItems(2)
         self.search_scope_combo.setMinimumWidth(150)
-        self.search_scope_combo.setFixedHeight(32)
+        self.search_scope_combo.setFixedHeight(36)
         self.search_scope_combo.currentIndexChanged.connect(self._on_search_scope_changed)
         search_row.addWidget(self.search_scope_combo)
         self.search_edit = SearchInput("\u641c\u7d22\u9898\u76ee\u3001\u7b54\u6848\u3001\u89e3\u6790\u3001\u6807\u7b7e\u3001\u5907\u6ce8\u6216\u6765\u6e90")
-        self.search_edit.setFixedHeight(32)
+        self.search_edit.setFixedHeight(36)
         self.search_edit.returnPressed.connect(self._submit_library_search)
         self.search_edit.textEdited.connect(self._on_search_text_edited)
         search_row.addWidget(self.search_edit, 1)
         self.search_button = primary_button("\u641c\u7d22")
         self.search_button.clicked.connect(self._submit_library_search)
-        clear_search = ghost_button("\u6e05\u7a7a")
-        clear_search.clicked.connect(self._clear_library_search)
-        for button in (self.search_button, clear_search):
-            button.setFixedHeight(32)
+        self.clear_search_button = ghost_button("\u6e05\u7a7a")
+        self.clear_search_button.clicked.connect(self._clear_library_search)
+        self.clear_search_button.setVisible(False)
+        self.search_edit.textChanged.connect(
+            lambda value: self.clear_search_button.setVisible(bool(value.strip()))
+        )
+        for button in (self.search_button, self.clear_search_button):
+            button.setFixedHeight(36)
             button.setMinimumWidth(button.sizeHint().width() + 8)
             search_row.addWidget(button)
-        search_bar.setMinimumWidth(620)
+        search_bar.setMinimumWidth(0)
         # Kept as a non-visual compatibility field for search-state updates.
         self.search_privacy_hint = QLabel("\u666e\u901a\u641c\u7d22\u5b8c\u5168\u79bb\u7ebf\uff0c\u53ea\u67e5\u8be2\u672c\u5730\u7d22\u5f15\uff1bAI \u641c\u7d22\u4e0d\u4f1a\u53d1\u9001\u9898\u76ee\u6b63\u6587\u3002")
         # Kept as a non-visual compatibility field for the existing refresh flow.
         self.library_view_hint = QLabel()
 
         tabs = QHBoxLayout()
-        tabs.setSpacing(8)
+        tabs.setSpacing(12)
         self.library_view_group = QButtonGroup(self)
         self.library_view_group.setExclusive(True)
         self.library_browse_button = QPushButton("\u6d4f\u89c8\u9898\u5e93")
@@ -835,7 +851,7 @@ class MainWindow(QMainWindow):
         for button, view in ((self.library_browse_button, "browse"), (self.library_process_button, "process")):
             button.setObjectName("LibraryViewButton")
             button.setCheckable(True)
-            button.setMinimumHeight(36)
+            button.setFixedHeight(36)
             button.clicked.connect(lambda _checked=False, target=view: self._set_library_view(target))
             self.library_view_group.addButton(button)
             tabs.addWidget(button)
@@ -900,16 +916,17 @@ class MainWindow(QMainWindow):
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(0)
-        list_header = self._library_panel_header("", "")
+        list_header = self._library_panel_header("\u9898\u76ee\u5217\u8868", "")
         list_header.setFixedHeight(48)
         self.library_list_header = list_header
         list_header_layout = list_header.layout()
         self.library_breadcrumb = QLabel("\u9898\u5e93 / \u5168\u90e8\u6b63\u5f0f\u9898\u76ee")
         self.library_breadcrumb.setObjectName("LibraryBreadcrumb")
+        self.library_breadcrumb.setVisible(False)
         self.library_count_label = QLabel("\u5171 0 \u9898")
         self.library_count_label.setObjectName("MutedLabel")
         row = QHBoxLayout()
-        row.addWidget(self.library_breadcrumb, 1)
+        row.addStretch(1)
         row.addWidget(self.library_count_label)
         self.library_list_hint = QLabel("\u6b63\u5f0f\u9898\u76ee \u00b7 \u53cc\u51fb\u6253\u5f00\u8be6\u60c5")
         self.library_list_hint.setObjectName("MutedLabel")
@@ -951,6 +968,7 @@ class MainWindow(QMainWindow):
             action_layout.addWidget(button)
         action_layout.addStretch(1)
         center_layout.addWidget(self.question_action_bar)
+        self.question_action_bar.setVisible(False)
         center.setMinimumWidth(650)
         self.library_splitter.addWidget(center)
         self.library_splitter.setStretchFactor(0, 0)
@@ -1018,22 +1036,16 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         selected = bool(self._selected_ids())
         active = selected and self._nav_mode != "trashed"
-        status_menu = menu.addSection("\u9898\u76ee\u72b6\u6001")
-        status_menu.setEnabled(False)
         promote = menu.addAction("\u8bbe\u4e3a\u6b63\u5f0f\u9898", self._promote_selected)
         promote.setEnabled(active)
         restore = menu.addAction("\u6062\u590d", self._restore_selected)
         restore.setEnabled(selected and self._nav_mode == "trashed")
         menu.addSeparator()
-        ai_section = menu.addSection("AI \u5904\u7406")
-        ai_section.setEnabled(False)
         ai = menu.addAction("AI \u8865\u5168", self._ai_recognize)
         ai.setEnabled(active)
         undo = menu.addAction("\u64a4\u9500 AI \u4fee\u6539", self._undo_ai)
         undo.setEnabled(active)
         menu.addSeparator()
-        organize_section = menu.addSection("\u6574\u7406")
-        organize_section.setEnabled(False)
         move = menu.addAction("\u79fb\u52a8\u5206\u7c7b", self._move_selected_category)
         move.setEnabled(active)
         menu.addSeparator()
@@ -1049,7 +1061,11 @@ class MainWindow(QMainWindow):
         menu = self._build_question_more_menu()
         anchor = sender
         if anchor is not None:
-            menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+            menu.exec(
+                anchor.mapToGlobal(
+                    QPoint(0, -menu.sizeHint().height() - 8)
+                )
+            )
         else:
             menu.exec(self.cursor().pos())
 
@@ -1062,6 +1078,8 @@ class MainWindow(QMainWindow):
     def _update_context_bar(self, has_selection: bool) -> None:
         for button in getattr(self, "_question_action_buttons", ()):
             button.setEnabled(has_selection)
+        if hasattr(self, "question_action_bar"):
+            self.question_action_bar.setVisible(has_selection)
         if hasattr(self, "copy_problem_id_button"):
             self.copy_problem_id_button.setEnabled(has_selection)
 
@@ -1712,6 +1730,8 @@ class MainWindow(QMainWindow):
             item = self.process_nav.currentItem()
             path = item.data(_NAV_PATH_ROLE) if item else None
         self.library_breadcrumb.setText(str(path or "题库"))
+        if hasattr(self, "library_page_title"):
+            self.library_page_title.setText(self.library_breadcrumb.text())
         self._refresh_search_scope_control()
 
     def _refresh_search_scope_control(self) -> None:
@@ -2299,9 +2319,7 @@ class MainWindow(QMainWindow):
         active = self.services.count_problems("active")
         trash = self.services.count_problems("trashed")
         summary = f"共 {total} · 收件箱 {inbox} · 正式 {active} · 回收站 {trash}"
-        self.status.showMessage(
-            f"{summary} · schema v{self.runtime.schema_version} · {self.runtime.paths.root}"
-        )
+        self.status.showMessage(summary)
         self.sidebar_stats.setText(summary)
 
     def _apply_nav_mode(self, mode: str) -> None:

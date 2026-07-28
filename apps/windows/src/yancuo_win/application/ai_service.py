@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session, selectinload
 
 from yancuo_win.ai.base import (
@@ -273,6 +273,32 @@ class AIService:
                 raise DomainError(f"提示词不存在：{key}")
             s.expunge(prompt)
             return prompt
+
+    def recognition_cache_summary(self) -> dict[str, int]:
+        """Return lightweight cache statistics for the user-facing controls."""
+
+        with self.session() as s:
+            count, bytes_used = s.execute(
+                select(
+                    func.count(AiRecognitionCache.cache_key),
+                    func.coalesce(
+                        func.sum(
+                            func.length(AiRecognitionCache.structured_json)
+                            + func.length(AiRecognitionCache.raw_response)
+                        ),
+                        0,
+                    ),
+                )
+            ).one()
+            return {"count": int(count or 0), "bytes": int(bytes_used or 0)}
+
+    def clear_recognition_cache(self) -> int:
+        """Delete cached recognition results without touching source jobs or images."""
+
+        with self.session() as s:
+            deleted = s.execute(delete(AiRecognitionCache)).rowcount or 0
+            s.commit()
+            return int(deleted)
 
     def list_jobs(self, limit: int = 50) -> list[AiJob]:
         with self.session() as s:
@@ -673,8 +699,23 @@ class AIService:
                         s.commit()
                 break
             self._process_item(
-                job_id, item_id, prompt.body, prompt.version, provider, session_holder := []
+                job_id,
+                item_id,
+                prompt.body,
+                prompt.version,
+                provider,
+                session_holder := [],
+                should_cancel=should_cancel,
             )
+            if should_cancel and should_cancel():
+                with self.session() as s:
+                    job = s.get(AiJob, job_id)
+                    if job:
+                        job.status = "cancelled"
+                        job.updated_at = utcnow()
+                        job.finished_at = utcnow()
+                        s.commit()
+                break
             if session_holder and session_id is None:
                 session_id = session_holder[0]
 
@@ -722,6 +763,8 @@ class AIService:
         prompt_version: int,
         provider: AIProvider,
         session_holder: list[str],
+        *,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         item_started = perf_counter()
         active_stage = "preflight"
@@ -735,11 +778,21 @@ class AIService:
             problem: Problem | None = None
             intake_assets: list[IntakeAsset] = []
             recognition_mode = ""
+            use_recognition_cache = True
             if item.intake_asset_id:
                 asset = s.get(IntakeAsset, item.intake_asset_id)
                 if asset:
                     intake_session = s.get(IntakeSession, asset.session_id)
                     intake_assets = [asset]
+                    if intake_session:
+                        try:
+                            draft = json.loads(intake_session.draft_json)
+                        except json.JSONDecodeError:
+                            draft = {}
+                        if isinstance(draft, dict):
+                            use_recognition_cache = bool(
+                                draft.get("use_recognition_cache", True)
+                            )
                 if item.recognition_unit_id:
                     recognition_unit = s.get(
                         IntakeRecognitionUnit, item.recognition_unit_id
@@ -801,6 +854,8 @@ class AIService:
             s.commit()
 
             try:
+                if should_cancel and should_cancel():
+                    return
                 timings_ms["preflight"] = (perf_counter() - item_started) * 1000
                 allowed = set(json.loads(job.allowed_fields_json) or list(DEFAULT_ALLOWED_FIELDS))
                 source_fingerprint = hashlib.sha256(
@@ -815,11 +870,16 @@ class AIService:
                     allowed_fields=sorted(allowed),
                 )
                 cached = find_recognition_cache(s, cache_key)
-                cached_fields = load_cached_structure(cached) if cached else None
+                cached_fields = (
+                    load_cached_structure(cached)
+                    if cached and use_recognition_cache
+                    else None
+                )
                 if not self.runtime.settings.privacy.send_original_images_to_ai:
                     raise DomainError("隐私设置禁止向 AI 发送原图")
                 cached_result = _structured_result_from_cache(
-                    cached_fields, cached.raw_response if cached else ""
+                    cached_fields,
+                    cached.raw_response if cached and use_recognition_cache else "",
                 )
                 if cached_result is not None:
                     active_stage = "cache"
@@ -852,6 +912,8 @@ class AIService:
                     timings_ms["provider_total"] = (
                         perf_counter() - provider_started
                     ) * 1000
+                if should_cancel and should_cancel():
+                    return
                 for key, value in result.timings_ms.items():
                     if isinstance(value, (int, float)):
                         timings_ms[str(key)] = float(value)
@@ -1103,6 +1165,9 @@ class AIService:
                 )
                 s.commit()
             except Exception as exc:  # noqa: BLE001
+                if should_cancel and should_cancel():
+                    s.rollback()
+                    return
                 item.status = "failed"
                 item.error_message = str(exc)
                 job.failed_items += 1

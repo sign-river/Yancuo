@@ -193,6 +193,54 @@ def test_ai_intake_stays_job_scoped_and_commits_candidate(
     assert resumed.latest_resumable_ai_job() is None
 
 
+def test_ai_job_cancelled_during_provider_call_writes_no_candidate(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "cancel-in-flight.jpg"
+    image.write_bytes(b"\xff\xd8\xffcancel-in-flight")
+    started = intake.start_ai([image])
+    cancelled = False
+
+    class CancellingProvider:
+        def structure_from_image(self, **_kwargs: object) -> StructuredResult:
+            nonlocal cancelled
+            cancelled = True
+            return StructuredResult(fields={"title": "不应写入"})
+
+    monkeypatch.setattr(
+        "yancuo_win.application.ai_service.get_provider",
+        lambda _settings: CancellingProvider(),
+    )
+
+    intake.ai.run_job(started.job_id, should_cancel=lambda: cancelled)
+
+    job = intake.ai.get_job(started.job_id)
+    assert job is not None
+    assert job.status == "cancelled"
+    assert intake.list_candidates(started.job_id) == []
+    assert intake.latest_resumable_ai_job() is None
+
+
+def test_recognition_cache_summary_and_clear_do_not_touch_intake_data(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "cached-recognition.jpg"
+    image.write_bytes(b"\xff\xd8\xffcached-recognition")
+    started = intake.start_ai([image])
+    intake.ai.run_job(started.job_id)
+
+    summary = intake.ai.recognition_cache_summary()
+    assert summary["count"] == 1
+    assert summary["bytes"] > 0
+
+    assert intake.ai.clear_recognition_cache() == 1
+    assert intake.ai.recognition_cache_summary() == {"count": 0, "bytes": 0}
+    assert len(intake.list_candidates(started.job_id)) == 1
+
+
 def test_ai_taxonomy_proposal_creates_checked_nested_category(
     intake: ProblemIntakeService, tmp_path: Path
 ) -> None:

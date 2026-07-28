@@ -15,6 +15,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -652,6 +653,7 @@ class IntakePage(QWidget):
         self.ai_files: list[Path] = []
         self.ai_job_id: str | None = None
         self.ai_worker: AIJobWorker | None = None
+        self._cancelled_ai_jobs: set[str] = set()
         self.region_worker: RegionRecognitionWorker | None = None
         self.ai_candidates: list[IntakeCandidate] = []
         self.candidate_index = 0
@@ -826,6 +828,16 @@ class IntakePage(QWidget):
         layout.addStretch(1)
 
         start_row = QHBoxLayout()
+        self.ai_use_cache = QCheckBox("使用历史识别缓存")
+        self.ai_use_cache.setChecked(True)
+        self.ai_use_cache.setToolTip("关闭后将重新请求 AI，并用新结果更新同一图片的缓存")
+        self.ai_cache_hint = QLabel()
+        self.ai_cache_hint.setObjectName("MutedLabel")
+        clear_cache = ghost_button("清空识别缓存")
+        clear_cache.clicked.connect(self._clear_recognition_cache)
+        start_row.addWidget(self.ai_use_cache)
+        start_row.addWidget(self.ai_cache_hint)
+        start_row.addWidget(clear_cache)
         self.ai_config_hint = QLabel()
         self.ai_config_hint.setObjectName("PageHint")
         start_row.addWidget(self.ai_config_hint)
@@ -862,15 +874,15 @@ class IntakePage(QWidget):
         self.processing_error.setObjectName("DangerLabel")
         card.body.addWidget(self.processing_error)
         actions = QHBoxLayout()
-        cancel = danger_button("取消后台任务")
-        cancel.clicked.connect(self._cancel_ai)
+        self.processing_cancel_button = danger_button("取消后台任务")
+        self.processing_cancel_button.clicked.connect(self._cancel_ai)
         self.processing_retry = primary_button("重新尝试失败项")
         self.processing_retry.clicked.connect(self._retry_failed_ai)
         self.processing_retry.setVisible(False)
         self.processing_back = QPushButton("返回修改上传内容")
         self.processing_back.clicked.connect(self.show_ai_upload)
         self.processing_back.setVisible(False)
-        actions.addWidget(cancel)
+        actions.addWidget(self.processing_cancel_button)
         actions.addWidget(self.processing_retry)
         actions.addWidget(self.processing_back)
         actions.addStretch(1)
@@ -903,33 +915,51 @@ class IntakePage(QWidget):
             "蓝框表示当前题目的原图来源区域，仅用于核对、裁切定位和保存；"
             "调整蓝框不会自动重新调用 AI。"
         )
+        # The image tools can be taller than the available confirmation pane.
+        # Keep them in a single scrollable work area so controls never paint
+        # over the preview when the window height is constrained.
+        image_tools = QWidget()
+        image_tools_layout = QVBoxLayout(image_tools)
+        image_tools_layout.setContentsMargins(0, 0, 0, 0)
+        image_tools_layout.setSpacing(10)
         self.image_preview = ImagePreviewLabel("无原图预览")
-        self.image_preview.setMinimumSize(QSize(340, 360))
+        self.image_preview.setMinimumHeight(280)
+        self.image_preview.setMaximumHeight(360)
         self.image_preview.set_editable(True)
         self.image_preview.region_drawn.connect(self._save_drawn_region)
-        left.body.addWidget(self.image_preview, stretch=1)
+        image_tools_layout.addWidget(self.image_preview)
+
+        source_title = QLabel("来源图片")
+        source_title.setObjectName("SectionTitle")
+        image_tools_layout.addWidget(source_title)
         self.source_image_list = QListWidget()
         self.source_image_list.setObjectName("CandidateSourceImages")
-        self.source_image_list.setMaximumHeight(96)
-        left.body.addWidget(self.source_image_list)
+        self.source_image_list.setFixedHeight(72)
+        image_tools_layout.addWidget(self.source_image_list)
         source_actions = QHBoxLayout()
         source_up = QPushButton("来源图上移")
         source_up.clicked.connect(lambda: self._move_source_image(-1))
         source_down = QPushButton("来源图下移")
         source_down.clicked.connect(lambda: self._move_source_image(1))
-        source_split = QPushButton("拆分识别单元")
-        source_split.clicked.connect(self._split_recognition_unit)
         source_actions.addWidget(source_up)
         source_actions.addWidget(source_down)
-        source_actions.addWidget(source_split)
         source_actions.addStretch(1)
-        left.body.addLayout(source_actions)
+        image_tools_layout.addLayout(source_actions)
+        source_split = QPushButton("拆分识别单元")
+        source_split.clicked.connect(self._split_recognition_unit)
+        image_tools_layout.addWidget(source_split)
+
+        region_title = QLabel("题目区域")
+        region_title.setObjectName("SectionTitle")
+        image_tools_layout.addWidget(region_title)
         self.region_label = QLabel("")
         self.region_label.setObjectName("PageHint")
-        left.body.addWidget(self.region_label)
-        region_actions = QHBoxLayout()
-        region_hint = QLabel("空白处重画 · 框内移动 · 控制柄微调 · 仅保存区域")
+        image_tools_layout.addWidget(self.region_label)
+        region_hint = QLabel("空白处重画，框内移动，拖动控制柄微调。调整后仅保存区域，不会自动调用 AI。")
         region_hint.setObjectName("PageHint")
+        region_hint.setWordWrap(True)
+        image_tools_layout.addWidget(region_hint)
+        region_secondary_actions = QHBoxLayout()
         reset_region = QPushButton("恢复整图")
         reset_region.clicked.connect(self._reset_candidate_region)
         self.rerecognize_region = primary_button("按当前区域重新识别")
@@ -940,16 +970,21 @@ class IntakePage(QWidget):
         self.undo_region_recognition.clicked.connect(
             self._undo_region_rerecognition
         )
-        region_actions.addWidget(region_hint)
-        region_actions.addStretch(1)
-        region_actions.addWidget(reset_region)
-        region_actions.addWidget(self.undo_region_recognition)
-        region_actions.addWidget(self.rerecognize_region)
-        left.body.addLayout(region_actions)
+        region_secondary_actions.addWidget(reset_region)
+        region_secondary_actions.addWidget(self.undo_region_recognition)
+        region_secondary_actions.addStretch(1)
+        image_tools_layout.addLayout(region_secondary_actions)
+        image_tools_layout.addWidget(self.rerecognize_region)
+
+        uncertain_title = QLabel("AI 核对提示")
+        uncertain_title.setObjectName("SectionTitle")
+        image_tools_layout.addWidget(uncertain_title)
         self.uncertain_label = QLabel("")
         self.uncertain_label.setWordWrap(True)
         self.uncertain_label.setObjectName("PageHint")
-        left.body.addWidget(self.uncertain_label)
+        image_tools_layout.addWidget(self.uncertain_label)
+        image_tools_layout.addStretch(1)
+        left.body.addWidget(self._scroll(image_tools), stretch=1)
         splitter.addWidget(left)
 
         self.ai_result_tabs = QTabWidget()
@@ -1048,7 +1083,34 @@ class IntakePage(QWidget):
             f"{provider_label} · {ai.default_vision_model or '未设置模型'} · "
             f"{'已启用' if ai.enabled else '尚未启用'}"
         )
+        self._refresh_recognition_cache_hint()
         self.stack.setCurrentIndex(_PAGE_AI_UPLOAD)
+
+    def _refresh_recognition_cache_hint(self) -> None:
+        summary = self.intake.ai.recognition_cache_summary()
+        size_kb = summary["bytes"] / 1024
+        self.ai_cache_hint.setText(
+            f"已缓存 {summary['count']} 条 · {size_kb:.1f} KB"
+        )
+
+    def _clear_recognition_cache(self) -> None:
+        summary = self.intake.ai.recognition_cache_summary()
+        if not summary["count"]:
+            self._refresh_recognition_cache_hint()
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "清空识别缓存",
+                f"确认删除 {summary['count']} 条 AI 识别缓存？\n"
+                "不会删除原图、题目或历史录题任务。",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        deleted = self.intake.ai.clear_recognition_cache()
+        self._refresh_recognition_cache_hint()
+        self.status_message.emit(f"已清空 {deleted} 条 AI 识别缓存")
 
     def show_ai(self) -> None:
         if not self.ai_job_id:
@@ -1090,19 +1152,8 @@ class IntakePage(QWidget):
             != QMessageBox.StandardButton.Yes
         ):
             return
-        if (
-            job_id == self.ai_job_id
-            and self.ai_worker
-            and self.ai_worker.isRunning()
-        ):
+        if job_id == self.ai_job_id and self.ai_worker and self.ai_worker.isRunning():
             self.ai_worker.cancel()
-            if not self.ai_worker.wait(3000):
-                QMessageBox.information(
-                    self,
-                    "正在取消",
-                    "AI 请求仍在结束中，请稍后再放弃这个批次。",
-                )
-                return
         try:
             self.intake.abandon_ai_batch(job_id)
         except DomainError as exc:
@@ -1118,6 +1169,16 @@ class IntakePage(QWidget):
     def _restore_existing_session(self) -> None:
         job_id = self.intake.latest_resumable_ai_job()
         if not job_id:
+            return
+        try:
+            progress = self.intake.progress(job_id)
+            if progress.status == "running":
+                self.intake.abandon_ai_batch(job_id)
+                self.status_message.emit(
+                    "已取消上次意外中断的 AI 录题任务，请重新开始识别"
+                )
+                return
+        except DomainError:
             return
         self.ai_job_id = job_id
         try:
@@ -1293,11 +1354,13 @@ class IntakePage(QWidget):
                 self.ai_files,
                 user_instruction=self.ai_instruction.toPlainText(),
                 recognition_mode=str(self.ai_recognition_mode.currentData()),
+                use_recognition_cache=self.ai_use_cache.isChecked(),
             )
         except DomainError as exc:
             QMessageBox.warning(self, "无法开始识别", str(exc))
             return
         self.ai_job_id = started.job_id
+        self._cancelled_ai_jobs.discard(started.job_id)
         self.ai_candidates.clear()
         self.processing_error.clear()
         self.processing_retry.setVisible(False)
@@ -1374,13 +1437,43 @@ class IntakePage(QWidget):
                 f"当前真实阶段：{progress.stage_label}。"
                 "每张图片只发起一次主 AI 请求；完成首张后显示实测耗时。"
             )
-        if progress.status in {"completed", "cancelled"}:
+        if progress.status == "cancelled":
+            self.progress_timer.stop()
+            self._cancelled_ai_jobs.add(progress.job_id)
+            if progress.job_id == self.ai_job_id:
+                self.ai_job_id = None
+                self.ai_candidates.clear()
+                self.processing_status.setText("任务已取消")
+                self.stack.setCurrentIndex(_PAGE_AI_UPLOAD)
+                QTimer.singleShot(0, self.show_ai_upload)
+            return
+        if progress.status == "completed":
             self.progress_timer.stop()
 
     def _cancel_ai(self) -> None:
+        job_id = self.ai_job_id
+        if not job_id:
+            return
+        self.processing_cancel_button.setEnabled(False)
+        self._cancelled_ai_jobs.add(job_id)
         if self.ai_worker and self.ai_worker.isRunning():
             self.ai_worker.cancel()
-            self.processing_status.setText("正在取消任务…")
+        try:
+            self.intake.abandon_ai_batch(job_id)
+        except DomainError as exc:
+            self._cancelled_ai_jobs.discard(job_id)
+            self.processing_cancel_button.setEnabled(True)
+            self.processing_error.setText(str(exc))
+            return
+        self.progress_timer.stop()
+        self.ai_job_id = None
+        self.ai_candidates.clear()
+        self.processing_error.clear()
+        self.processing_status.setText("任务已取消")
+        self.status_message.emit("AI 录题任务已取消，不会在下次启动时恢复")
+        self.stack.setCurrentIndex(_PAGE_AI_UPLOAD)
+        self.show_ai_upload()
+        QTimer.singleShot(0, self.show_ai_upload)
 
     def _retry_failed_ai(self) -> None:
         if not self.ai_job_id:
@@ -1395,6 +1488,8 @@ class IntakePage(QWidget):
         self.status_message.emit("正在重新尝试失败的 AI 录题项")
 
     def _on_ai_done(self, job_id: str) -> None:
+        if job_id in self._cancelled_ai_jobs:
+            return
         if job_id != self.ai_job_id:
             return
         self.progress_timer.stop()
@@ -1425,7 +1520,9 @@ class IntakePage(QWidget):
         )
 
     def _on_ai_failed(self, job_id: str, error: str) -> None:
-        if self.ai_job_id and job_id != self.ai_job_id:
+        if job_id in self._cancelled_ai_jobs:
+            return
+        if job_id != self.ai_job_id:
             return
         self.progress_timer.stop()
         self.processing_error.setText(error)
@@ -1945,6 +2042,6 @@ class IntakePage(QWidget):
         self.progress_timer.stop()
         if self.ai_worker and self.ai_worker.isRunning():
             self.ai_worker.cancel()
-            self.ai_worker.wait(3000)
+            self.ai_worker.wait(300)
         if self.region_worker and self.region_worker.isRunning():
-            self.region_worker.wait(3000)
+            self.region_worker.wait(300)
