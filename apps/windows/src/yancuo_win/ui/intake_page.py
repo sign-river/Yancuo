@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListView,
@@ -980,23 +979,14 @@ class IntakePage(QWidget):
         previous.clicked.connect(lambda: self._move_candidate(-1))
         next_button = QPushButton("下一题")
         next_button.clicked.connect(lambda: self._move_candidate(1))
-        split = QPushButton("拆分当前候选")
-        split.clicked.connect(self._split_candidate)
-        merge = QPushButton("与下一题合并")
-        merge.clicked.connect(self._merge_with_next_candidate)
         skip = danger_button("删除错误候选")
         skip.clicked.connect(self._reject_candidate)
         confirm = primary_button("确认入库")
         confirm.clicked.connect(self._commit_candidate)
-        commit_set = QPushButton("作为题组入库")
-        commit_set.clicked.connect(self._commit_candidates_as_set)
         actions.addWidget(previous)
         actions.addWidget(next_button)
-        actions.addWidget(split)
-        actions.addWidget(merge)
         actions.addStretch(1)
         actions.addWidget(skip)
-        actions.addWidget(commit_set)
         actions.addWidget(confirm)
         layout.addLayout(actions)
         return page
@@ -1830,89 +1820,6 @@ class IntakePage(QWidget):
         self._reload_region_candidate(candidate.review_item_id)
         self.status_message.emit("已撤回上一次采用的区域重新识别结果")
 
-    def _split_candidate(self) -> None:
-        if not self.ai_candidates:
-            return
-        if (
-            QMessageBox.question(
-                self,
-                "拆分候选题",
-                "把当前高亮区域沿较长方向等分为两道候选题？\n"
-                "两道题会保留当前表单内容，之后可分别修改。",
-            )
-            != QMessageBox.StandardButton.Yes
-        ):
-            return
-        candidate = self.ai_candidates[self.candidate_index]
-        try:
-            self.intake.split_ai_candidate(
-                candidate.review_item_id,
-                self.ai_form.values(),
-                tag_names=self.ai_form.tag_names(),
-            )
-            self.ai_candidates = [
-                item
-                for item in self.intake.list_candidates(self.ai_job_id or "")
-                if item.status in {"pending", "conflict"}
-            ]
-        except DomainError as exc:
-            QMessageBox.warning(self, "无法拆分", str(exc))
-            return
-        self.candidate_index = next(
-            (
-                index
-                for index, item in enumerate(self.ai_candidates)
-                if item.review_item_id == candidate.review_item_id
-            ),
-            0,
-        )
-        self._load_candidate()
-        self.status_message.emit("当前候选已拆成两个独立题目区域")
-
-    def _merge_with_next_candidate(self) -> None:
-        if len(self.ai_candidates) < 2:
-            QMessageBox.information(self, "无法合并", "当前没有其他待确认候选题。")
-            return
-        primary = self.ai_candidates[self.candidate_index]
-        secondary_index = (self.candidate_index + 1) % len(self.ai_candidates)
-        secondary = self.ai_candidates[secondary_index]
-        if (
-            QMessageBox.question(
-                self,
-                "合并候选题",
-                f"把当前第 {self.candidate_index + 1} 题与第 "
-                f"{secondary_index + 1} 题合并？\n"
-                "题干、答案和解析会依次拼接，原有两块区域会合并为一个范围。",
-            )
-            != QMessageBox.StandardButton.Yes
-        ):
-            return
-        try:
-            self.intake.merge_ai_candidates(
-                primary.review_item_id,
-                secondary.review_item_id,
-                self.ai_form.values(),
-                tag_names=self.ai_form.tag_names(),
-            )
-            self.ai_candidates = [
-                item
-                for item in self.intake.list_candidates(self.ai_job_id or "")
-                if item.status in {"pending", "conflict"}
-            ]
-        except DomainError as exc:
-            QMessageBox.warning(self, "无法合并", str(exc))
-            return
-        self.candidate_index = next(
-            (
-                index
-                for index, item in enumerate(self.ai_candidates)
-                if item.review_item_id == primary.review_item_id
-            ),
-            0,
-        )
-        self._load_candidate()
-        self.status_message.emit("两个候选题已合并，可继续编辑后入库")
-
     def _commit_candidate(self) -> None:
         if not self.ai_candidates:
             return
@@ -1956,35 +1863,6 @@ class IntakePage(QWidget):
                 self._show_done(
                     f"“{problem.title or 'AI 识别题目'}”已进入正式题库。"
                 )
-
-    def _commit_candidates_as_set(self) -> None:
-        if not self.ai_candidates:
-            return
-        title, accepted = QInputDialog.getText(
-            self, "作为题组入库", "题组标题："
-        )
-        if not accepted:
-            return
-        material, accepted = QInputDialog.getMultiLineText(
-            self, "作为题组入库", "共享材料（可留空）："
-        )
-        if not accepted:
-            return
-        try:
-            created = self.intake.commit_ai_candidates_as_problem_set(
-                [candidate.review_item_id for candidate in self.ai_candidates],
-                title=title,
-                material_markdown=material,
-            )
-        except DomainError as exc:
-            QMessageBox.warning(self, "无法作为题组入库", str(exc))
-            return
-        self.last_problem_id = created[0].id if created else None
-        for problem in created:
-            self.problem_committed.emit(problem.id)
-        self.ai_candidates.clear()
-        self.ai_job_id = None
-        self._show_done(f"已将 {len(created)} 道子题作为题组入库。")
 
     def _reject_candidate(self) -> None:
         if not self.ai_candidates:
