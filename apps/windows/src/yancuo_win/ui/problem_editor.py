@@ -93,7 +93,6 @@ class ProblemEditorDialog(QDialog):
         self.user_answer = QTextEdit(problem.user_answer or "")
         self.correct = QTextEdit(problem.correct_answer or "")
         self.solution = QTextEdit(problem.solution_markdown or "")
-        self.error = QTextEdit(problem.error_analysis or "")
         self.notes = QTextEdit(problem.notes or "")
 
         basic = CardFrame()
@@ -120,11 +119,9 @@ class ProblemEditorDialog(QDialog):
         answers.body.addLayout(row)
         body_layout.addWidget(answers)
         analysis = CardFrame()
-        analysis.add_title("解析与复盘")
+        analysis.add_title("解析与备注")
         analysis.body.addWidget(QLabel("解析"))
         analysis.body.addWidget(self.solution)
-        analysis.body.addWidget(QLabel("错因"))
-        analysis.body.addWidget(self.error)
         analysis.body.addWidget(QLabel("备注"))
         analysis.body.addWidget(self.notes)
         body_layout.addWidget(analysis)
@@ -146,7 +143,6 @@ class ProblemEditorDialog(QDialog):
             self.user_answer,
             self.correct,
             self.solution,
-            self.error,
             self.notes,
         ):
             w.setUndoRedoEnabled(True)
@@ -161,7 +157,6 @@ class ProblemEditorDialog(QDialog):
                 "user_answer": self.user_answer.toPlainText(),
                 "correct_answer": self.correct.toPlainText(),
                 "solution_markdown": self.solution.toPlainText(),
-                "error_analysis": self.error.toPlainText(),
                 "notes": self.notes.toPlainText(),
             }
             self.services.update_problem(self.problem_id, fields)

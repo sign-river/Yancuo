@@ -234,10 +234,7 @@ def build_problem_html(
             '<section class="answer-hidden">答案与解析已隐藏，完成思考后再显示。</section>'
         )
 
-    error_analysis = str(fields.get("error_analysis") or "")
     notes = str(fields.get("notes") or "")
-    if include_answers and error_analysis.strip():
-        body.append(_section("错因分析", error_analysis))
     if include_answers and notes.strip():
         body.append(_section("备注", notes))
 

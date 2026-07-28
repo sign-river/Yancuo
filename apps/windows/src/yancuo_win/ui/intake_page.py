@@ -8,6 +8,7 @@ dialog to finish recording a new problem.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -433,9 +434,21 @@ class ProblemForm(QWidget):
 
     changed = Signal()
 
-    def __init__(self, intake: ProblemIntakeService, parent=None) -> None:
+    def __init__(
+        self,
+        intake: ProblemIntakeService,
+        parent=None,
+        *,
+        clear_user_answer_on_load: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.intake = intake
+        self.clear_user_answer_on_load = clear_user_answer_on_load
+        self._text_area_resize_timer = QTimer(self)
+        self._text_area_resize_timer.setSingleShot(True)
+        self._text_area_resize_timer.timeout.connect(
+            self._resize_text_areas_to_content
+        )
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
@@ -485,13 +498,11 @@ class ProblemForm(QWidget):
         self.user_answer = self._text_area("我的作答", 90)
         self.correct_answer = self._text_area("正确答案", 90)
         self.solution = self._text_area("完整解析", 130)
-        self.error_analysis = self._text_area("错因分析", 90)
         self.notes = self._text_area("备注", 80)
         for label, editor in (
             ("我的作答", self.user_answer),
             ("正确答案", self.correct_answer),
             ("解析", self.solution),
-            ("错因", self.error_analysis),
             ("备注", self.notes),
         ):
             answer.body.addWidget(QLabel(label))
@@ -522,10 +533,10 @@ class ProblemForm(QWidget):
             self.user_answer,
             self.correct_answer,
             self.solution,
-            self.error_analysis,
             self.notes,
         ):
             editor.textChanged.connect(notify)
+            editor.textChanged.connect(self._queue_text_area_resize)
         self.subject.currentIndexChanged.connect(notify)
         self.chapter.currentIndexChanged.connect(notify)
         self.priority.valueChanged.connect(notify)
@@ -534,9 +545,44 @@ class ProblemForm(QWidget):
     def _text_area(placeholder: str, height: int) -> QTextEdit:
         editor = QTextEdit()
         editor.setPlaceholderText(placeholder)
-        editor.setMinimumHeight(height)
+        editor.setProperty("contentMaxHeight", max(150, height * 2))
         editor.setUndoRedoEnabled(True)
         return editor
+
+    def _queue_text_area_resize(self) -> None:
+        self._text_area_resize_timer.start(0)
+
+    def _resize_text_areas_to_content(self) -> None:
+        for editor in (
+            self.question,
+            self.latex,
+            self.user_answer,
+            self.correct_answer,
+            self.solution,
+            self.notes,
+        ):
+            viewport_width = editor.viewport().width()
+            if viewport_width <= 1:
+                continue
+            document = editor.document()
+            document.setTextWidth(viewport_width)
+            line_height = editor.fontMetrics().lineSpacing()
+            content_height = math.ceil(
+                document.documentLayout().documentSize().height()
+            )
+            one_line_height = line_height + 24
+            target_height = max(one_line_height, content_height + 24)
+            maximum = int(editor.property("contentMaxHeight"))
+            editor.setFixedHeight(min(maximum, target_height))
+            editor.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded
+                if target_height > maximum
+                else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        self._queue_text_area_resize()
 
     def reload_catalog(self) -> None:
         current = self.subject.currentData()
@@ -585,7 +631,7 @@ class ProblemForm(QWidget):
             "user_answer": self.user_answer.toPlainText(),
             "correct_answer": self.correct_answer.toPlainText(),
             "solution_markdown": self.solution.toPlainText(),
-            "error_analysis": self.error_analysis.toPlainText(),
+            "error_analysis": "",
             "notes": self.notes.toPlainText(),
         }
 
@@ -626,13 +672,17 @@ class ProblemForm(QWidget):
         self.original_number.setText(str(values.get("original_number") or ""))
         self.question.setPlainText(str(values.get("question_markdown") or ""))
         self.latex.setPlainText(str(values.get("question_latex") or ""))
-        self.user_answer.setPlainText(str(values.get("user_answer") or ""))
+        self.user_answer.setPlainText(
+            ""
+            if self.clear_user_answer_on_load
+            else str(values.get("user_answer") or "")
+        )
         self.correct_answer.setPlainText(str(values.get("correct_answer") or ""))
         self.solution.setPlainText(str(values.get("solution_markdown") or ""))
-        self.error_analysis.setPlainText(str(values.get("error_analysis") or ""))
         self.notes.setPlainText(str(values.get("notes") or ""))
         tags = values.get("tags")
         self.tags.setText(", ".join(str(tag) for tag in tags) if isinstance(tags, list) else "")
+        self._queue_text_area_resize()
 
     def clear(self) -> None:
         self.set_values({})
@@ -913,7 +963,9 @@ class IntakePage(QWidget):
         form_host = QWidget()
         form_layout = QVBoxLayout(form_host)
         form_layout.setContentsMargins(0, 0, 8, 0)
-        self.ai_form = ProblemForm(self.intake)
+        self.ai_form = ProblemForm(
+            self.intake, clear_user_answer_on_load=True
+        )
         self.ai_form.changed.connect(self._queue_ai_preview)
         form_layout.addWidget(self.ai_form)
         self.ai_result_tabs.addTab(self._scroll(form_host), "编辑字段")
