@@ -511,27 +511,35 @@ class MathContentView(QWidget):
         self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
         self._view.setPageSpacing(0)
         self._view.setDocumentMargins(QMargins())
-        white = QColor("#ffffff")
-        palette = self._view.palette()
-        palette.setColor(QPalette.ColorRole.Window, white)
-        palette.setColor(QPalette.ColorRole.Base, white)
-        palette.setColor(QPalette.ColorRole.AlternateBase, white)
-        palette.setColor(QPalette.ColorRole.Dark, white)
-        palette.setColor(QPalette.ColorRole.Shadow, white)
-        self._view.setPalette(palette)
-        self._view.setAutoFillBackground(True)
-        self._view.setStyleSheet(
-            "QPdfView, QPdfView > QWidget { background: #ffffff; }"
-        )
-        viewport = getattr(self._view, "viewport", None)
-        if callable(viewport):
-            viewport().setStyleSheet("background: #ffffff;")
+        self._apply_canvas_background()
         self._view.hide()
         layout.addWidget(self._view)
         _PREVIEW_VIEWS.add(self)
         manager = get_theme_manager(QApplication.instance())
         if manager is not None:
             manager.theme_changed.connect(self._on_theme_changed)
+
+    def _apply_canvas_background(self, theme: str | None = None) -> None:
+        background = QColor(theme_tokens(theme or current_theme_name()).bg)
+        palette = self._view.palette()
+        palette.setColor(QPalette.ColorRole.Window, background)
+        palette.setColor(QPalette.ColorRole.Base, background)
+        palette.setColor(QPalette.ColorRole.AlternateBase, background)
+        palette.setColor(QPalette.ColorRole.Dark, background)
+        palette.setColor(QPalette.ColorRole.Shadow, background)
+        self._view.setPalette(palette)
+        self._view.setAutoFillBackground(True)
+        self._view.setBackgroundRole(QPalette.ColorRole.Dark)
+        self._view.setStyleSheet(
+            f"QPdfView, QPdfView > QWidget {{ background: {background.name()}; }}"
+        )
+        viewport = getattr(self._view, "viewport", None)
+        if callable(viewport):
+            canvas = viewport()
+            canvas.setPalette(palette)
+            canvas.setAutoFillBackground(True)
+            canvas.setBackgroundRole(QPalette.ColorRole.Dark)
+            canvas.setStyleSheet(f"background: {background.name()};")
 
     def set_fit_content_height(
         self, enabled: bool = True, *, expand_widget: bool = True
@@ -608,7 +616,7 @@ class MathContentView(QWidget):
             # Keep Chromium's default 600px viewport from becoming blank PDF
             # space when we measure a content-sized reader document.
             set_viewport_size(QSize(794, 1))
-        page.setBackgroundColor(Qt.GlobalColor.white)
+        page.setBackgroundColor(QColor(theme_tokens(current_theme_name()).bg))
         page.loadFinished.connect(
             lambda ok, target=page, token=generation: self._html_loaded(
                 target, token, ok
@@ -824,7 +832,8 @@ class MathContentView(QWidget):
         )
         self._schedule_render()
 
-    def _on_theme_changed(self, _theme: str) -> None:
+    def _on_theme_changed(self, theme: str) -> None:
+        self._apply_canvas_background(theme)
         self._render_last()
 
     def set_message(self, title: str, message: str) -> None:
