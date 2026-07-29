@@ -118,6 +118,7 @@ class CloudProviderEndpointConfig(BaseModel):
 class CloudConfig(BaseModel):
     enabled: bool = False
     default_provider: str = "gitlink"
+    local_root: str = ""
     sync_mode: str = "manual"
     auto_backup: bool = True
     auto_backup_interval_hours: int = Field(default=24, ge=1)
@@ -307,20 +308,35 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
                 raise ConfigError("本地偏好设置包含无效预览缩放") from exc
 
     ai = payload.get("ai")
-    if not isinstance(ai, dict):
-        return settings
+    if isinstance(ai, dict):
+        provider = str(ai.get("default_provider") or "").strip()
+        if provider:
+            if provider != "mock" and provider not in settings.ai.providers:
+                raise ConfigError(f"本地偏好设置包含未知 AI 提供商：{provider}")
+            settings.ai.default_provider = provider
+        model = str(ai.get("default_vision_model") or "").strip()
+        if model:
+            settings.ai.default_vision_model = model
+            settings.ai.default_text_model = model
+        if "enabled" in ai:
+            settings.ai.enabled = bool(ai["enabled"])
 
-    provider = str(ai.get("default_provider") or "").strip()
-    if provider:
-        if provider != "mock" and provider not in settings.ai.providers:
-            raise ConfigError(f"本地偏好设置包含未知 AI 提供商：{provider}")
-        settings.ai.default_provider = provider
-    model = str(ai.get("default_vision_model") or "").strip()
-    if model:
-        settings.ai.default_vision_model = model
-        settings.ai.default_text_model = model
-    if "enabled" in ai:
-        settings.ai.enabled = bool(ai["enabled"])
+    cloud = payload.get("cloud")
+    if isinstance(cloud, dict):
+        provider = str(cloud.get("default_provider") or "").strip()
+        if provider:
+            if provider not in {"local_folder", "gitlink", "github"}:
+                raise ConfigError(f"本地偏好设置包含未知云端提供商：{provider}")
+            settings.cloud.default_provider = provider
+        repository = cloud.get("repository")
+        if isinstance(repository, dict):
+            settings.cloud.repository.owner = str(repository.get("owner") or "").strip()
+            name = str(repository.get("name") or "").strip()
+            if name:
+                settings.cloud.repository.name = name
+        settings.cloud.local_root = str(cloud.get("local_root") or "").strip()
+        if "enabled" in cloud:
+            settings.cloud.enabled = bool(cloud["enabled"])
     return settings
 
 
@@ -355,6 +371,51 @@ def save_ai_preferences(
         "enabled": enabled,
         "default_provider": provider,
         "default_vision_model": model,
+    }
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return path
+
+
+def save_cloud_preferences(
+    data_root: Path,
+    *,
+    provider: str,
+    owner: str,
+    repository: str,
+    local_root: str,
+    enabled: bool = True,
+) -> Path:
+    """Persist non-sensitive cloud fields without writing access tokens."""
+
+    provider = provider.strip()
+    if provider not in {"local_folder", "gitlink", "github"}:
+        raise ConfigError(f"未知云端提供商：{provider}")
+    repository = repository.strip() or "graduate-mistake-book-data"
+
+    root = Path(data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "preferences.json"
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                payload = existing
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    payload["cloud"] = {
+        "enabled": enabled,
+        "default_provider": provider,
+        "repository": {
+            "owner": owner.strip(),
+            "name": repository,
+        },
+        "local_root": local_root.strip(),
     }
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(

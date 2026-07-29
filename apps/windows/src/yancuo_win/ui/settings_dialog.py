@@ -29,6 +29,7 @@ from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.config.settings import (
     ConfigError,
     save_ai_preferences,
+    save_cloud_preferences,
     save_preview_zoom_preference,
     save_theme_preference,
 )
@@ -39,6 +40,7 @@ from yancuo_win.infrastructure.credentials import (
     mask_secret,
     set_secret,
 )
+from yancuo_win.tasks.model_worker import AIModelListWorker
 from yancuo_win.ui.widgets import CardFrame, PageHeader, button_row, primary_button
 from yancuo_win.ui.theme import apply_app_theme, get_theme_manager
 from yancuo_win.ui.math_content import set_preview_zoom_scale
@@ -59,6 +61,7 @@ class ServiceSettingsPage(QWidget):
             raise ValueError(f"unsupported settings section: {section}")
         self.runtime = runtime
         self.section = section
+        self._ai_model_worker: AIModelListWorker | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 20)
@@ -110,7 +113,8 @@ class ServiceSettingsPage(QWidget):
         ai_card = CardFrame()
         ai_card.add_title("AI（Faro / OpenAI 兼容）")
         ai_card.add_hint(
-            "默认直连 Faro API。密钥只进系统凭据；模型 ID 请从 Faro 模型广场复制，并确认支持图片输入。"
+            "默认直连 Faro API。密钥只进系统凭据；可从 API 获取模型列表，"
+            "也可手动输入模型 ID，并请确认支持图片输入。"
         )
         ai_form = QFormLayout()
         self.ai_provider = QComboBox()
@@ -126,9 +130,20 @@ class ServiceSettingsPage(QWidget):
             QLabel((faro_cfg.base_url if faro_cfg else "") or "https://faroapi.com/v1"),
         )
 
-        self.ai_model = QLineEdit(s.ai.default_vision_model or "gpt-5.6-sol")
-        self.ai_model.setPlaceholderText("从 Faro 模型广场复制支持图片的模型 ID")
+        self.ai_model = QComboBox()
+        self.ai_model.setEditable(True)
+        self.ai_model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        current_model = s.ai.default_vision_model or "gpt-5.6-sol"
+        self.ai_model.addItem(current_model)
+        self.ai_model.setCurrentText(current_model)
+        self.ai_model.lineEdit().setPlaceholderText(
+            "从 API 获取或手动输入支持图片的模型 ID"
+        )
         ai_form.addRow("图片模型 ID", self.ai_model)
+        self.ai_model_status = QLabel("可从 API 获取账户可用模型；请自行确认支持图片输入。")
+        self.ai_model_status.setObjectName("MutedLabel")
+        self.ai_model_status.setWordWrap(True)
+        ai_form.addRow("", self.ai_model_status)
 
         self._ai_cred_key = (
             (
@@ -152,9 +167,13 @@ class ServiceSettingsPage(QWidget):
         clear_ai.clicked.connect(self._clear_ai_token)
         test_ai = QPushButton("测试 Faro 连接")
         test_ai.clicked.connect(self._test_ai_connection)
+        self.fetch_ai_models = QPushButton("获取可用模型")
+        self.fetch_ai_models.clicked.connect(self._fetch_ai_models)
         apply_ai = QPushButton("保存并应用 AI 设置")
         apply_ai.clicked.connect(self._apply_ai_session)
-        ai_card.body.addLayout(button_row(save_ai, clear_ai, test_ai))
+        ai_card.body.addLayout(
+            button_row(save_ai, clear_ai, self.fetch_ai_models, test_ai)
+        )
         ai_card.body.addLayout(button_row(apply_ai))
         if section == "ai":
             layout.addWidget(ai_card)
@@ -279,7 +298,7 @@ class ServiceSettingsPage(QWidget):
 
     def _apply_ai_session(self) -> None:
         name = self.ai_provider.currentData()
-        model = self.ai_model.text().strip()
+        model = self.ai_model.currentText().strip()
         if not model:
             QMessageBox.warning(self, "模型未设置", "请填写 Faro 模型广场中的图片模型 ID")
             return
@@ -310,7 +329,7 @@ class ServiceSettingsPage(QWidget):
         if name == "mock":
             QMessageBox.information(self, "Mock", "Mock 不访问网络，请选择 Faro API。")
             return
-        model = self.ai_model.text().strip()
+        model = self.ai_model.currentText().strip()
         try:
             provider = get_provider(self.runtime.settings, name)
             provider.validate_configuration()
@@ -336,6 +355,72 @@ class ServiceSettingsPage(QWidget):
             "Faro 连接成功",
             f"已通过 Faro 身份验证，并在模型列表中找到“{model}”。",
         )
+
+    def _fetch_ai_models(self) -> None:
+        name = self.ai_provider.currentData()
+        if name == "mock":
+            QMessageBox.information(self, "Mock", "Mock 不访问网络，也没有远端模型列表。")
+            return
+        if self._ai_model_worker is not None:
+            return
+        try:
+            provider = get_provider(self.runtime.settings, name)
+            provider.validate_configuration()
+        except DomainError as exc:
+            QMessageBox.warning(self, "无法获取模型", str(exc))
+            return
+
+        self.fetch_ai_models.setEnabled(False)
+        self.fetch_ai_models.setText("正在获取…")
+        self.ai_model_status.setText("正在从 Faro API 获取模型列表…")
+        worker = AIModelListWorker(provider, timeout_seconds=20, parent=self)
+        worker.finished_ok.connect(self._on_ai_models_loaded)
+        worker.failed.connect(self._on_ai_models_failed)
+        worker.finished.connect(self._on_ai_model_worker_finished)
+        self._ai_model_worker = worker
+        worker.start()
+
+    def _on_ai_models_loaded(self, models: object) -> None:
+        choices = sorted(
+            {
+                str(model).strip()
+                for model in (models if isinstance(models, list) else [])
+                if str(model).strip()
+            }
+        )
+        current = self.ai_model.currentText().strip()
+        self.ai_model.blockSignals(True)
+        self.ai_model.clear()
+        self.ai_model.addItems(choices)
+        if current and current not in choices:
+            self.ai_model.insertItem(0, current)
+        if current:
+            self.ai_model.setCurrentText(current)
+        elif choices:
+            self.ai_model.setCurrentIndex(0)
+        self.ai_model.blockSignals(False)
+
+        if choices:
+            self.ai_model_status.setText(
+                f"已获取 {len(choices)} 个可用模型。列表不标注视觉能力，"
+                "请选择确认支持图片输入的模型。"
+            )
+        else:
+            self.ai_model_status.setText(
+                "API 身份验证成功，但没有返回模型；仍可手动输入模型 ID。"
+            )
+
+    def _on_ai_models_failed(self, error: str) -> None:
+        self.ai_model_status.setText("获取失败；仍可手动输入模型 ID。")
+        QMessageBox.warning(self, "获取模型失败", error)
+
+    def _on_ai_model_worker_finished(self) -> None:
+        worker = self._ai_model_worker
+        self._ai_model_worker = None
+        self.fetch_ai_models.setEnabled(True)
+        self.fetch_ai_models.setText("获取可用模型")
+        if worker is not None:
+            worker.deleteLater()
 
     def _credential_key_for_provider(self) -> str | None:
         name = self.provider.currentData()
@@ -395,7 +480,7 @@ class ServiceSettingsPage(QWidget):
         self.token_status.setText(mask_secret(None))
         QMessageBox.information(self, "已清除", "系统凭据中的云令牌已删除。")
 
-    def _apply_session_provider(self) -> None:
+    def _apply_session_provider(self, *, notify: bool = True) -> None:
         name = self.provider.currentData()
         self.runtime.settings.cloud.default_provider = name
         self.runtime.settings.cloud.repository.owner = self.owner_edit.text().strip()
@@ -403,12 +488,15 @@ class ServiceSettingsPage(QWidget):
             self.repo_edit.text().strip() or "graduate-mistake-book-data"
         )
         self.runtime.settings.cloud.enabled = True
+        local_root = self.local_root.text().strip()
+        self.runtime.settings.cloud.local_root = local_root
         if name == "local_folder":
-            os.environ["YANCUO_CLOUD_LOCAL_ROOT"] = self.local_root.text().strip()
-        QMessageBox.information(self, "已应用", f"当前会话云端提供商：{name}")
+            os.environ["YANCUO_CLOUD_LOCAL_ROOT"] = local_root
+        if notify:
+            QMessageBox.information(self, "已应用", f"当前会话云端提供商：{name}")
 
     def _test_cloud(self) -> None:
-        self._apply_session_provider()
+        self._apply_session_provider(notify=False)
         try:
             root = (
                 Path(self.local_root.text().strip())
@@ -417,13 +505,31 @@ class ServiceSettingsPage(QWidget):
             )
             provider = get_cloud_provider(self.runtime.settings, local_root=root)
             result = provider.test_connection()
-            QMessageBox.information(
-                self,
-                "连接成功",
-                json.dumps(result, ensure_ascii=False, indent=2),
-            )
         except DomainError as exc:
             QMessageBox.warning(self, "连接失败", str(exc))
+            return
+        try:
+            save_cloud_preferences(
+                self.runtime.paths.root,
+                provider=str(self.provider.currentData()),
+                owner=self.owner_edit.text(),
+                repository=self.repo_edit.text(),
+                local_root=self.local_root.text(),
+                enabled=True,
+            )
+        except (ConfigError, OSError) as exc:
+            QMessageBox.warning(
+                self,
+                "连接成功但保存失败",
+                f"云端连接有效，但当前字段未能写入本地偏好：{exc}",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "连接成功",
+            "当前云端字段已保存，下次启动会自动恢复。\n\n"
+            + json.dumps(result, ensure_ascii=False, indent=2),
+        )
 
     def _open_data_root(self) -> None:
         path = self.runtime.paths.root
@@ -442,4 +548,6 @@ def _default_local_root(runtime: RuntimeContext) -> str:
     env = os.environ.get("YANCUO_CLOUD_LOCAL_ROOT")
     if env:
         return env
+    if runtime.settings.cloud.local_root:
+        return runtime.settings.cloud.local_root
     return str(runtime.paths.backup_dir / "cloud_local")

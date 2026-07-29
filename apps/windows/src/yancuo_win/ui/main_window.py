@@ -1686,15 +1686,21 @@ class MainWindow(QMainWindow):
             uncategorized_count = sum(
                 problem.chapter_id is None for problem in subject_problems
             )
-            uncategorized = QTreeWidgetItem(
-                [f"未分类 · {uncategorized_count}"]
-            )
-            self._set_tree_item_data(
-                uncategorized,
-                mode=f"uncategorized:{subject.id}",
-                path=f"题库 / {subject.name} / 未分类",
-            )
-            subject_item.addChild(uncategorized)
+            if uncategorized_count:
+                uncategorized = QTreeWidgetItem(
+                    [f"未指定章节 · {uncategorized_count}"]
+                )
+                uncategorized.setToolTip(
+                    0,
+                    "这是尚未指定章节的题目筛选项，不是实际章节；"
+                    "为这些题目选择章节后会自动消失。",
+                )
+                self._set_tree_item_data(
+                    uncategorized,
+                    mode=f"uncategorized:{subject.id}",
+                    path=f"题库 / {subject.name} / 未指定章节",
+                )
+                subject_item.addChild(uncategorized)
             self._append_chapter_nodes(
                 subject_item,
                 self.services.list_chapter_tree(subject.id),
@@ -3145,7 +3151,10 @@ class MainWindow(QMainWindow):
             _, subject_id, chapter_id = mode.split(":", 2)
             return CatalogNodeContext("chapter", subject_id, chapter_id)
         if mode.startswith("uncategorized:"):
-            return CatalogNodeContext("uncategorized")
+            return CatalogNodeContext(
+                "uncategorized",
+                subject_id=mode.split(":", 1)[1],
+            )
         return CatalogNodeContext("system")
 
     def get_create_actions(self) -> tuple[CatalogAction, ...]:
@@ -3212,8 +3221,16 @@ class MainWindow(QMainWindow):
     def _update_catalog_action_buttons(self) -> None:
         actions = self.get_manage_actions()
         self.catalog_menu_button.setEnabled(bool(actions))
+        context = self._catalog_node_context()
+        if context.node_type == "uncategorized":
+            tooltip = (
+                "这是未指定章节题目的筛选项，不是实际章节；"
+                "为题目选择章节后会自动消失"
+            )
+        else:
+            tooltip = "管理当前目录" if actions else "请先选择一个科目或章节"
         self.catalog_menu_button.setToolTip(
-            "管理当前目录" if actions else "请先选择一个科目或章节"
+            tooltip
         )
 
     def _subject_position(self, subject_id: str) -> tuple[int, int]:

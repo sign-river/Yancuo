@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QColor, QImage
+from PySide6.QtWidgets import QApplication
 from sqlalchemy import func, select
 
 from yancuo_win.ai.base import StructuredCandidate, StructuredResult
@@ -28,6 +29,7 @@ from yancuo_win.data.models import (
     Version,
 )
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.ui.intake_page import ProblemForm
 
 
 @pytest.fixture()
@@ -203,6 +205,8 @@ def test_ai_taxonomy_prompt_requires_a_chapter_from_the_local_catalog(
 
     assert '"chapter_id": "ch_x"' in prompt
     assert "必须填写对应 chapter_id" in prompt
+    assert "不能因为本地章节为空或缺少目标章节就省略判断" in prompt
+    assert "规范章节名、判断理由和置信度" in prompt
     assert f"chapter_id={chapter.id}" in prompt
     assert "科目：408" in prompt
 
@@ -225,6 +229,74 @@ def test_chapter_inference_only_fills_an_unambiguous_local_match(
 
     assert inferred == limits.id
     assert ambiguous is None
+
+
+def test_problem_form_preserves_and_confirms_ai_chapter_proposal(
+    intake: ProblemIntakeService,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    subject = intake.app.create_subject("高数")
+    proposal = {
+        "subject_name": "高数",
+        "parent_chapter_id": None,
+        "chapter_name": "函数、极限与连续",
+        "reason": "题目包含极限与等价无穷小",
+        "confidence": 0.92,
+    }
+    form = ProblemForm(intake)
+
+    form.set_values(
+        {
+            "title": "极限题",
+            "subject_id": subject.id,
+            "chapter_id": None,
+            "taxonomy_proposal": proposal,
+        }
+    )
+    app.processEvents()
+
+    assert form.chapter.currentText() == "AI 建议新建：函数、极限与连续"
+    assert not form.taxonomy_hint.isHidden()
+    assert form.values()["taxonomy_proposal"] == proposal
+
+    form.chapter.setCurrentIndex(0)
+    assert "taxonomy_proposal" not in form.values()
+    assert form.taxonomy_hint.isHidden()
+    form.close()
+
+
+def test_existing_subject_can_accept_a_new_chapter_proposal(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+) -> None:
+    subject = intake.app.create_subject("高数")
+    image = tmp_path / "taxonomy-existing-subject.jpg"
+    image.write_bytes(b"\xff\xd8\xfftaxonomy-existing-subject")
+    started = intake.start_ai([image])
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    fields = dict(candidate.fields)
+    fields.update(
+        {
+            "subject_id": subject.id,
+            "chapter_id": None,
+            "taxonomy_proposal": {
+                "subject_name": subject.name,
+                "parent_chapter_id": None,
+                "chapter_name": "函数、极限与连续",
+                "reason": "极限题归入标准章节",
+                "confidence": 0.9,
+            },
+        }
+    )
+
+    problem = intake.commit_ai_candidate(candidate.review_item_id, fields)
+
+    assert problem.subject_id == subject.id
+    with intake.runtime.session_factory() as session:
+        chapter = session.get(Chapter, problem.chapter_id)
+        assert chapter is not None
+        assert chapter.name == "函数、极限与连续"
 
 
 def test_ai_job_cancelled_during_provider_call_writes_no_candidate(

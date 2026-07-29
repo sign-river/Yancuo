@@ -133,7 +133,6 @@ _CHAPTER_KEYWORD_GROUPS = (
     (("思想道德", "法治", "爱国主义"), ("思修", "思想道德", "法治")),
 )
 
-
 @dataclass(frozen=True)
 class AiIntakeSession:
     job_id: str
@@ -266,23 +265,29 @@ class ProblemIntakeService:
 
     def _apply_taxonomy_proposal(self, session, fields: dict[str, Any]) -> None:
         proposal = fields.pop("taxonomy_proposal", None)
-        if not isinstance(proposal, dict) or fields.get("subject_id"):
+        if not isinstance(proposal, dict) or fields.get("chapter_id"):
             return
         subject_name = str(proposal.get("subject_name") or "").strip()
         chapter_name = str(proposal.get("chapter_name") or "").strip()
         parent_id = proposal.get("parent_chapter_id")
         reason = str(proposal.get("reason") or "").strip()
-        if not subject_name:
+        subject = (
+            session.get(Subject, fields.get("subject_id"))
+            if fields.get("subject_id")
+            else None
+        )
+        if subject is None and not subject_name:
             raise DomainError("新分类提案缺少科目名称")
         if not reason:
             raise DomainError("新分类提案缺少创建理由")
         if parent_id is not None and not isinstance(parent_id, str):
             raise DomainError("新分类提案的上级章节无效")
-        subject = session.scalar(select(Subject).where(Subject.name == subject_name))
         if subject is None:
-            subject = Subject(id=new_id("sub"), name=subject_name)
-            session.add(subject)
-            session.flush()
+            subject = session.scalar(select(Subject).where(Subject.name == subject_name))
+            if subject is None:
+                subject = Subject(id=new_id("sub"), name=subject_name)
+                session.add(subject)
+                session.flush()
         fields["subject_id"] = subject.id
         if chapter_name:
             parent = session.get(Chapter, parent_id) if parent_id else None
@@ -678,10 +683,11 @@ class ProblemIntakeService:
             '"uncertain_fields": []}]}',
             "即使只有一道题也使用 problems 数组；不要把多道题拼进同一个题干。",
             "region 是该题在原图中的归一化矩形坐标，左上角为原点，四个值均为 0 到 1；无法判断时使用整图 {\"x\":0,\"y\":0,\"width\":1,\"height\":1}。",
-            "每道题都必须判断 subject_id、chapter_id、problem_type 和 priority（1-5）。若题干可明确匹配下方已有章节，必须填写对应 chapter_id，不能只填标签或仅填科目。考研数学、408、政治等固定知识体系优先精确归入已有章节。",
+            "每道题都必须判断 subject_id、chapter_id、problem_type 和 priority（1-5）。若题干可明确匹配下方已有章节，必须填写对应 chapter_id，不能只填标签或仅填科目。",
+            "章节判断必须参考该考研科目的通用考试大纲与教材章节体系。不能因为本地章节为空或缺少目标章节就省略判断；此时必须在 taxonomy_proposal 中给出规范章节名、判断理由和置信度。章节名应是“函数、极限与连续”这类稳定知识章节，不能拿“计算题”“难题”或零散标签代替。",
             "question_markdown、correct_answer、solution_markdown、notes 等 Markdown 字段中的公式必须使用 $...$ 或 $$...$$ 定界；不要输出无定界符的裸公式。",
             "question_latex 只写裸 LaTeX，不要再包 $、$$、\\(\\) 或 \\[\\] 定界符。",
-            "subject_id/chapter_id 必须从以下本地目录中成对选择，chapter_id 必须属于该 subject_id；没有合适目录时留空，并输出 taxonomy_proposal（subject_name、parent_chapter_id、chapter_name、reason），仅提出建议，不能编造 ID。",
+            "subject_id/chapter_id 必须从以下本地目录中成对选择，chapter_id 必须属于该 subject_id；没有合适目录时留空，并输出 taxonomy_proposal（subject_name、parent_chapter_id、chapter_name、reason、confidence），confidence 为 0 到 1；仅提出建议，不能编造 ID。",
             "本地分类目录（按科目分组）：",
         ]
         choices_by_subject: dict[str, list[Any]] = {}
@@ -1046,7 +1052,22 @@ class ProblemIntakeService:
                                 fields["chapter_id"] = inferred_chapter_id
                         proposal = fields.get("taxonomy_proposal")
                         if isinstance(proposal, dict):
-                            uncertain = [*uncertain, {"field": "taxonomy_proposal", "reason": f"新分类提案：{proposal.get('reason') or '待确认后创建'}"}]
+                            confidence = proposal.get("confidence")
+                            confidence_text = (
+                                f"（置信度 {float(confidence):.0%}）"
+                                if isinstance(confidence, (int, float))
+                                else ""
+                            )
+                            uncertain = [
+                                *uncertain,
+                                {
+                                    "field": "taxonomy_proposal",
+                                    "reason": (
+                                        f"章节建议{confidence_text}："
+                                        f"{proposal.get('reason') or '待确认后创建'}"
+                                    ),
+                                },
+                            ]
                     candidates.append(
                         IntakeCandidate(
                             review_item_id=item.id,

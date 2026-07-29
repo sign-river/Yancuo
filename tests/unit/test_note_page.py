@@ -70,6 +70,60 @@ def test_note_page_creates_edits_and_reads_blocks(note_page: NotePage) -> None:
     assert "sin x" in note_page.reader.last_blocks[0]["content_latex"]
 
 
+def test_note_library_uses_space_list_detail_hierarchy(note_page: NotePage) -> None:
+    first = note_page.notes.create_note(title="第一篇", status="active")
+    note_page.notes.create_note(title="第二篇", status="active")
+
+    note_page.reload(select_note_id=first.id)
+
+    assert note_page.workspace.count() == 3
+    assert note_page.collection_list.item(0).text() == "全部笔记"
+    assert note_page.collection_list.item(1).text() == "未归入合集"
+    assert note_page.note_count_label.text() == "2 篇"
+    assert note_page.mode_stack.currentIndex() == 1
+    assert note_page.read_button.isHidden()
+    assert not note_page.edit_button.isHidden()
+
+
+def test_note_collection_navigation_filters_the_middle_list(note_page: NotePage) -> None:
+    included = note_page.notes.create_note(title="合集内", status="active")
+    note_page.notes.create_note(title="合集外", status="active")
+    collection = note_page.notes.create_collection("高数")
+    note_page.notes.set_note_collections(included.id, [collection.id])
+    note_page.reload()
+
+    collection_item = next(
+        note_page.collection_list.item(row)
+        for row in range(note_page.collection_list.count())
+        if note_page.collection_list.item(row).data(Qt.ItemDataRole.UserRole)
+        == collection.id
+    )
+    note_page.collection_list.setCurrentItem(collection_item)
+
+    assert note_page.note_list.count() == 1
+    assert "合集内" in note_page.note_list.item(0).text()
+    assert note_page.note_count_label.text() == "1 篇"
+
+
+def test_note_editor_discloses_content_and_metadata_separately(
+    note_page: NotePage,
+) -> None:
+    note_page._create_note()
+
+    assert note_page.mode_stack.currentIndex() == 0
+    assert note_page.editor_section_stack.currentIndex() == 0
+    assert note_page.edit_button.isHidden()
+    assert not note_page.read_button.isHidden()
+
+    note_page._set_editor_section("info")
+    assert note_page.editor_section_stack.currentIndex() == 1
+
+    note_page._set_mode("read")
+    assert note_page.mode_stack.currentIndex() == 1
+    assert note_page.read_button.isHidden()
+    assert not note_page.edit_button.isHidden()
+
+
 def test_note_intake_actions_open_dedicated_workflow_pages(note_page: NotePage) -> None:
     note_page._show_manual_create()
     assert note_page.page_stack.currentWidget() is note_page.manual_create_page

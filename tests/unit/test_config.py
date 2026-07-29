@@ -16,6 +16,7 @@ from yancuo_win.config.settings import (
     default_toml_path,
     load_settings,
     save_ai_preferences,
+    save_cloud_preferences,
     save_theme_preference,
 )
 from yancuo_win.domain.identity import SCHEMA_VERSION
@@ -86,6 +87,51 @@ def test_theme_preferences_roundtrip_without_ai_settings(tmp_path: Path) -> None
     settings = load_settings(default_toml_path())
     apply_user_preferences(settings, tmp_path)
     assert settings.application.theme == "dark"
+
+
+def test_cloud_preferences_roundtrip_without_token(tmp_path: Path) -> None:
+    path = save_cloud_preferences(
+        tmp_path,
+        provider="gitlink",
+        owner="student-user",
+        repository="mistake-book-data",
+        local_root=r"D:\backups\yancuo",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert payload["cloud"] == {
+        "enabled": True,
+        "default_provider": "gitlink",
+        "repository": {
+            "owner": "student-user",
+            "name": "mistake-book-data",
+        },
+        "local_root": r"D:\backups\yancuo",
+    }
+    assert "token" not in path.read_text(encoding="utf-8").lower()
+
+    settings = load_settings(default_toml_path())
+    apply_user_preferences(settings, tmp_path)
+    assert settings.cloud.enabled is True
+    assert settings.cloud.default_provider == "gitlink"
+    assert settings.cloud.repository.owner == "student-user"
+    assert settings.cloud.repository.name == "mistake-book-data"
+    assert settings.cloud.local_root == r"D:\backups\yancuo"
+
+
+def test_cloud_preferences_preserve_ai_settings(tmp_path: Path) -> None:
+    save_ai_preferences(tmp_path, provider="mock", model="offline-test-model")
+    path = save_cloud_preferences(
+        tmp_path,
+        provider="github",
+        owner="student-user",
+        repository="mistake-book-data",
+        local_root="",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert payload["ai"]["default_vision_model"] == "offline-test-model"
+    assert payload["cloud"]["default_provider"] == "github"
 
 
 def test_theme_preference_preserves_ai_settings(tmp_path: Path) -> None:

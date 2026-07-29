@@ -357,9 +357,37 @@ def test_catalog_actions_follow_selected_node_type_and_position(window: MainWind
     )
     _select_mode(window, uncategorized_mode)
     window._update_catalog_action_buttons()
+    uncategorized_item = window._find_knowledge_item(uncategorized_mode)
+    assert uncategorized_item is not None
+    assert uncategorized_item.text(0) == "未指定章节 · 1"
+    assert "不是实际章节" in uncategorized_item.toolTip(0)
     assert [spec.action_id for spec in window.get_create_actions()] == ["create_tag"]
     assert window.get_manage_actions() == ()
     assert not window.catalog_menu_button.isEnabled()
+    assert "不是实际章节" in window.catalog_menu_button.toolTip()
+
+
+def test_empty_uncategorized_filter_is_hidden(window: MainWindow) -> None:
+    uncategorized = next(
+        problem
+        for problem in window.services.list_problems()
+        if problem.title == "未分类极限题"
+    )
+    chapter_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("chapter:")
+    )
+    _, subject_id, chapter_id = chapter_mode.split(":", 2)
+
+    window.services.move_problems_to_category(
+        [uncategorized.id],
+        subject_id=subject_id,
+        chapter_id=chapter_id,
+    )
+    window.refresh_nav()
+
+    assert not any(
+        mode.startswith("uncategorized:") for mode in _nav_modes(window)
+    )
 
 
 def test_smart_views_and_search_scopes_are_stable(window: MainWindow) -> None:

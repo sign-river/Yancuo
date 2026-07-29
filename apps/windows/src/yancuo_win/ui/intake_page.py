@@ -469,6 +469,11 @@ class ProblemForm(QWidget):
         self.title_edit.setPlaceholderText("例如：换元积分中遗漏绝对值")
         self.subject = QComboBox()
         self.chapter = QComboBox()
+        self._taxonomy_proposal: dict[str, Any] | None = None
+        self.taxonomy_hint = QLabel()
+        self.taxonomy_hint.setObjectName("MutedLabel")
+        self.taxonomy_hint.setWordWrap(True)
+        self.taxonomy_hint.hide()
         self.problem_type = QLineEdit()
         self.problem_type.setPlaceholderText("例如：选择题 / 计算题")
         self.priority = QSpinBox()
@@ -482,6 +487,7 @@ class ProblemForm(QWidget):
         form.addRow("标题", self.title_edit)
         form.addRow("科目", self.subject)
         form.addRow("章节", self.chapter)
+        form.addRow("", self.taxonomy_hint)
         form.addRow("题型", self.problem_type)
         form.addRow("优先级", self.priority)
         form.addRow("来源书籍", self.source_book)
@@ -541,6 +547,9 @@ class ProblemForm(QWidget):
         root.addStretch(1)
 
         self.subject.currentIndexChanged.connect(self._reload_chapters)
+        self.chapter.currentIndexChanged.connect(
+            self._sync_taxonomy_hint_visibility
+        )
         self.reload_catalog()
         self._connect_change_signals()
 
@@ -665,6 +674,8 @@ class ProblemForm(QWidget):
 
     def _reload_chapters(self) -> None:
         current = self.chapter.currentData()
+        self._taxonomy_proposal = None
+        self.taxonomy_hint.hide()
         self.chapter.clear()
         self.chapter.addItem("（未指定）", None)
         subject_id = self.subject.currentData()
@@ -678,13 +689,22 @@ class ProblemForm(QWidget):
         index = self.chapter.findData(current)
         self.chapter.setCurrentIndex(index if index >= 0 else 0)
 
+    def _sync_taxonomy_hint_visibility(self) -> None:
+        proposal_marker = self.chapter.itemData(
+            self.chapter.currentIndex(),
+            Qt.ItemDataRole.UserRole + 1,
+        )
+        self.taxonomy_hint.setVisible(
+            bool(proposal_marker and self._taxonomy_proposal is not None)
+        )
+
     @staticmethod
     def _optional(text: str) -> str | None:
         value = text.strip()
         return value or None
 
     def values(self) -> dict[str, Any]:
-        return {
+        values = {
             "title": self._optional(self.title_edit.text()),
             "subject_id": self.subject.currentData(),
             "chapter_id": self.chapter.currentData(),
@@ -701,6 +721,14 @@ class ProblemForm(QWidget):
             "error_analysis": "",
             "notes": self.notes.toPlainText(),
         }
+        proposal_marker = self.chapter.itemData(
+            self.chapter.currentIndex(),
+            Qt.ItemDataRole.UserRole + 1,
+        )
+        if proposal_marker and self._taxonomy_proposal is not None:
+            values["chapter_id"] = None
+            values["taxonomy_proposal"] = dict(self._taxonomy_proposal)
+        return values
 
     def tag_names(self) -> list[str]:
         text = self.tags.text().replace("，", ",")
@@ -710,9 +738,16 @@ class ProblemForm(QWidget):
         self.reload_catalog()
         self.title_edit.setText(str(values.get("title") or ""))
         subject_id = values.get("subject_id")
-        if not subject_id and values.get("subject_name"):
+        proposal = values.get("taxonomy_proposal")
+        proposal_subject = (
+            str(proposal.get("subject_name") or "")
+            if isinstance(proposal, dict)
+            else ""
+        )
+        subject_name = values.get("subject_name") or proposal_subject
+        if not subject_id and subject_name:
             for index in range(self.subject.count()):
-                if self.subject.itemText(index) == str(values["subject_name"]):
+                if self.subject.itemText(index) == str(subject_name):
                     subject_id = self.subject.itemData(index)
                     break
         index = self.subject.findData(subject_id)
@@ -727,7 +762,33 @@ class ProblemForm(QWidget):
                     chapter_id = self.chapter.itemData(idx)
                     break
         chapter_index = self.chapter.findData(chapter_id)
-        self.chapter.setCurrentIndex(chapter_index if chapter_index >= 0 else 0)
+        if (
+            not chapter_id
+            and isinstance(proposal, dict)
+            and str(proposal.get("chapter_name") or "").strip()
+            and subject_id
+        ):
+            self._taxonomy_proposal = dict(proposal)
+            chapter_name = str(proposal["chapter_name"]).strip()
+            self.chapter.insertItem(1, f"AI 建议新建：{chapter_name}", None)
+            self.chapter.setItemData(
+                1, True, Qt.ItemDataRole.UserRole + 1
+            )
+            self.chapter.setCurrentIndex(1)
+            confidence = proposal.get("confidence")
+            confidence_text = (
+                f" · 置信度 {float(confidence):.0%}"
+                if isinstance(confidence, (int, float))
+                else ""
+            )
+            reason = str(proposal.get("reason") or "请确认后创建")
+            self.taxonomy_hint.setText(
+                f"章节建议{confidence_text}：{reason}。"
+                "确认入库时会创建该章节；也可以改选现有章节或“未指定”。"
+            )
+            self._sync_taxonomy_hint_visibility()
+        else:
+            self.chapter.setCurrentIndex(chapter_index if chapter_index >= 0 else 0)
         self.problem_type.setText(str(values.get("problem_type") or ""))
         try:
             priority = int(values.get("priority") or 3)
