@@ -20,6 +20,7 @@ from pydantic_settings import (
 class ApplicationConfig(BaseModel):
     language: str = "zh_CN"
     theme: str = "system"
+    preview_zoom_scale: float = Field(default=0.96, ge=0.8, le=1.0)
     auto_save_seconds: int = Field(default=30, ge=1)
     confirm_before_delete: bool = True
     schema_version: int = Field(default=1, ge=1)
@@ -288,13 +289,22 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
         raise ConfigError(f"本地偏好设置格式无效：{path}")
 
     application = payload.get("application")
-    if isinstance(application, dict) and "theme" in application:
-        try:
-            settings.application.theme = ApplicationConfig.validate_theme(
-                str(application["theme"])
-            )
-        except ValueError as exc:
-            raise ConfigError(f"本地偏好设置包含无效主题：{application['theme']}") from exc
+    if isinstance(application, dict):
+        if "theme" in application:
+            try:
+                settings.application.theme = ApplicationConfig.validate_theme(
+                    str(application["theme"])
+                )
+            except ValueError as exc:
+                raise ConfigError(f"本地偏好设置包含无效主题：{application['theme']}") from exc
+        if "preview_zoom_scale" in application:
+            try:
+                preview_zoom_scale = float(application["preview_zoom_scale"])
+                if not 0.8 <= preview_zoom_scale <= 1.0:
+                    raise ValueError
+                settings.application.preview_zoom_scale = preview_zoom_scale
+            except (TypeError, ValueError) as exc:
+                raise ConfigError("本地偏好设置包含无效预览缩放") from exc
 
     ai = payload.get("ai")
     if not isinstance(ai, dict):
@@ -378,6 +388,35 @@ def save_theme_preference(data_root: Path, theme: str) -> Path:
     if not isinstance(application, dict):
         application = {}
     application["theme"] = normalized
+    payload["application"] = application
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return path
+
+
+def save_preview_zoom_preference(data_root: Path, scale: float) -> Path:
+    """Persist the shared reader scale without replacing other preferences."""
+
+    normalized = max(0.8, min(1.0, float(scale)))
+    root = Path(data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "preferences.json"
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                payload = existing
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    application = payload.get("application")
+    if not isinstance(application, dict):
+        application = {}
+    application["preview_zoom_scale"] = normalized
     payload["application"] = application
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(

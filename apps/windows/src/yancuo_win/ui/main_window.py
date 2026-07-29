@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QPoint, QTimer, Qt
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtCore import QPoint, QTimer, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -62,7 +62,7 @@ from yancuo_win.tasks.worker import AIJobWorker
 from yancuo_win.tasks.search_worker import AiSearchWorker
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.intake_page import IntakePage
-from yancuo_win.ui.math_content import MathContentView
+from yancuo_win.ui.math_content import MathContentView, set_preview_zoom_scale
 from yancuo_win.ui.note_page import NotePage
 from yancuo_win.ui.problem_detail import ProblemDetailPage
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
@@ -223,6 +223,7 @@ class MainWindow(QMainWindow):
     def __init__(self, runtime: RuntimeContext) -> None:
         super().__init__()
         self.runtime = runtime
+        set_preview_zoom_scale(runtime.settings.application.preview_zoom_scale)
         self.services = AppServices(runtime)
         self.search = SearchIndexService(runtime)
         self.ai_search = AiSearchService(runtime)
@@ -287,9 +288,14 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        self.sidebar_toggle = IconButton(
-            QStyle.StandardPixmap.SP_TitleBarShadeButton, "收起导航栏"
-        )
+        self.sidebar_toggle = QPushButton("◀")
+        self.sidebar_toggle.setObjectName("IconButton")
+        self.sidebar_toggle.setToolTip("收起导航栏")
+        self.sidebar_toggle.setAccessibleName("收起导航栏")
+        self.sidebar_toggle.setFixedSize(32, 32)
+        sidebar_arrow_font = self.sidebar_toggle.font()
+        sidebar_arrow_font.setPointSize(14)
+        self.sidebar_toggle.setFont(sidebar_arrow_font)
         self.sidebar_toggle.clicked.connect(self._toggle_sidebar)
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -303,9 +309,12 @@ class MainWindow(QMainWindow):
         self.sidebar_rail.setFixedWidth(40)
         rail_layout = QVBoxLayout(self.sidebar_rail)
         rail_layout.setContentsMargins(4, 16, 4, 0)
-        self.sidebar_expand_button = IconButton(
-            QStyle.StandardPixmap.SP_TitleBarUnshadeButton, "展开导航栏"
-        )
+        self.sidebar_expand_button = QPushButton("▶")
+        self.sidebar_expand_button.setObjectName("IconButton")
+        self.sidebar_expand_button.setToolTip("展开导航栏")
+        self.sidebar_expand_button.setAccessibleName("展开导航栏")
+        self.sidebar_expand_button.setFixedSize(32, 32)
+        self.sidebar_expand_button.setFont(sidebar_arrow_font)
         self.sidebar_expand_button.clicked.connect(self._toggle_sidebar)
         rail_layout.addWidget(self.sidebar_expand_button)
         rail_layout.addStretch(1)
@@ -467,7 +476,10 @@ class MainWindow(QMainWindow):
         for row in range(self.main_nav.count()):
             item = self.main_nav.item(row)
             if item.data(Qt.ItemDataRole.UserRole) == page:
-                self.main_nav.setCurrentRow(row)
+                if self.main_nav.currentRow() == row:
+                    self._on_main_nav(row)
+                else:
+                    self.main_nav.setCurrentRow(row)
                 return
         self.stack.setCurrentIndex(page)
 
@@ -785,7 +797,7 @@ class MainWindow(QMainWindow):
         imports = QPushButton("\u66f4\u591a \u25be")
         imports.setToolTip("\u5bfc\u5165\u3001\u5bfc\u51fa\u548c\u6279\u91cf\u9898\u5e93\u64cd\u4f5c")
         imports.clicked.connect(self._library_more_menu)
-        for button in (manual, ai_intake, imports):
+        for button in (ai_intake, manual, imports):
             button.setMinimumHeight(36)
             button.setMinimumWidth(button.sizeHint().width() + 12)
             header.add_action(button)
@@ -1102,14 +1114,18 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         layout.addWidget(
-            PageHeader("设置", "账户、服务配置与数据维护集中管理。")
+            PageHeader("设置", "按身份、AI、外观、本机数据和云端备份分别管理。")
         )
 
         self.settings_tabs = QTabWidget()
-        self.settings_tabs.addTab(self._build_account_page(), "账户")
-        self.service_settings_page = ServiceSettingsPage(self.runtime)
-        self.settings_tabs.addTab(self.service_settings_page, "服务与外观")
-        self.settings_tabs.addTab(self._build_data_page(), "数据与同步")
+        self.settings_tabs.addTab(self._build_account_page(), "账户与身份")
+        self.ai_settings_page = ServiceSettingsPage(self.runtime, "ai")
+        self.settings_tabs.addTab(self.ai_settings_page, "AI 服务")
+        self.appearance_settings_page = ServiceSettingsPage(self.runtime, "appearance")
+        self.settings_tabs.addTab(self.appearance_settings_page, "外观")
+        self.settings_tabs.addTab(self._build_data_page(), "本机与数据")
+        self.cloud_settings_page = self._build_cloud_sync_page()
+        self.settings_tabs.addTab(self.cloud_settings_page, "云端备份与同步")
         layout.addWidget(self.settings_tabs, stretch=1)
         return page
 
@@ -1121,7 +1137,7 @@ class MainWindow(QMainWindow):
         lay.setSpacing(16)
 
         lay.addWidget(
-            PageHeader("数据与同步", "备份、迁移和同步集中管理，不会逐题实时上传。")
+            PageHeader("本机与数据", "管理本机存储、索引、备份、导入导出与工作区。")
         )
         workspace = QGridLayout()
         workspace.setHorizontalSpacing(16)
@@ -1141,7 +1157,7 @@ class MainWindow(QMainWindow):
         p4 = QPushButton("恢复 zip")
         p4.clicked.connect(self._restore_backup)
         pack.body.addLayout(button_row(p1, p2, p3, p4))
-        workspace.addWidget(pack, 0, 0)
+        workspace.addWidget(pack, 0, 0, 1, 2)
 
         share = CardFrame()
         share.add_title("分享与工作区")
@@ -1156,26 +1172,26 @@ class MainWindow(QMainWindow):
         s4.clicked.connect(self._import_workspace)
         share.body.addLayout(button_row(s1, s2, s3, s4))
 
-        cloud = CardFrame()
-        cloud.add_title("云备份")
-        cloud.add_hint("完整包上传 / 恢复；增量推拉目前主要支持本地文件夹提供商。")
-        c1 = primary_button("云备份")
-        c1.clicked.connect(self._cloud_backup)
-        c2 = QPushButton("云恢复")
-        c2.clicked.connect(self._cloud_restore)
-        c3 = QPushButton("推送增量")
-        c3.clicked.connect(self._sync_push)
-        c4 = QPushButton("拉取合并")
-        c4.clicked.connect(self._sync_pull)
-        cloud.body.addLayout(button_row(c1, c2, c3, c4))
-        workspace.addWidget(cloud, 0, 1)
         workspace.addWidget(share, 1, 0)
 
         path_card = CardFrame()
-        path_card.add_title("数据目录")
+        path_card.add_title("本机存储")
+        path_card.add_hint("本机资料默认离线保存；移动或清理前请先完成备份。")
+        local_form = QGridLayout()
+        local_form.addWidget(QLabel("语言"), 0, 0)
+        local_form.addWidget(QLabel(self.runtime.settings.application.language), 0, 1)
+        local_form.addWidget(QLabel("数据根目录"), 1, 0)
         self.data_path_label = QLabel(str(self.runtime.paths.root))
         self.data_path_label.setWordWrap(True)
-        path_card.body.addWidget(self.data_path_label)
+        local_form.addWidget(self.data_path_label, 1, 1)
+        local_form.addWidget(QLabel("数据库"), 2, 0)
+        database_path = QLabel(str(self.runtime.paths.database))
+        database_path.setWordWrap(True)
+        local_form.addWidget(database_path, 2, 1)
+        path_card.body.addLayout(local_form)
+        open_data = ghost_button("打开数据目录")
+        open_data.clicked.connect(self._open_data_root)
+        path_card.body.addLayout(button_row(open_data))
 
         search_card = CardFrame()
         search_card.add_title("本地搜索索引")
@@ -1190,6 +1206,43 @@ class MainWindow(QMainWindow):
         workspace.addWidget(path_card, 2, 0, 1, 2)
         lay.addLayout(workspace)
         lay.addStretch(1)
+        return page
+
+    def _build_cloud_sync_page(self) -> QWidget:
+        page = ServiceSettingsPage(self.runtime, "cloud")
+        profiles = CardFrame()
+        profiles.add_title("云端资料")
+        profiles.add_hint("查看、恢复或合并自己的远端资料；不会创建研错库在线账户。")
+        self.account_remote_summary = QLabel("尚未检查云端资料")
+        self.account_remote_summary.setObjectName("MutedLabel")
+        self.account_remote_summary.setWordWrap(True)
+        profiles.body.addWidget(self.account_remote_summary)
+        inspect_profiles = primary_button("查看云端资料")
+        inspect_profiles.clicked.connect(self._inspect_cloud_profiles)
+        restore_profile = QPushButton("恢复指定资料…")
+        restore_profile.clicked.connect(self._restore_cloud_profile)
+        preview_merge = ghost_button("预检资料合并…")
+        preview_merge.clicked.connect(self._preview_cloud_profile_merge)
+        merge_profile = ghost_button("合并指定资料…")
+        merge_profile.clicked.connect(self._merge_cloud_profile)
+        profiles.body.addLayout(
+            button_row(inspect_profiles, restore_profile, preview_merge, merge_profile)
+        )
+        operations = CardFrame()
+        operations.add_title("备份与同步操作")
+        operations.add_hint("云备份创建完整快照；增量推拉不会逐题实时上传。")
+        backup = primary_button("云备份")
+        backup.clicked.connect(self._cloud_backup)
+        restore = QPushButton("云恢复")
+        restore.clicked.connect(self._cloud_restore)
+        push = QPushButton("推送增量")
+        push.clicked.connect(self._sync_push)
+        pull = QPushButton("拉取合并")
+        pull.clicked.connect(self._sync_pull)
+        operations.body.addLayout(button_row(backup, restore, push, pull))
+        insert_at = max(0, page.content_layout.count() - 1)
+        page.content_layout.insertWidget(insert_at, profiles)
+        page.content_layout.insertWidget(insert_at + 1, operations)
         return page
 
     def _build_account_page(self) -> QWidget:
@@ -1215,17 +1268,6 @@ class MainWindow(QMainWindow):
         identity.body.addWidget(self.account_identity_summary)
         lay.addWidget(identity)
 
-        connections = CardFrame()
-        connections.add_title("连接状态")
-        self.account_connection_summary = QLabel()
-        self.account_connection_summary.setObjectName("MutedLabel")
-        self.account_connection_summary.setWordWrap(True)
-        connections.body.addWidget(self.account_connection_summary)
-        open_settings = ghost_button("管理 AI 和云服务设置")
-        open_settings.clicked.connect(lambda: self.settings_tabs.setCurrentIndex(1))
-        connections.body.addLayout(button_row(open_settings))
-        lay.addWidget(connections)
-
         cloud_profiles = CardFrame()
         cloud_profiles.add_title("云端资料")
         cloud_profiles.add_hint("连接自己的私有仓库以查看、恢复或接管资料；不会创建研错库在线账号。")
@@ -1245,6 +1287,7 @@ class MainWindow(QMainWindow):
             button_row(inspect_profiles, restore_profile, preview_merge, merge_profile)
         )
         lay.addWidget(cloud_profiles)
+        cloud_profiles.setVisible(False)
         lay.addStretch(1)
         self._refresh_account_page()
         return page
@@ -1268,6 +1311,8 @@ class MainWindow(QMainWindow):
             f"当前设备：{identity.device_id}\n"
             f"数据目录：{self.runtime.paths.root}"
         )
+        if not hasattr(self, "account_connection_summary"):
+            return
         settings = self.runtime.settings
         ai_config = settings.ai.providers.get(settings.ai.default_provider)
         ai_ready = bool(settings.ai.enabled and ai_config) and self._credential_available(
@@ -1282,6 +1327,9 @@ class MainWindow(QMainWindow):
             f"AI 凭据：{'已配置' if ai_ready else '未配置或未启用'}\n"
             f"云服务：{'已连接配置' if cloud_ready else '未连接'}"
         )
+
+    def _open_data_root(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.runtime.paths.root)))
 
     def _inspect_cloud_profiles(self) -> None:
         try:

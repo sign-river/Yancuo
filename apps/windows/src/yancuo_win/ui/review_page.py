@@ -160,6 +160,10 @@ class ReviewPage(QWidget):
         self.note_complete_button = primary_button("标记已阅读并继续")
         self.note_complete_button.clicked.connect(self._complete_note)
         root.addWidget(self.note_complete_button)
+        self.session_finish_button = primary_button("返回复习计划")
+        self.session_finish_button.clicked.connect(self.show_home)
+        self.session_finish_button.setVisible(False)
+        root.addWidget(self.session_finish_button)
 
         self.grade_card = CardFrame()
         self.grade_card.add_title("完成思考后评分")
@@ -448,9 +452,11 @@ class ReviewPage(QWidget):
                     note
                     for item in plan.items
                     if (note := self.notes.get_note(item.source_id)) is not None
+                    and note.status == "active"
                 ]
                 if not self._note_queue:
                     self.status_message.emit("复习计划中的笔记已被移除")
+                    self.show_home()
                     return
                 self._queue = []
                 self._index = 0
@@ -531,10 +537,15 @@ class ReviewPage(QWidget):
             self.grade_card.setVisible(False)
             self.detail_button.setVisible(False)
             self.note_complete_button.setVisible(note is not None)
-            self.hero.setText(f"本轮笔记剩余 {len(self._note_queue)} 篇")
+            self.session_finish_button.setVisible(note is None)
+            self.hero.setText(
+                f"本轮已完成 {self._session_completed} 篇 · 剩余 {len(self._note_queue)} 篇"
+            )
             if note is None:
                 self.progress_label.setText("笔记复习完成")
-                self.reader.set_message("复习完成", "本轮笔记均已阅读。")
+                self.reader.set_message(
+                    "复习完成", f"本轮已完成 {self._session_completed} 篇笔记。"
+                )
                 return
             self.progress_label.setText(f"当前第 {self._index + 1} / {len(self._note_queue)} 篇")
             body = "\n\n".join(block.content_markdown for block in note.blocks)
@@ -547,6 +558,7 @@ class ReviewPage(QWidget):
         self.grade_card.setVisible(True)
         self.detail_button.setVisible(True)
         self.note_complete_button.setVisible(False)
+        self.session_finish_button.setVisible(False)
         remaining = len(self._queue)
         self.hero.setText(
             f"本轮已完成 {self._session_completed} 题  ·  剩余 {remaining} 题"
@@ -565,6 +577,7 @@ class ReviewPage(QWidget):
             self.answer_button.setEnabled(False)
             self.grade_hint.setText("当前没有需要评分的题目。")
             self.detail_button.setEnabled(False)
+            self.session_finish_button.setVisible(True)
             for button in self.grade_buttons:
                 button.setEnabled(False)
             return
@@ -602,6 +615,14 @@ class ReviewPage(QWidget):
                 note.id, review_plan_id=self._selected_plan_id
             )
         except DomainError as exc:
+            current = self.notes.get_note(note.id) if self.notes is not None else None
+            if current is None or current.status == "trashed":
+                self._note_queue.pop(self._index)
+                self._index = self._index % len(self._note_queue) if self._note_queue else 0
+                self.status_message.emit("已跳过不存在或已移入回收站的笔记")
+                self._render()
+                self.queue_changed.emit()
+                return
             self.status_message.emit(str(exc))
             return
         self._note_queue.pop(self._index)

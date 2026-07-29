@@ -109,6 +109,30 @@ _REQUIRED_TEXT_FIELDS = frozenset(
 
 _RECOGNITION_MODES = frozenset({"auto", "one_to_one", "one_to_many", "many_to_one"})
 
+# These are deliberately only high-signal terms from the standard graduate
+# entrance-exam curricula.  They supplement, rather than replace, the local
+# catalog: an inferred value is always one of the user's existing chapters.
+_CHAPTER_KEYWORD_GROUPS = (
+    (("行列式",), ("行列式",)),
+    (("矩阵", "特征值", "特征向量", "相似矩阵", "二次型"), ("矩阵", "二次型")),
+    (("极限", "等价无穷小", "洛必达"), ("极限",)),
+    (("连续", "间断点"), ("连续",)),
+    (("导数", "微分", "单调性", "极值", "凹凸性"), ("微分", "导数")),
+    (("不定积分", "定积分", "换元积分", "分部积分"), ("积分",)),
+    (("微分方程",), ("微分方程",)),
+    (("多元函数", "偏导数", "全微分"), ("多元函数",)),
+    (("二重积分", "三重积分", "曲线积分", "曲面积分"), ("重积分", "曲线积分", "曲面积分")),
+    (("概率", "随机变量", "分布函数", "期望", "方差"), ("概率", "随机变量", "数理统计")),
+    (("数据结构", "链表", "栈", "队列", "二叉树", "邻接表"), ("数据结构",)),
+    (("操作系统", "进程", "线程", "虚拟内存", "页面置换"), ("操作系统",)),
+    (("计算机组成", "指令系统", "流水线", "Cache"), ("组成原理", "计算机组成")),
+    (("计算机网络", "TCP", "IP", "HTTP", "路由"), ("计算机网络", "网络")),
+    (("马克思主义基本原理", "唯物", "辩证法", "剩余价值"), ("马原", "马克思主义基本原理")),
+    (("毛泽东思想", "中国特色社会主义理论", "邓小平理论"), ("毛概", "中国特色")),
+    (("中国近现代史", "新民主主义革命", "抗日战争"), ("史纲", "近现代史")),
+    (("思想道德", "法治", "爱国主义"), ("思修", "思想道德", "法治")),
+)
+
 
 @dataclass(frozen=True)
 class AiIntakeSession:
@@ -648,23 +672,96 @@ class ProblemIntakeService:
         lines = [
             "这是新题录入任务。请识别图片中的所有目标题目，并严格输出以下根结构：",
             '{"problems": [{"title": "题目1", "question_markdown": "...", '
+            '"subject_id": "sub_x", "chapter_id": "ch_x", "problem_type": "计算题", '
+            '"priority": 3, "taxonomy_proposal": null, '
             '"region": {"x": 0.05, "y": 0.10, "width": 0.90, "height": 0.35}, '
-            '"uncertain_fields": []}, {"title": "题目2", "question_markdown": "...", '
-            '"region": {"x": 0.05, "y": 0.50, "width": 0.90, "height": 0.40}, '
             '"uncertain_fields": []}]}',
             "即使只有一道题也使用 problems 数组；不要把多道题拼进同一个题干。",
             "region 是该题在原图中的归一化矩形坐标，左上角为原点，四个值均为 0 到 1；无法判断时使用整图 {\"x\":0,\"y\":0,\"width\":1,\"height\":1}。",
-            "请额外输出 subject_id、chapter_id、problem_type 和 priority（1-5）。",
+            "每道题都必须判断 subject_id、chapter_id、problem_type 和 priority（1-5）。若题干可明确匹配下方已有章节，必须填写对应 chapter_id，不能只填标签或仅填科目。考研数学、408、政治等固定知识体系优先精确归入已有章节。",
             "question_markdown、correct_answer、solution_markdown、notes 等 Markdown 字段中的公式必须使用 $...$ 或 $$...$$ 定界；不要输出无定界符的裸公式。",
             "question_latex 只写裸 LaTeX，不要再包 $、$$、\\(\\) 或 \\[\\] 定界符。",
-            "subject_id/chapter_id 必须从以下允许集合中选择；没有合适目录时留空，并输出 taxonomy_proposal（subject_name、parent_chapter_id、chapter_name、reason），仅提出建议，不能编造 ID。",
+            "subject_id/chapter_id 必须从以下本地目录中成对选择，chapter_id 必须属于该 subject_id；没有合适目录时留空，并输出 taxonomy_proposal（subject_name、parent_chapter_id、chapter_name、reason），仅提出建议，不能编造 ID。",
+            "本地分类目录（按科目分组）：",
         ]
+        choices_by_subject: dict[str, list[Any]] = {}
         for choice in self.app.list_category_choices():
-            if choice.chapter_id is None:
-                lines.append(f"- subject_id={choice.subject_id}; chapter_id=null; {choice.label}")
-            else:
-                lines.append(f"- subject_id={choice.subject_id}; chapter_id={choice.chapter_id}; {choice.label}")
+            choices_by_subject.setdefault(choice.subject_id, []).append(choice)
+        for choices in choices_by_subject.values():
+            subject = choices[0]
+            lines.append(f"- 科目：{subject.subject_name} (subject_id={subject.subject_id})")
+            for choice in choices:
+                if choice.chapter_id:
+                    lines.append(
+                        f"  - 章节：{choice.label} (chapter_id={choice.chapter_id})"
+                    )
         return "\n".join(lines)
+
+    def _infer_chapter_id(self, subject_id: str | None, fields: dict[str, Any]) -> str | None:
+        """Return one unambiguous local chapter inferred from recognized content."""
+
+        if not subject_id:
+            return None
+        choices = [
+            choice
+            for choice in self.app.list_category_choices()
+            if choice.subject_id == subject_id and choice.chapter_id
+        ]
+        if not choices:
+            return None
+        tags = fields.get("tags")
+        tag_text = " ".join(str(tag) for tag in tags) if isinstance(tags, list) else ""
+        content = " ".join(
+            str(fields.get(name) or "")
+            for name in ("title", "question_markdown", "question_latex", "correct_answer", "solution_markdown")
+        ) + " " + tag_text
+        normalized = content.casefold()
+        scores: dict[str, int] = {}
+        for choice in choices:
+            chapter_name = choice.chapter_path[-1].casefold()
+            if len(chapter_name) >= 2 and chapter_name in normalized:
+                scores[choice.chapter_id] = scores.get(choice.chapter_id, 0) + 100
+            for keywords, chapter_markers in _CHAPTER_KEYWORD_GROUPS:
+                if any(keyword.casefold() in normalized for keyword in keywords) and any(
+                    marker.casefold() in chapter_name for marker in chapter_markers
+                ):
+                    scores[choice.chapter_id] = scores.get(choice.chapter_id, 0) + 10
+        if not scores:
+            return None
+        highest = max(scores.values())
+        matched = [chapter_id for chapter_id, score in scores.items() if score == highest]
+        return matched[0] if len(matched) == 1 else None
+
+    def recognize_user_answer_image(
+        self,
+        image_path: Path,
+        *,
+        keywords: str = "",
+    ) -> str:
+        """Extract only a user's written answer from one selected image."""
+
+        if not image_path.is_file():
+            raise DomainError("作答图片不存在")
+        provider = get_provider(self.runtime.settings)
+        provider.validate_configuration()
+        prompt = (
+            "这是用户补录作答的图片。只提取用户写下的作答内容，保留原有"
+            "文本、数学公式和 LaTeX；不要解题、不要补全缺失步骤、不要"
+            "生成正确答案或解析。严格只输出 JSON 对象："
+            '{"user_answer":"提取到的内容"}。'
+        )
+        if keywords.strip():
+            prompt += "\n用户提供的定位关键词：" + keywords.strip()
+        result = provider.structure_from_image(
+            image_path=str(image_path),
+            prompt=prompt,
+            model=self.runtime.settings.ai.default_vision_model,
+            timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+        )
+        answer = str(result.fields.get("user_answer") or "").strip()
+        if not answer:
+            raise DomainError("AI 没有识别出可填入的作答内容")
+        return answer
 
     def start_ai(
         self,
@@ -941,6 +1038,12 @@ class ProblemIntakeService:
                         elif chapter_id and chapters.get(chapter_id) != subject_id:
                             fields.pop("chapter_id", None)
                             uncertain = [*uncertain, {"field": "chapter_id", "reason": "AI 返回的章节 ID 不属于当前科目"}]
+                        if fields.get("subject_id") and not fields.get("chapter_id"):
+                            inferred_chapter_id = self._infer_chapter_id(
+                                fields["subject_id"], fields
+                            )
+                            if inferred_chapter_id:
+                                fields["chapter_id"] = inferred_chapter_id
                         proposal = fields.get("taxonomy_proposal")
                         if isinstance(proposal, dict):
                             uncertain = [*uncertain, {"field": "taxonomy_proposal", "reason": f"新分类提案：{proposal.get('reason') or '待确认后创建'}"}]

@@ -4,18 +4,36 @@ from __future__ import annotations
 
 import html
 import re
+import weakref
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from latex2mathml import converter
 from PySide6.QtCore import QBuffer, QIODevice, QMargins, QMarginsF, QSize, QSizeF, QTimer, Qt, Signal
-from PySide6.QtGui import QPageLayout, QPageSize
+from PySide6.QtGui import QColor, QPageLayout, QPageSize, QPalette
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
 from PySide6.QtWebEngineCore import QWebEnginePage
 
 from yancuo_win.ui.theme import current_theme_name, get_theme_manager, theme_tokens
+
+
+_PREVIEW_ZOOM_SCALE = 0.96
+_PREVIEW_VIEWS: weakref.WeakSet["MathContentView"] = weakref.WeakSet()
+
+
+def preview_zoom_scale() -> float:
+    return _PREVIEW_ZOOM_SCALE
+
+
+def set_preview_zoom_scale(scale: float) -> None:
+    """Apply the shared reader scale to both existing and future previews."""
+
+    global _PREVIEW_ZOOM_SCALE
+    _PREVIEW_ZOOM_SCALE = max(0.8, min(1.0, float(scale)))
+    for view in tuple(_PREVIEW_VIEWS):
+        view.set_zoom_scale(_PREVIEW_ZOOM_SCALE)
 
 
 _MATH_PATTERN = re.compile(
@@ -284,6 +302,44 @@ def build_problem_html(
 </html>"""
 
 
+def build_math_fragment_html(
+    title: str,
+    value: str | None,
+    *,
+    theme: str = "light",
+) -> str:
+    """Build a compact, single-field math preview for inline editing."""
+
+    colors = theme_tokens(theme)
+    content = render_math_text(value, allow_bare_latex=True)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="{colors.name}">
+<style>
+  :root {{ color-scheme: {colors.name}; }}
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; background: {colors.card}; color: {colors.text}; }}
+  body {{
+    padding: 10px 12px;
+    font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    font-size: 13px;
+    line-height: 1.55;
+  }}
+  .label {{ color: {colors.muted}; font-size: 12px; margin: 0 0 5px; }}
+  .content {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
+  .content math {{ font-family: "Cambria Math", "STIX Two Math", serif; font-size: 1.08em; }}
+  .content math[display="block"] {{ margin: .5em 0; text-align: left; }}
+  .empty {{ color: {colors.muted}; }}
+  .math-fallback {{ padding: 2px 5px; border-radius: 4px; background: {colors.fallback_bg}; color: {colors.fallback_text}; }}
+  .math-fallback-block {{ display: block; padding: 8px; overflow-x: auto; }}
+</style>
+</head>
+<body><div class="label">{html.escape(title)}</div><div class="content">{content}</div></body>
+</html>"""
+
+
 def build_note_html(
     fields: Mapping[str, Any],
     *,
@@ -437,13 +493,16 @@ class MathContentView(QWidget):
         self.last_html = ""
         self._last_render: dict[str, Any] | None = None
         self._last_note_render: dict[str, Any] | None = None
+        self._last_fragment_render: dict[str, str] | None = None
         self._document: QPdfDocument | None = None
         self._document_buffer: QBuffer | None = None
         self._renderer: QWebEnginePage | None = None
         self._render_generation = 0
         self._render_scheduled = False
         self._fit_content_height = False
+        self._content_sized_pdf = False
         self._compact = False
+        self._zoom_scale = preview_zoom_scale()
         self._content_height: int | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -452,19 +511,49 @@ class MathContentView(QWidget):
         self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
         self._view.setPageSpacing(0)
         self._view.setDocumentMargins(QMargins())
+        white = QColor("#ffffff")
+        palette = self._view.palette()
+        palette.setColor(QPalette.ColorRole.Window, white)
+        palette.setColor(QPalette.ColorRole.Base, white)
+        palette.setColor(QPalette.ColorRole.AlternateBase, white)
+        palette.setColor(QPalette.ColorRole.Dark, white)
+        palette.setColor(QPalette.ColorRole.Shadow, white)
+        self._view.setPalette(palette)
+        self._view.setAutoFillBackground(True)
+        self._view.setStyleSheet(
+            "QPdfView, QPdfView > QWidget { background: #ffffff; }"
+        )
+        viewport = getattr(self._view, "viewport", None)
+        if callable(viewport):
+            viewport().setStyleSheet("background: #ffffff;")
         self._view.hide()
         layout.addWidget(self._view)
+        _PREVIEW_VIEWS.add(self)
         manager = get_theme_manager(QApplication.instance())
         if manager is not None:
             manager.theme_changed.connect(self._on_theme_changed)
 
-    def set_fit_content_height(self, enabled: bool = True) -> None:
-        """Make this reader grow with the rendered document instead of scrolling."""
+    def set_fit_content_height(
+        self, enabled: bool = True, *, expand_widget: bool = True
+    ) -> None:
+        """Use a content-sized PDF, optionally growing the widget instead of scrolling."""
 
-        self._fit_content_height = enabled
+        self._content_sized_pdf = enabled
+        self._fit_content_height = enabled and expand_widget
+        if enabled:
+            policy = (
+                QSizePolicy.Policy.Fixed
+                if expand_widget
+                else QSizePolicy.Policy.Expanding
+            )
+            self.setSizePolicy(QSizePolicy.Policy.Preferred, policy)
+        else:
+            self.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+            )
         policy = (
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-            if enabled
+            if self._fit_content_height
             else Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self._view.setVerticalScrollBarPolicy(policy)
@@ -476,6 +565,14 @@ class MathContentView(QWidget):
             return
         self._compact = enabled
         self._render_last()
+
+    def set_zoom_scale(self, scale: float) -> None:
+        """Apply a reader-only scale without changing the host container."""
+        normalized = max(0.5, min(1.0, float(scale)))
+        if self._zoom_scale == normalized:
+            return
+        self._zoom_scale = normalized
+        self._apply_zoom_scale()
 
     def sizeHint(self) -> QSize:  # noqa: N802
         if self._fit_content_height and self._content_height is not None:
@@ -501,9 +598,17 @@ class MathContentView(QWidget):
         generation = self._render_generation
         if self._renderer is not None:
             self._renderer.deleteLater()
+        if self._fit_content_height:
+            self._content_height = None
+            self.setFixedHeight(1)
 
         page = QWebEnginePage(self)
-        page.setBackgroundColor(Qt.GlobalColor.transparent)
+        set_viewport_size = getattr(page, "setViewportSize", None)
+        if callable(set_viewport_size):
+            # Keep Chromium's default 600px viewport from becoming blank PDF
+            # space when we measure a content-sized reader document.
+            set_viewport_size(QSize(794, 1))
+        page.setBackgroundColor(Qt.GlobalColor.white)
         page.loadFinished.connect(
             lambda ok, target=page, token=generation: self._html_loaded(
                 target, token, ok
@@ -522,7 +627,7 @@ class MathContentView(QWidget):
             self._renderer = None
             page.deleteLater()
             return
-        if self._fit_content_height:
+        if self._content_sized_pdf:
             page.runJavaScript(
                 "Math.ceil(document.body.scrollHeight)",
                 lambda height, target=page, token=generation: self._print_content_pdf(
@@ -590,6 +695,7 @@ class MathContentView(QWidget):
         self._document_buffer = buffer
         self._view.setDocument(document)
         self._view.show()
+        self._apply_zoom_scale()
         if self._fit_content_height:
             self._update_content_height()
         if previous_document is not None:
@@ -599,13 +705,35 @@ class MathContentView(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
-        if self._fit_content_height and self._document is not None:
+        if self._document is not None:
+            self._apply_zoom_scale()
+
+    def _apply_zoom_scale(self) -> None:
+        if self._document is None:
+            return
+        self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        if self._zoom_scale == 1.0:
+            if self._fit_content_height:
+                self._update_content_height()
+            return
+        QTimer.singleShot(0, self._apply_scaled_zoom)
+
+    def _apply_scaled_zoom(self) -> None:
+        if self._document is None or self._zoom_scale == 1.0:
+            return
+        zoom_factor = getattr(self._view, "zoomFactor", None)
+        if not callable(zoom_factor):
+            return
+        fit_factor = zoom_factor()
+        self._view.setZoomMode(QPdfView.ZoomMode.Custom)
+        self._view.setZoomFactor(fit_factor * self._zoom_scale)
+        if self._fit_content_height:
             self._update_content_height()
 
     def _update_content_height(self) -> None:
         if self._document is None or self._document.pageCount() < 1:
             return
-        width = max(self.width(), 1)
+        width = max(round(self.width() * self._zoom_scale), 1)
         height = 0.0
         for page_number in range(self._document.pageCount()):
             page_size = self._document.pagePointSize(page_number)
@@ -630,6 +758,7 @@ class MathContentView(QWidget):
         compact: bool = False,
     ) -> None:
         self._last_note_render = None
+        self._last_fragment_render = None
         self._last_render = {
             "fields": dict(fields),
             "tag_names": tuple(tag_names),
@@ -648,6 +777,7 @@ class MathContentView(QWidget):
         tag_names: Iterable[str] = (),
     ) -> None:
         self._last_render = None
+        self._last_fragment_render = None
         self._last_note_render = {
             "fields": dict(fields),
             "blocks": tuple(dict(block) for block in blocks),
@@ -655,7 +785,22 @@ class MathContentView(QWidget):
         }
         self._render_last()
 
+    def set_fragment(self, title: str, value: str | None) -> None:
+        """Render one field without the surrounding problem document."""
+        self._last_render = None
+        self._last_note_render = None
+        self._last_fragment_render = {"title": title, "value": value or ""}
+        self._render_last()
+
     def _render_last(self) -> None:
+        if self._last_fragment_render is not None:
+            self.last_html = build_math_fragment_html(
+                self._last_fragment_render["title"],
+                self._last_fragment_render["value"],
+                theme=current_theme_name(),
+            )
+            self._schedule_render()
+            return
         if self._last_note_render is not None:
             self.last_html = build_note_html(
                 self._last_note_render["fields"],

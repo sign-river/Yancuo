@@ -70,15 +70,26 @@ def test_note_page_creates_edits_and_reads_blocks(note_page: NotePage) -> None:
     assert "sin x" in note_page.reader.last_blocks[0]["content_latex"]
 
 
+def test_note_intake_actions_open_dedicated_workflow_pages(note_page: NotePage) -> None:
+    note_page._show_manual_create()
+    assert note_page.page_stack.currentWidget() is note_page.manual_create_page
+
+    note_page._show_ai_intake()
+    assert note_page.page_stack.currentWidget() is note_page.ai_intake_page
+
+    note_page._show_library()
+    assert note_page.page_stack.currentWidget() is note_page.library_page
+
+
 def test_note_page_moves_a_note_to_the_recycle_bin(note_page: NotePage) -> None:
     note_page._create_note()
     assert note_page._note is not None
 
     note_page._set_note_status("trashed")
 
-    assert note_page._note is not None
-    assert note_page._note.status == "trashed"
-    assert not note_page.restore_button.isHidden()
+    assert note_page._note is None
+    assert note_page.note_list.count() == 0
+    assert note_page.status_filter.currentData() == "active"
 
 
 def test_note_page_opens_original_on_demand_with_source_regions(
@@ -157,7 +168,7 @@ def test_draft_preview_moves_a_block_between_groups(note_page: NotePage) -> None
             NoteDraftGroupInput(title="second"),
         ],
     )
-    dialog = note_page_module.NoteDraftPreviewDialog(intake, note_page.note_intake)
+    dialog = note_page_module.NoteDraftPreviewPage(intake, note_page.note_intake)
     dialog._move_block(intake.groups[0].blocks[0].id, intake.groups[1].id, 0)
 
     assert dialog.groups.topLevelItem(0).childCount() == 0
@@ -189,7 +200,7 @@ def test_draft_preview_supports_compact_concept_grid_and_context_move(note_page:
             NoteDraftGroupInput(title="second"),
         ],
     )
-    dialog = note_page_module.NoteDraftPreviewDialog(intake, note_page.note_intake)
+    dialog = note_page_module.NoteDraftPreviewPage(intake, note_page.note_intake)
 
     dialog.block_layout.setCurrentIndex(1)
     assert dialog.block_views.currentWidget() is dialog.concept_grid
@@ -221,7 +232,7 @@ def test_draft_preview_allows_editing_a_block_sequence(note_page: NotePage) -> N
             )
         ],
     )
-    dialog = note_page_module.NoteDraftPreviewDialog(intake, note_page.note_intake)
+    dialog = note_page_module.NoteDraftPreviewPage(intake, note_page.note_intake)
 
     second = dialog.groups.topLevelItem(0).child(1)
     assert second.flags() & Qt.ItemFlag.ItemIsEditable

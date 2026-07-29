@@ -45,7 +45,11 @@ from yancuo_win.application.intake_service import (
     RegionRecognitionProposal,
 )
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.tasks.worker import AIJobWorker, RegionRecognitionWorker
+from yancuo_win.tasks.worker import (
+    AIJobWorker,
+    RegionRecognitionWorker,
+    UserAnswerRecognitionWorker,
+)
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
     CardFrame,
@@ -61,6 +65,7 @@ _PAGE_AI_UPLOAD = 1
 _PAGE_AI_PROCESSING = 2
 _PAGE_AI_CONFIRM = 3
 _PAGE_DONE = 4
+_PAGE_AI_ANSWER_CAPTURE = 5
 
 
 class ImagePreviewLabel(QLabel):
@@ -432,6 +437,7 @@ class ProblemForm(QWidget):
     """Reusable inline form shared by manual entry and AI confirmation."""
 
     changed = Signal()
+    answer_capture_requested = Signal()
 
     def __init__(
         self,
@@ -439,10 +445,13 @@ class ProblemForm(QWidget):
         parent=None,
         *,
         clear_user_answer_on_load: bool = False,
+        show_render_previews: bool = False,
     ) -> None:
         super().__init__(parent)
         self.intake = intake
         self.clear_user_answer_on_load = clear_user_answer_on_load
+        self.show_render_previews = show_render_previews
+        self._field_previews: dict[str, tuple[QLabel, MathContentView]] = {}
         self._text_area_resize_timer = QTimer(self)
         self._text_area_resize_timer.setSingleShot(True)
         self._text_area_resize_timer.timeout.connect(
@@ -490,6 +499,8 @@ class ProblemForm(QWidget):
         content.body.addWidget(self.question)
         content.body.addWidget(QLabel("LaTeX"))
         content.body.addWidget(self.latex)
+        if self.show_render_previews:
+            self._add_field_preview(content.body, "question", "题目内容预览")
         root.addWidget(content)
 
         answer = CardFrame()
@@ -504,8 +515,28 @@ class ProblemForm(QWidget):
             ("解析", self.solution),
             ("备注", self.notes),
         ):
-            answer.body.addWidget(QLabel(label))
+            if label == "我的作答" and self.show_render_previews:
+                answer_label = QHBoxLayout()
+                answer_label.addWidget(QLabel(label))
+                answer_label.addStretch(1)
+                capture = QPushButton("📷")
+                capture.setObjectName("IconButton")
+                capture.setToolTip("从图片识别我的作答")
+                capture.setAccessibleName("从图片识别我的作答")
+                capture.setFixedSize(32, 32)
+                capture.clicked.connect(self.answer_capture_requested.emit)
+                answer_label.addWidget(capture)
+                answer.body.addLayout(answer_label)
+            else:
+                answer.body.addWidget(QLabel(label))
             answer.body.addWidget(editor)
+            if self.show_render_previews and label in {"我的作答", "正确答案", "解析"}:
+                key = {
+                    "我的作答": "user_answer",
+                    "正确答案": "correct_answer",
+                    "解析": "solution",
+                }[label]
+                self._add_field_preview(answer.body, key, f"{label}预览")
         root.addWidget(answer)
         root.addStretch(1)
 
@@ -550,6 +581,43 @@ class ProblemForm(QWidget):
 
     def _queue_text_area_resize(self) -> None:
         self._text_area_resize_timer.start(0)
+
+    def _add_field_preview(
+        self,
+        layout: QVBoxLayout,
+        key: str,
+        title: str,
+    ) -> None:
+        label = QLabel(title)
+        label.setObjectName("MutedLabel")
+        preview = MathContentView()
+        preview.set_fit_content_height(True)
+        label.hide()
+        preview.hide()
+        self._field_previews[key] = (label, preview)
+        layout.addWidget(label)
+        layout.addWidget(preview)
+
+    def refresh_render_previews(self) -> None:
+        if not self.show_render_previews:
+            return
+        question = self.question.toPlainText()
+        latex = self.latex.toPlainText().strip()
+        if latex:
+            question = f"{question}\n\n\\[{latex}\\]".strip()
+        values = {
+            "question": ("题目内容", question),
+            "user_answer": ("我的作答", self.user_answer.toPlainText()),
+            "correct_answer": ("正确答案", self.correct_answer.toPlainText()),
+            "solution": ("解析", self.solution.toPlainText()),
+        }
+        for key, (title, value) in values.items():
+            label, preview = self._field_previews[key]
+            visible = bool(value.strip())
+            label.setVisible(visible)
+            preview.setVisible(visible)
+            if visible:
+                preview.set_fragment(title, value)
 
     def _resize_text_areas_to_content(self) -> None:
         for editor in (
@@ -703,6 +771,8 @@ class IntakePage(QWidget):
         self.ai_worker: AIJobWorker | None = None
         self._cancelled_ai_jobs: set[str] = set()
         self.region_worker: RegionRecognitionWorker | None = None
+        self.answer_recognition_worker: UserAnswerRecognitionWorker | None = None
+        self.answer_image: Path | None = None
         self.ai_candidates: list[IntakeCandidate] = []
         self.candidate_index = 0
         self.last_problem_id: str | None = None
@@ -726,6 +796,7 @@ class IntakePage(QWidget):
         self.stack.addWidget(self._build_processing())
         self.stack.addWidget(self._build_confirmation())
         self.stack.addWidget(self._build_done())
+        self.stack.addWidget(self._build_answer_capture())
         root.addWidget(self.stack)
 
         self.progress_timer = QTimer(self)
@@ -742,9 +813,20 @@ class IntakePage(QWidget):
         scroll.setWidget(widget)
         return scroll
 
-    def _header(self, title_text: str, hint_text: str, back_slot) -> PageHeader:
+    def _header(
+        self,
+        title_text: str,
+        hint_text: str,
+        back_slot,
+        *,
+        back_tooltip: str = "返回工作台",
+    ) -> PageHeader:
         header = PageHeader(title_text, hint_text)
-        back = ghost_button("返回")
+        back = QPushButton("◀", header)
+        back.setObjectName("IconButton")
+        back.setToolTip(back_tooltip)
+        back.setAccessibleName(back_tooltip)
+        back.setFixedSize(32, 32)
         back.clicked.connect(back_slot)
         header.add_leading(back)
         return header
@@ -763,7 +845,7 @@ class IntakePage(QWidget):
             self._header(
                 "手动录题",
                 "内容会自动保存为草稿；只有点击“确认入库”才会创建正式题目。",
-                self.library_requested.emit,
+                self.dashboard_requested.emit,
             )
         )
         body = QWidget()
@@ -809,7 +891,7 @@ class IntakePage(QWidget):
             self._header(
                 "AI 录题 · 上传",
                 "添加图片并说明目标特征，例如“红圈处是错题”或“只提取第 3 题”。",
-                self.library_requested.emit,
+                self.dashboard_requested.emit,
             )
         )
         upload = CardFrame()
@@ -817,8 +899,12 @@ class IntakePage(QWidget):
         upload.add_hint(
             "每张图片可以识别一道或多道候选题；AI 会拆分后逐题进入确认流程。"
         )
-        upload_content = QHBoxLayout()
+        upload_content_host = QWidget()
+        upload_content = QHBoxLayout(upload_content_host)
+        upload_content.setContentsMargins(0, 0, 0, 0)
+        upload_content_host.setMinimumHeight(280)
         self.ai_upload_preview = ImagePreviewLabel("选择图片后将在这里预览")
+        self.ai_upload_preview.setMaximumHeight(280)
         upload_content.addWidget(self.ai_upload_preview, stretch=2)
         self.ai_file_list = QListWidget()
         self.ai_file_list.setObjectName("UploadFileList")
@@ -833,7 +919,7 @@ class IntakePage(QWidget):
         self.ai_file_list.setMinimumSize(QSize(330, 260))
         self.ai_file_list.currentRowChanged.connect(self._show_ai_file_preview)
         upload_content.addWidget(self.ai_file_list, stretch=1)
-        upload.body.addLayout(upload_content)
+        upload.body.addWidget(upload_content_host)
         file_actions = QHBoxLayout()
         add = primary_button("选择图片")
         add.clicked.connect(self._add_ai_files)
@@ -901,8 +987,8 @@ class IntakePage(QWidget):
         layout.addWidget(
             self._header(
                 "AI 录题 · 后台处理中",
-                "可以返回题库，任务仍会继续；再次从题库进入即可查看当前进度。",
-                self.library_requested.emit,
+                "可以返回工作台，任务仍会继续；再次进入录题即可查看当前进度。",
+                self.dashboard_requested.emit,
             )
         )
         card = CardFrame()
@@ -945,7 +1031,7 @@ class IntakePage(QWidget):
             self._header(
                 "AI 录题 · 确认结果",
                 "",
-                self.library_requested.emit,
+                self.dashboard_requested.emit,
             )
         )
         self.ai_result_tabs = QTabWidget()
@@ -955,17 +1041,21 @@ class IntakePage(QWidget):
         preview_layout = QVBoxLayout(preview_host)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         self.ai_result_preview = MathContentView()
-        self.ai_result_preview.setMinimumSize(QSize(520, 440))
-        preview_layout.addWidget(self.ai_result_preview)
+        self.ai_result_preview.setMinimumWidth(520)
+        self.ai_result_preview.set_fit_content_height(True, expand_widget=False)
+        preview_layout.addWidget(self.ai_result_preview, stretch=1)
         self.ai_result_tabs.addTab(preview_host, "阅读预览")
 
         form_host = QWidget()
         form_layout = QVBoxLayout(form_host)
         form_layout.setContentsMargins(0, 0, 8, 0)
         self.ai_form = ProblemForm(
-            self.intake, clear_user_answer_on_load=True
+            self.intake,
+            clear_user_answer_on_load=True,
+            show_render_previews=True,
         )
         self.ai_form.changed.connect(self._queue_ai_preview)
+        self.ai_form.answer_capture_requested.connect(self._open_answer_capture)
         form_layout.addWidget(self.ai_form)
         self.ai_result_tabs.addTab(self._scroll(form_host), "编辑字段")
         self.ai_result_tabs.addTab(
@@ -1063,6 +1153,147 @@ class IntakePage(QWidget):
         image_tools_layout.addWidget(self.uncertain_label)
         image_tools_layout.addStretch(1)
         return self._scroll(image_tools)
+
+    def _build_answer_capture(self) -> QWidget:
+        page, layout = self._page()
+        layout.addWidget(
+            self._header(
+                "识别我的作答",
+                "选择作答图片并补充关键词，识别结果可修改后再填入。",
+                self._return_to_ai_edit,
+                back_tooltip="返回编辑字段",
+            )
+        )
+
+        source = CardFrame()
+        source.add_title("作答图片")
+        answer_image_row = QHBoxLayout()
+        self.answer_image_preview = ImagePreviewLabel("选择作答图片后将在这里预览")
+        self.answer_image_preview.setMaximumHeight(300)
+        answer_image_row.addWidget(self.answer_image_preview, stretch=2)
+        self.answer_image_name = QLabel("尚未选择图片")
+        self.answer_image_name.setObjectName("MutedLabel")
+        self.answer_image_name.setWordWrap(True)
+        answer_image_row.addWidget(self.answer_image_name, stretch=1)
+        source.body.addLayout(answer_image_row)
+        image_actions = QHBoxLayout()
+        choose = primary_button("选择图片")
+        choose.clicked.connect(self._choose_answer_image)
+        image_actions.addWidget(choose)
+        image_actions.addStretch(1)
+        source.body.addLayout(image_actions)
+        layout.addWidget(source)
+
+        instruction = CardFrame()
+        instruction.add_title("定位关键词")
+        instruction.add_hint("可选。例如：蓝色手写区域、最后一行计算结果。")
+        self.answer_keywords = QTextEdit()
+        self.answer_keywords.setPlaceholderText("补充图片中需要提取的作答位置或特征")
+        self.answer_keywords.setMaximumHeight(88)
+        instruction.body.addWidget(self.answer_keywords)
+        layout.addWidget(instruction)
+
+        result = CardFrame()
+        result.add_title("识别结果")
+        self.answer_recognition_status = result.add_hint("选择图片后开始识别。")
+        self.answer_recognition_result = QTextEdit()
+        self.answer_recognition_result.setPlaceholderText("AI 识别结果会显示在这里，可直接修改。")
+        self.answer_recognition_result.setMinimumHeight(150)
+        result.body.addWidget(self.answer_recognition_result)
+        layout.addWidget(result, stretch=1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self.answer_recognize_button = primary_button("识别作答")
+        self.answer_recognize_button.clicked.connect(self._start_answer_recognition)
+        self.answer_apply_button = QPushButton("填入我的作答")
+        self.answer_apply_button.setEnabled(False)
+        self.answer_apply_button.clicked.connect(self._apply_answer_recognition)
+        actions.addWidget(self.answer_recognize_button)
+        actions.addWidget(self.answer_apply_button)
+        layout.addLayout(actions)
+        return page
+
+    def _open_answer_capture(self) -> None:
+        self.answer_recognition_status.setText("选择图片后开始识别。")
+        self.answer_recognition_result.clear()
+        self.answer_apply_button.setEnabled(False)
+        self.stack.setCurrentIndex(_PAGE_AI_ANSWER_CAPTURE)
+
+    def _return_to_ai_edit(self) -> None:
+        self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
+        self.ai_result_tabs.setCurrentIndex(1)
+
+    def _choose_answer_image(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择作答图片",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp);;All (*.*)",
+        )
+        if not selected:
+            return
+        self.answer_image = Path(selected)
+        self.answer_image_preview.set_path(self.answer_image)
+        self.answer_image_name.setText(self.answer_image.name)
+        self.answer_recognition_status.setText("图片已选择，可以开始识别。")
+        self.answer_recognition_result.clear()
+        self.answer_apply_button.setEnabled(False)
+
+    def _start_answer_recognition(self) -> None:
+        if self.answer_image is None:
+            QMessageBox.information(self, "请选择图片", "请先选择包含作答的图片。")
+            return
+        if (
+            self.answer_recognition_worker
+            and self.answer_recognition_worker.isRunning()
+        ):
+            return
+        self.answer_recognize_button.setEnabled(False)
+        self.answer_recognize_button.setText("正在识别…")
+        self.answer_apply_button.setEnabled(False)
+        self.answer_recognition_status.setText("正在识别作答内容…")
+        self.answer_recognition_worker = UserAnswerRecognitionWorker(
+            self.intake,
+            str(self.answer_image),
+            self.answer_keywords.toPlainText(),
+            self,
+        )
+        self.answer_recognition_worker.finished_ok.connect(
+            self._on_answer_recognition_done
+        )
+        self.answer_recognition_worker.failed.connect(
+            self._on_answer_recognition_failed
+        )
+        self.answer_recognition_worker.finished.connect(
+            self._on_answer_recognition_finished
+        )
+        self.answer_recognition_worker.start()
+
+    def _on_answer_recognition_done(self, answer: str) -> None:
+        self.answer_recognition_result.setPlainText(answer)
+        self.answer_recognition_status.setText("识别完成，请核对并修改结果。")
+        self.answer_apply_button.setEnabled(True)
+
+    def _on_answer_recognition_failed(self, error: str) -> None:
+        self.answer_recognition_status.setText(f"识别失败：{error}")
+
+    def _on_answer_recognition_finished(self) -> None:
+        worker = self.answer_recognition_worker
+        self.answer_recognition_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.answer_recognize_button.setEnabled(True)
+        self.answer_recognize_button.setText("识别作答")
+
+    def _apply_answer_recognition(self) -> None:
+        answer = self.answer_recognition_result.toPlainText().strip()
+        if not answer:
+            QMessageBox.information(self, "没有可填入的内容", "请先识别或填写作答内容。")
+            return
+        self.ai_form.user_answer.setPlainText(answer)
+        self._queue_ai_preview()
+        self._return_to_ai_edit()
 
     def _build_done(self) -> QWidget:
         page, layout = self._page()
@@ -1373,7 +1604,11 @@ class IntakePage(QWidget):
         self.ai_instruction.setPlainText(f"{current}\n{text}".strip())
 
     def _start_ai(self) -> None:
-        if self.ai_worker and self.ai_worker.isRunning():
+        if (
+            self.ai_worker
+            and self.ai_worker.isRunning()
+            and self.ai_worker.job_id == self.ai_job_id
+        ):
             self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
             return
         try:
@@ -1392,6 +1627,7 @@ class IntakePage(QWidget):
         self.processing_error.clear()
         self.processing_retry.setVisible(False)
         self.processing_back.setVisible(False)
+        self.processing_cancel_button.setEnabled(True)
         self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
         self._start_worker(started.job_id)
         self.status_message.emit("AI 录题任务已在后台开始")
@@ -1631,6 +1867,7 @@ class IntakePage(QWidget):
             include_answers=True,
             compact=True,
         )
+        self.ai_form.refresh_render_previews()
 
     def _move_candidate(self, delta: int) -> None:
         if not self.ai_candidates:
@@ -1938,3 +2175,8 @@ class IntakePage(QWidget):
             self.ai_worker.wait(300)
         if self.region_worker and self.region_worker.isRunning():
             self.region_worker.wait(300)
+        if (
+            self.answer_recognition_worker
+            and self.answer_recognition_worker.isRunning()
+        ):
+            self.answer_recognition_worker.wait(300)

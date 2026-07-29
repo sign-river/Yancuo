@@ -21,6 +21,15 @@ from yancuo_win.ui.main_window import MainWindow
 
 
 class _ReaderStub(QWidget):
+    def set_fit_content_height(self, *_args, **_kwargs) -> None:
+        pass
+
+    def set_zoom_scale(self, *_args, **_kwargs) -> None:
+        pass
+
+    def set_fragment(self, *_args, **_kwargs) -> None:
+        pass
+
     def set_problem(self, *_args, **_kwargs) -> None:
         pass
 
@@ -104,13 +113,12 @@ def test_settings_page_consolidates_account_services_and_data(window: MainWindow
     assert [
         window.settings_tabs.tabText(index)
         for index in range(window.settings_tabs.count())
-    ] == ["账户", "服务与外观", "数据与同步"]
+    ] == ["账户与身份", "AI 服务", "外观", "本机与数据", "云端备份与同步"]
 
     window.settings_tabs.setCurrentIndex(0)
 
     assert "离线模式" in window.account_identity_summary.text()
     assert window.runtime.identity.user_id in window.account_identity_summary.text()
-    assert "AI 凭据" in window.account_connection_summary.text()
 
     window._open_settings()
     assert window.settings_tabs.currentIndex() == 1

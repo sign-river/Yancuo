@@ -271,8 +271,11 @@ class NoteIntakeSetupDialog(QDialog):
         return path, self.instruction_edit.toPlainText(), str(self.classification_mode.currentData())
 
 
-class NoteDraftPreviewDialog(QDialog):
-    """Edit recoverable classification rows while preserving draft blocks."""
+class NoteDraftPreviewPage(QWidget):
+    """Review an AI draft as a dedicated workspace page before committing it."""
+
+    back_requested = Signal()
+    confirmed = Signal(tuple)
 
     def __init__(
         self, intake: NoteIntakeSession, note_intake: NoteIntakeService, parent=None
@@ -283,9 +286,14 @@ class NoteDraftPreviewDialog(QDialog):
         self.intake = intake
         self.confirmed_note_ids: tuple[str, ...] = ()
         self._refreshing_groups = False
-        self.setWindowTitle("AI 笔记草稿")
-        self.resize(680, 520)
         root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 12)
+        root.setSpacing(12)
+        header = PageHeader("确认 AI 笔记", "检查内容块与分类后再保存到笔记库。")
+        back = ghost_button("返回 AI 录入")
+        back.clicked.connect(self.back_requested.emit)
+        header.add_action(back)
+        root.addWidget(header)
         mode = "AI 识别并分组" if intake.classification_mode == "ai" else "自定义分类"
         root.addWidget(QLabel(f"{mode} · 草稿已暂存，尚未入库"))
         layout_row = QHBoxLayout()
@@ -341,11 +349,15 @@ class NoteDraftPreviewDialog(QDialog):
         hint.setObjectName("PageHint")
         hint.setWordWrap(True)
         root.addWidget(hint)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        confirm = buttons.addButton("确认入库", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = ghost_button("稍后继续")
+        cancel.clicked.connect(self.back_requested.emit)
+        confirm = primary_button("确认入库")
         confirm.clicked.connect(self._confirm_groups)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        buttons.addWidget(cancel)
+        buttons.addWidget(confirm)
+        root.addLayout(buttons)
         self._refresh_groups()
 
     def _refresh_groups(self) -> None:
@@ -597,7 +609,7 @@ class NoteDraftPreviewDialog(QDialog):
             self._show_error(str(exc))
             return
         self.confirmed_note_ids = tuple(note.id for note in notes)
-        self.accept()
+        self.confirmed.emit(self.confirmed_note_ids)
 
     def _show_error(self, message: str) -> None:
         QMessageBox.warning(self, "无法更新分类草稿", message)
@@ -633,11 +645,17 @@ class NotePage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 12)
         root.setSpacing(12)
+        self.page_stack = QStackedWidget()
+        root.addWidget(self.page_stack, stretch=1)
+        self.library_page = QWidget()
+        library_root = QVBoxLayout(self.library_page)
+        library_root.setContentsMargins(0, 0, 0, 0)
+        library_root.setSpacing(12)
 
         self.new_note_button = primary_button("新建笔记")
-        self.new_note_button.clicked.connect(self._create_note)
+        self.new_note_button.clicked.connect(self._show_manual_create)
         ai_note_button = QPushButton("AI 图片录入")
-        ai_note_button.clicked.connect(self._start_ai_extraction)
+        ai_note_button.clicked.connect(self._show_ai_intake)
         self.resume_draft_button = ghost_button("继续草稿")
         self.resume_draft_button.clicked.connect(self._resume_note_draft)
         header = PageHeader(
@@ -646,7 +664,7 @@ class NotePage(QWidget):
         header.add_action(self.resume_draft_button)
         header.add_action(ai_note_button)
         header.add_action(self.new_note_button)
-        root.addWidget(header)
+        library_root.addWidget(header)
 
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("NoteWorkspace")
@@ -689,7 +707,7 @@ class NotePage(QWidget):
         self.empty_card.add_title("选择一篇笔记")
         self.empty_card.add_hint("新建笔记后，可以按块写入标题、正文、公式或提示。")
         empty_new = primary_button("新建第一篇笔记")
-        empty_new.clicked.connect(self._create_note)
+        empty_new.clicked.connect(self._show_manual_create)
         empty_actions = QHBoxLayout()
         empty_actions.addWidget(empty_new)
         empty_actions.addStretch(1)
@@ -703,7 +721,88 @@ class NotePage(QWidget):
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 3)
         split.setSizes([300, 900])
-        root.addWidget(split, stretch=1)
+        library_root.addWidget(split, stretch=1)
+        self.page_stack.addWidget(self.library_page)
+        self.manual_create_page = self._build_manual_create_page()
+        self.ai_intake_page = self._build_ai_intake_page()
+        self.page_stack.addWidget(self.manual_create_page)
+        self.page_stack.addWidget(self.ai_intake_page)
+        self.draft_preview_page: NoteDraftPreviewPage | None = None
+
+    def _build_manual_create_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        header = PageHeader("新建笔记", "先建立笔记信息，再进入内容编辑。")
+        back = ghost_button("返回笔记库")
+        back.clicked.connect(self._show_library)
+        header.add_action(back)
+        layout.addWidget(header)
+        form = CardFrame()
+        form.add_title("笔记信息")
+        self.new_note_title = QLineEdit()
+        self.new_note_title.setPlaceholderText("笔记标题")
+        self.new_note_summary = QTextEdit()
+        self.new_note_summary.setPlaceholderText("摘要（可选）")
+        self.new_note_summary.setFixedHeight(110)
+        form.body.addWidget(self.new_note_title)
+        form.body.addWidget(self.new_note_summary)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = ghost_button("取消")
+        cancel.clicked.connect(self._show_library)
+        create = primary_button("创建并编辑")
+        create.clicked.connect(self._create_note)
+        actions.addWidget(cancel)
+        actions.addWidget(create)
+        form.body.addLayout(actions)
+        layout.addWidget(form)
+        layout.addStretch(1)
+        return page
+
+    def _build_ai_intake_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        header = PageHeader("AI 图片录入笔记", "选择笔记图片，AI 会先整理为可确认的内容草稿。")
+        back = ghost_button("返回笔记库")
+        back.clicked.connect(self._show_library)
+        header.add_action(back)
+        layout.addWidget(header)
+        form = CardFrame()
+        form.add_title("识别设置")
+        source_row = QHBoxLayout()
+        self.ai_source_path = QLineEdit()
+        self.ai_source_path.setReadOnly(True)
+        choose = ghost_button("选择图片")
+        choose.clicked.connect(self._choose_ai_source)
+        source_row.addWidget(self.ai_source_path, stretch=1)
+        source_row.addWidget(choose)
+        form.body.addLayout(source_row)
+        self.ai_classification_mode = QComboBox()
+        self.ai_classification_mode.addItem("自定义分类", "custom")
+        self.ai_classification_mode.addItem("AI 识别并分组", "ai")
+        form.body.addWidget(self.ai_classification_mode)
+        self.ai_instruction = QTextEdit()
+        self.ai_instruction.setPlaceholderText("补充要求（可选）")
+        self.ai_instruction.setFixedHeight(100)
+        form.body.addWidget(self.ai_instruction)
+        self.ai_intake_status = QLabel()
+        self.ai_intake_status.setObjectName("PageHint")
+        self.ai_intake_status.setWordWrap(True)
+        form.body.addWidget(self.ai_intake_status)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        resume = ghost_button("继续草稿")
+        resume.clicked.connect(self._resume_note_draft)
+        self.ai_start_button = primary_button("开始识别")
+        self.ai_start_button.clicked.connect(self._start_ai_extraction)
+        actions.addWidget(resume)
+        actions.addWidget(self.ai_start_button)
+        form.body.addLayout(actions)
+        layout.addWidget(form)
+        layout.addStretch(1)
+        return page
 
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802
         if self.note_worker and self.note_worker.isRunning():
@@ -1002,13 +1101,38 @@ class NotePage(QWidget):
         self.save_block_button.setEnabled(False)
         self.delete_block_button.setEnabled(False)
 
+    def _show_library(self, *_args, select_note_id: str | None = None) -> None:
+        self.page_stack.setCurrentWidget(self.library_page)
+        self.reload(select_note_id=select_note_id)
+
+    def _show_manual_create(self) -> None:
+        self.new_note_title.clear()
+        self.new_note_summary.clear()
+        self.page_stack.setCurrentWidget(self.manual_create_page)
+        self.new_note_title.setFocus()
+
+    def _show_ai_intake(self) -> None:
+        self.ai_intake_status.setText("")
+        self.page_stack.setCurrentWidget(self.ai_intake_page)
+
+    def _choose_ai_source(self) -> None:
+        path_text, _ = QFileDialog.getOpenFileName(
+            self, "选择笔记图片", "", "图片 (*.jpg *.jpeg *.png *.webp)"
+        )
+        if path_text:
+            self.ai_source_path.setText(path_text)
+
     def _create_note(self) -> None:
         try:
-            note = self.notes.create_note(title="未命名笔记", status="active")
+            note = self.notes.create_note(
+                title=self.new_note_title.text() or "未命名笔记",
+                summary=self.new_note_summary.toPlainText(),
+                status="active",
+            )
         except DomainError as exc:
             self.status_message.emit(str(exc))
             return
-        self.reload(select_note_id=note.id)
+        self._show_library(select_note_id=note.id)
         self.status_message.emit("已新建笔记，可以开始添加内容块")
         self.notes_changed.emit()
 
@@ -1069,14 +1193,12 @@ class NotePage(QWidget):
         if self.note_worker and self.note_worker.isRunning():
             self.status_message.emit("AI 笔记录入正在处理中，请稍候")
             return
-        dialog = NoteIntakeSetupDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        image_path = Path(self.ai_source_path.text())
+        if not image_path.is_file():
+            self.ai_intake_status.setText("请选择一张可读取的笔记图片。")
             return
-        values = dialog.values()
-        if values is None:
-            self.status_message.emit("请选择一张可读取的笔记图片")
-            return
-        image_path, instruction, classification_mode = values
+        instruction = self.ai_instruction.toPlainText()
+        classification_mode = str(self.ai_classification_mode.currentData())
         try:
             intake = self.note_intake.start_session(
                 [image_path],
@@ -1084,7 +1206,7 @@ class NotePage(QWidget):
                 user_instruction=instruction,
             )
         except DomainError as exc:
-            self.status_message.emit(str(exc))
+            self.ai_intake_status.setText(str(exc))
             return
         self._start_note_worker(intake, image_path)
 
@@ -1094,6 +1216,8 @@ class NotePage(QWidget):
         except DomainError as exc:
             self.status_message.emit(str(exc))
             return
+        self.ai_start_button.setEnabled(False)
+        self.ai_intake_status.setText("正在整理笔记图片，请留在此页面等待结果。")
         self.status_message.emit("正在整理笔记图片…")
         self.note_worker = NoteExtractionWorker(
             self.note_ai,
@@ -1127,24 +1251,28 @@ class NotePage(QWidget):
                 self.note_intake.mark_failed(session_id, str(message))
             except DomainError:
                 pass
+        self.ai_intake_status.setText(f"识别失败：{message}")
         self.status_message.emit(f"AI 笔记录入失败：{message}")
 
     def _on_ai_worker_finished(self) -> None:
         self.note_worker = None
+        self.ai_start_button.setEnabled(True)
 
     def _resume_note_draft(self) -> None:
         if self.note_worker and self.note_worker.isRunning():
             self.status_message.emit("AI 笔记录入正在处理中，请稍候")
             return
+        if self.page_stack.currentWidget() is not self.ai_intake_page:
+            self._show_ai_intake()
         intake = self.note_intake.latest_resumable_session()
         if intake is None:
-            self.status_message.emit("没有可继续的笔记草稿")
+            self.ai_intake_status.setText("没有可继续的笔记草稿。")
             return
         if intake.status == "review":
             self._show_draft_preview(intake)
             return
         if intake.status == "processing":
-            self.status_message.emit("该笔记草稿仍在处理中")
+            self.ai_intake_status.setText("该笔记草稿仍在处理中。")
             return
         asset = intake.assets[0] if intake.assets else None
         if asset is None:
@@ -1157,14 +1285,21 @@ class NotePage(QWidget):
         self._start_note_worker(intake, source_path)
 
     def _show_draft_preview(self, intake: NoteIntakeSession) -> None:
-        dialog = NoteDraftPreviewDialog(intake, self.note_intake, self)
-        dialog.exec()
-        if dialog.confirmed_note_ids:
-            self.reload(select_note_id=dialog.confirmed_note_ids[0])
-            self.notes_changed.emit()
-            self.status_message.emit(f"已按分类组入库 {len(dialog.confirmed_note_ids)} 篇笔记")
-        else:
-            self.status_message.emit("AI 笔记草稿已保存，分类确认后再入库")
+        if self.draft_preview_page is not None:
+            self.page_stack.removeWidget(self.draft_preview_page)
+            self.draft_preview_page.deleteLater()
+        page = NoteDraftPreviewPage(intake, self.note_intake, self)
+        page.back_requested.connect(self._show_ai_intake)
+        page.confirmed.connect(self._finish_draft_confirmation)
+        self.draft_preview_page = page
+        self.page_stack.addWidget(page)
+        self.page_stack.setCurrentWidget(page)
+
+    def _finish_draft_confirmation(self, note_ids: tuple) -> None:
+        ids = tuple(str(note_id) for note_id in note_ids)
+        self._show_library(select_note_id=ids[0] if ids else None)
+        self.notes_changed.emit()
+        self.status_message.emit(f"已按分类组入库 {len(ids)} 篇笔记")
 
     def _save_note(self) -> None:
         if self._note is None:
@@ -1190,10 +1325,11 @@ class NotePage(QWidget):
         except DomainError as exc:
             self.status_message.emit(str(exc))
             return
-        self.status_filter.setCurrentIndex(
-            self.status_filter.findData(note.status)
-        )
-        self.reload(select_note_id=note.id)
+        if status == "trashed":
+            self.reload()
+        else:
+            self.status_filter.setCurrentIndex(self.status_filter.findData(note.status))
+            self.reload(select_note_id=note.id)
         self.status_message.emit(f"笔记已移动至{_STATUS_LABELS[note.status]}")
         self.notes_changed.emit()
 

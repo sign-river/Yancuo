@@ -193,6 +193,40 @@ def test_ai_intake_stays_job_scoped_and_commits_candidate(
     assert resumed.latest_resumable_ai_job() is None
 
 
+def test_ai_taxonomy_prompt_requires_a_chapter_from_the_local_catalog(
+    intake: ProblemIntakeService,
+) -> None:
+    subject = intake.app.create_subject("408")
+    chapter = intake.app.create_chapter(subject.id, "数据结构")
+
+    prompt = intake._taxonomy_instruction()
+
+    assert '"chapter_id": "ch_x"' in prompt
+    assert "必须填写对应 chapter_id" in prompt
+    assert f"chapter_id={chapter.id}" in prompt
+    assert "科目：408" in prompt
+
+
+def test_chapter_inference_only_fills_an_unambiguous_local_match(
+    intake: ProblemIntakeService,
+) -> None:
+    subject = intake.app.create_subject("高等数学")
+    limits = intake.app.create_chapter(subject.id, "极限")
+    intake.app.create_chapter(subject.id, "连续")
+
+    inferred = intake._infer_chapter_id(
+        subject.id,
+        {"title": "求极限", "question_markdown": "使用洛必达法则计算该极限。"},
+    )
+    ambiguous = intake._infer_chapter_id(
+        subject.id,
+        {"question_markdown": "讨论函数的连续性与极限。"},
+    )
+
+    assert inferred == limits.id
+    assert ambiguous is None
+
+
 def test_ai_job_cancelled_during_provider_call_writes_no_candidate(
     intake: ProblemIntakeService,
     tmp_path: Path,
@@ -792,3 +826,16 @@ def test_missing_real_api_key_does_not_create_staging_problem(
     with pytest.raises(DomainError, match="未配置 AI 密钥"):
         intake.start_ai([image])
     assert intake.app.count_problems() == before
+
+
+def test_user_answer_image_recognition_extracts_only_answer(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    image = tmp_path / "answer.jpg"
+    image.write_bytes(b"\xff\xd8\xffanswer-image")
+
+    answer = intake.recognize_user_answer_image(
+        image, keywords="蓝色手写区域"
+    )
+
+    assert answer == "（Mock）用户作答占位"

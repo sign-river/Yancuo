@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QThread, Signal
@@ -62,6 +63,34 @@ class RegionRecognitionWorker(QThread):
                 tag_names=self.tag_names,
             )
             self.finished_ok.emit(proposal)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class UserAnswerRecognitionWorker(QThread):
+    """Extract a handwritten user answer without creating an intake candidate."""
+
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        intake: ProblemIntakeService,
+        image_path: str,
+        keywords: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.intake = intake
+        self.image_path = image_path
+        self.keywords = keywords
+
+    def run(self) -> None:
+        try:
+            answer = self.intake.recognize_user_answer_image(
+                Path(self.image_path), keywords=self.keywords
+            )
+            self.finished_ok.emit(answer)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
 

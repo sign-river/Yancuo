@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +29,7 @@ from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.config.settings import (
     ConfigError,
     save_ai_preferences,
+    save_preview_zoom_preference,
     save_theme_preference,
 )
 from yancuo_win.domain.rules import DomainError
@@ -39,20 +41,31 @@ from yancuo_win.infrastructure.credentials import (
 )
 from yancuo_win.ui.widgets import CardFrame, PageHeader, button_row, primary_button
 from yancuo_win.ui.theme import apply_app_theme, get_theme_manager
+from yancuo_win.ui.math_content import set_preview_zoom_scale
 
 
 class ServiceSettingsPage(QWidget):
-    def __init__(self, runtime: RuntimeContext, parent=None) -> None:
+    """One focused settings page for AI, appearance, or cloud configuration."""
+
+    _SECTIONS = {
+        "ai": ("AI 服务", "配置 AI 提供商、模型与凭据。"),
+        "appearance": ("外观", "调整应用主题与界面呈现方式。"),
+        "cloud": ("云端连接", "配置用于备份和同步的云端提供商与凭据。"),
+    }
+
+    def __init__(self, runtime: RuntimeContext, section: str, parent=None) -> None:
         super().__init__(parent)
+        if section not in self._SECTIONS:
+            raise ValueError(f"unsupported settings section: {section}")
         self.runtime = runtime
+        self.section = section
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 20)
         outer.setSpacing(12)
 
-        outer.addWidget(
-            PageHeader("服务与外观", "管理本机外观、AI 能力与云端备份连接。")
-        )
+        title, hint = self._SECTIONS[section]
+        outer.addWidget(PageHeader(title, hint))
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -61,43 +74,37 @@ class ServiceSettingsPage(QWidget):
         layout = QVBoxLayout(body)
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 4, 0)
+        self.content_layout = layout
 
         s = runtime.settings
 
-        appearance = CardFrame()
-        appearance.add_title("外观")
-        appearance.add_hint("可跟随 Windows，也可固定使用浅色或深色；保存后立即应用。")
-        appearance_form = QFormLayout()
-        self.theme_mode = QComboBox()
-        self.theme_mode.addItem("跟随系统", "system")
-        self.theme_mode.addItem("浅色", "light")
-        self.theme_mode.addItem("深色", "dark")
-        theme_index = self.theme_mode.findData(s.application.theme)
-        self.theme_mode.setCurrentIndex(max(0, theme_index))
-        appearance_form.addRow("主题", self.theme_mode)
-        self.theme_status = QLabel("")
-        self.theme_status.setObjectName("MutedLabel")
-        appearance_form.addRow("当前状态", self.theme_status)
-        appearance.body.addLayout(appearance_form)
-        apply_theme = primary_button("保存并应用外观")
-        apply_theme.clicked.connect(self._apply_theme)
-        appearance.body.addLayout(button_row(apply_theme))
-        layout.addWidget(appearance)
-        self._refresh_theme_status()
-
-        info = CardFrame()
-        info.add_title("本机")
-        info_form = QFormLayout()
-        info_form.addRow("语言", QLabel(s.application.language))
-        path_lbl = QLabel(str(runtime.paths.root))
-        path_lbl.setWordWrap(True)
-        info_form.addRow("数据根目录", path_lbl)
-        info_form.addRow("数据库", QLabel(str(runtime.paths.database)))
-        info.body.addLayout(info_form)
-        open_btn = QPushButton("打开数据目录")
-        open_btn.clicked.connect(self._open_data_root)
-        info.body.addLayout(button_row(open_btn))
-        layout.addWidget(info)
+        if section == "appearance":
+            appearance = CardFrame()
+            appearance.add_title("主题")
+            appearance.add_hint("可跟随 Windows，也可固定使用浅色或深色；保存后立即应用。")
+            appearance_form = QFormLayout()
+            self.theme_mode = QComboBox()
+            self.theme_mode.addItem("跟随系统", "system")
+            self.theme_mode.addItem("浅色", "light")
+            self.theme_mode.addItem("深色", "dark")
+            theme_index = self.theme_mode.findData(s.application.theme)
+            self.theme_mode.setCurrentIndex(max(0, theme_index))
+            appearance_form.addRow("主题", self.theme_mode)
+            self.theme_status = QLabel("")
+            self.theme_status.setObjectName("MutedLabel")
+            appearance_form.addRow("当前状态", self.theme_status)
+            self.preview_zoom = QSpinBox()
+            self.preview_zoom.setRange(80, 100)
+            self.preview_zoom.setSingleStep(1)
+            self.preview_zoom.setSuffix("%")
+            self.preview_zoom.setValue(round(s.application.preview_zoom_scale * 100))
+            appearance_form.addRow("所有预览缩放", self.preview_zoom)
+            appearance.body.addLayout(appearance_form)
+            apply_theme = primary_button("保存并应用外观")
+            apply_theme.clicked.connect(self._apply_theme)
+            appearance.body.addLayout(button_row(apply_theme))
+            layout.addWidget(appearance)
+            self._refresh_theme_status()
 
         # —— AI ——
         ai_card = CardFrame()
@@ -149,7 +156,8 @@ class ServiceSettingsPage(QWidget):
         apply_ai.clicked.connect(self._apply_ai_session)
         ai_card.body.addLayout(button_row(save_ai, clear_ai, test_ai))
         ai_card.body.addLayout(button_row(apply_ai))
-        layout.addWidget(ai_card)
+        if section == "ai":
+            layout.addWidget(ai_card)
 
         # —— 云端 ——
         cloud_card = CardFrame()
@@ -197,20 +205,23 @@ class ServiceSettingsPage(QWidget):
         apply_btn.clicked.connect(self._apply_session_provider)
         cloud_card.body.addLayout(button_row(save_tok, clear_tok, test_btn))
         cloud_card.body.addLayout(button_row(apply_btn))
-        layout.addWidget(cloud_card)
+        if section == "cloud":
+            layout.addWidget(cloud_card)
 
-        tip = QLabel(
-            "密钥只进操作系统凭据管理器；TOML 仅保存 credential_key / api_key_env 名称。"
-        )
-        tip.setObjectName("MutedLabel")
-        tip.setWordWrap(True)
-        layout.addWidget(tip)
+        if section in {"ai", "cloud"}:
+            tip = QLabel(
+                "密钥只进操作系统凭据管理器；TOML 仅保存 credential_key / api_key_env 名称。"
+            )
+            tip.setObjectName("MutedLabel")
+            tip.setWordWrap(True)
+            layout.addWidget(tip)
         layout.addStretch(1)
 
         scroll.setWidget(body)
         outer.addWidget(scroll, stretch=1)
 
-        self._refresh_token_ui()
+        if section == "cloud":
+            self._refresh_token_ui()
 
     def _refresh_theme_status(self) -> None:
         app = QApplication.instance()
@@ -225,9 +236,13 @@ class ServiceSettingsPage(QWidget):
 
     def _apply_theme(self) -> None:
         mode = str(self.theme_mode.currentData())
+        zoom_scale = self.preview_zoom.value() / 100
         try:
             save_theme_preference(self.runtime.paths.root, mode)
+            save_preview_zoom_preference(self.runtime.paths.root, zoom_scale)
             self.runtime.settings.application.theme = mode
+            self.runtime.settings.application.preview_zoom_scale = zoom_scale
+            set_preview_zoom_scale(zoom_scale)
             app = QApplication.instance()
             if app is not None:
                 manager = get_theme_manager(app)
