@@ -1,6 +1,23 @@
 # 开发工具
 
-本目录放置开发期探测脚本和其输出报告，不属于 Windows/Android 运行时。当前工具用于验证 GitLink 的 Release/Attachment API 兼容性；它不会执行研错库备份，也不会实现增量同步。
+本目录放置开发期探测与验收脚本及其输出报告，不属于 Windows/Android 运行时。
+
+## `performance_baseline.py`
+
+从仓库根目录运行：
+
+```powershell
+python tools/performance_baseline.py --samples 5
+```
+
+脚本在系统临时目录创建带隔离标记的资料，生成至少 1200 道题目和 300 篇笔记，
+采样冷/热启动、主窗口构建、题库刷新、本地搜索、题目/笔记列表查询和列表滚动，
+最后自动清理整份隔离资料。它不会读取或写入正式 `YANCUO_DATA_ROOT`。
+
+结果默认只输出到终端；需要留存发布节点报告时可增加
+`--output <仓库外路径.json>`。报告包含设备、Python/Qt/SQLAlchemy 版本、数据规模、
+样本数、中位数、范围与 Tukey 异常值。冷启动表示新解释器内的第一次
+`bootstrap_runtime`，不会尝试清空操作系统文件缓存。
 
 ## `probe_gitlink.py`
 
