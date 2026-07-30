@@ -144,10 +144,10 @@
 
 | key | 示例 value |
 |-----|------------|
-| schema_version | `9`（Windows 当前迁移目标；历史版本依次为 1—8） |
+| schema_version | `19`（Windows 当前迁移目标） |
 | data_format_version | `1` |
 
-程序打开库时：若 `schema_version` 高于本程序支持版本，应拒绝并提示升级。Windows 当前支持到 10；Android 本地核心建库为 7，未加密 `.ebpack` 导入器可保留到 10 的加法式快照。各次加法迁移见 `docs/05`—`docs/07`、[`docs/10_schema_v5_变更说明.md`](../docs/10_schema_v5_变更说明.md)、[`docs/11_schema_v6_变更说明.md`](../docs/11_schema_v6_变更说明.md)、[`docs/13_schema_v7_变更说明.md`](../docs/13_schema_v7_变更说明.md)、[`docs/14_schema_v8_变更说明.md`](../docs/14_schema_v8_变更说明.md)、[`docs/15_schema_v9_变更说明.md`](../docs/15_schema_v9_变更说明.md) 和 [`docs/16_schema_v10_变更说明.md`](../docs/16_schema_v10_变更说明.md)。
+程序打开库时：若 `schema_version` 高于程序支持版本，应拒绝并提示升级。Windows 当前支持到 19；Android 本地核心建库为 7，未加密 `.ebpack` 导入器当前接受到 9。各次加法迁移见合并后的 [`数据库版本历史`](../docs/reference/数据库版本历史.md)；具体实现以各端迁移代码和导入上限常量为准。
 
 ---
 

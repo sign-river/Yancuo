@@ -4,7 +4,7 @@ Windows / 安卓 / 云端共享的**唯一规范真相**。
 
 | 文件                            | 状态                                 |
 | ------------------------------- | ------------------------------------ |
-| `data-format-v1.md`             | 跨端字段语义 v1；当前 Windows schema_version=10、data_format_version=1 |
+| `data-format-v1.md`             | 跨端字段语义 v1；当前 Windows schema_version=19、data_format_version=1 |
 | `workspace-format-v1.md`        | 阶段 D 定稿                          |
 | `ebpack-format-v1.md`           | 阶段 F 定稿；当前仅支持未加密 v1 包  |
 | `sync-protocol-v1.md`           | 阶段 J 定稿；Windows LocalFolder 已接入，GitLink/GitHub 批次协议已定义、实现后置 |
@@ -21,7 +21,7 @@ Windows / 安卓 / 云端共享的**唯一规范真相**。
 
 ## 当前兼容边界
 
-- `schema_version` 是本地数据库迁移版本：Windows 当前为 **17**；Android 新建本地核心库为 **7**，但可校验并保留其支持范围内的加法式 Windows 快照。`data_format_version` 是跨端字段语义版本，当前为 **1**。
-- `.ebpack` 使用 `format_version=1`；Windows 可导出/导入，Android 可导入 schema≤10 的加法式快照，当前均只接受未加密包。Android UI 不读写 Windows 笔记、草稿或合集表。
-- LocalFolder 支持 `changes/` 的 Operation 推拉；GitLink/GitHub 当前仍以完整 `.ebpack` Release 备份为主，不宣称远端增量同步。
-- Word/PDF、端到端加密和 Android 云下载不由本目录的 v1 协议承诺；实现状态以各协议文档和 [`docs/08_完成更新记录.md`](../docs/08_完成更新记录.md) 为准。
+- `schema_version` 是本地数据库迁移版本：Windows 当前为 **19**；Android 新建本地核心库为 **7**，未加密 `.ebpack` 导入器当前接受到 **9**。`data_format_version` 是跨端字段语义版本，当前为 **1**。
+- `.ebpack` 使用 `format_version=1`；Windows 可导出/导入，当前各端只接受未加密包。Android UI 不读写 Windows 笔记、草稿或合集表。
+- LocalFolder 支持 `changes/` Operation 推拉；GitHub 已支持受保守写锁保护的不可变 Operation 批次；GitLink 因缺少可靠原子锁仍只支持完整快照。
+- Word/PDF、端到端加密和 Android 云下载不由本目录的 v1 协议承诺；实现状态以各协议文档和 [`docs/完成记录.md`](../docs/完成记录.md) 为准。

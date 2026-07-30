@@ -1,4 +1,6 @@
-# 研错库云端账户、同步与安卓端设计修订案
+# 研错库云端同步与 Android 设计参考
+
+> 本文保留云端和 Android 方案的完整设计背景。当前任务状态分别以 [`../tasks/同步与云端.md`](../tasks/同步与云端.md) 和 [`../tasks/Android.md`](../tasks/Android.md) 为准，协议实现以 [`../../protocol/README.md`](../../protocol/README.md) 为准。
 
 ## 一、总体架构修正
 
