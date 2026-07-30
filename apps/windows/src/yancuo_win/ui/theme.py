@@ -431,15 +431,14 @@ def app_stylesheet(theme: str = "light") -> str:
         border-radius: 10px;
     }}
     QFrame#WorkflowStepBar {{
-        min-height: 34px;
-        max-height: 34px;
+        min-height: 44px;
+        max-height: 48px;
         background: {t.surface_subtle};
         border: 1px solid {t.divider};
         border-radius: {m.radius_surface}px;
     }}
     QLabel#WorkflowStep {{
-        min-width: 92px;
-        padding: 4px 10px;
+        padding: 5px 10px;
         border-radius: {m.radius_control}px;
         color: {t.muted};
         font-size: 12px;
@@ -454,7 +453,7 @@ def app_stylesheet(theme: str = "light") -> str:
         font-weight: 600;
     }}
     QFrame#WorkflowStepConnector {{
-        min-width: 24px;
+        min-width: 8px;
         max-height: 1px;
         background: {t.divider};
         border: none;

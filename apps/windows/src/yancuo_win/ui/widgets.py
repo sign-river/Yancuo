@@ -548,12 +548,21 @@ class WorkflowStepBar(QFrame):
             label.setObjectName("WorkflowStep")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setAccessibleName(f"步骤 {index + 1}：{text}")
+            label.setWordWrap(False)
+            label.setMinimumWidth(
+                max(72, label.fontMetrics().horizontalAdvance(label.text()) + 24)
+            )
+            label.setSizePolicy(
+                QSizePolicy.Policy.Minimum,
+                QSizePolicy.Policy.Fixed,
+            )
             layout.addWidget(label)
             self.labels.append(label)
             if index < len(steps) - 1:
                 connector = QFrame()
                 connector.setObjectName("WorkflowStepConnector")
                 connector.setFixedHeight(1)
+                connector.setMinimumWidth(8)
                 connector.setSizePolicy(
                     QSizePolicy.Policy.Expanding,
                     QSizePolicy.Policy.Fixed,

@@ -54,6 +54,27 @@ def test_workflow_step_bar_exposes_current_completed_and_upcoming_states() -> No
     app.processEvents()
 
 
+@pytest.mark.parametrize("width", [760, 1366, 1920])
+def test_workflow_step_bar_keeps_full_labels_at_target_widths(width: int) -> None:
+    app = QApplication.instance() or QApplication([])
+    names = ("上传图片", "后台处理", "确认结果")
+    bar = widgets_module.WorkflowStepBar(names, 1)
+    bar.resize(width, bar.sizeHint().height())
+    bar.show()
+    app.processEvents()
+
+    for index, label in enumerate(bar.labels):
+        assert label.text() == f"{index + 1}  {names[index]}"
+        assert label.width() >= label.minimumWidth()
+        assert label.accessibleName().endswith(names[index])
+    assert all(connector.width() >= 8 for connector in bar.connectors)
+    assert sum(connector.width() for connector in bar.connectors) > sum(
+        label.width() for label in bar.labels
+    ) / 4
+    bar.close()
+    app.processEvents()
+
+
 def test_deferred_view_updates_restores_repaint_state_after_failure() -> None:
     app = QApplication.instance() or QApplication([])
     view = QListWidget()
