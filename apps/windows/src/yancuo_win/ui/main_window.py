@@ -1098,6 +1098,8 @@ class MainWindow(QMainWindow):
         self.question_detail_button.clicked.connect(self._open_selected_detail)
         self.question_edit_button = QPushButton("编辑")
         self.question_edit_button.clicked.connect(self._edit_selected)
+        self.question_delete_button = danger_button("删除")
+        self.question_delete_button.clicked.connect(self._trash_selected)
         self.question_review_button = QPushButton("加入复习计划")
         self.question_review_button.clicked.connect(self._schedule_review)
         self.question_more_button = QPushButton("更多")
@@ -1108,6 +1110,7 @@ class MainWindow(QMainWindow):
         self._question_action_buttons = (
             self.question_detail_button,
             self.question_edit_button,
+            self.question_delete_button,
             self.question_review_button,
             self.question_more_button,
         )
@@ -1196,13 +1199,10 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         move = menu.addAction("\u79fb\u52a8\u5206\u7c7b", self._move_selected_category)
         move.setEnabled(active)
-        menu.addSeparator()
         if self._nav_mode == "trashed":
+            menu.addSeparator()
             purge = menu.addAction("\u6e05\u7a7a\u56de\u6536\u7ad9", self._purge_trash)
             purge.setEnabled(True)
-        delete = menu.addAction("\u5220\u9664", self._trash_selected)
-        delete.setEnabled(active)
-        delete.setProperty("danger", True)
         return menu
 
     def _show_question_more_menu(self, sender: QPushButton | None = None) -> None:
@@ -1226,6 +1226,10 @@ class MainWindow(QMainWindow):
     def _update_context_bar(self, has_selection: bool) -> None:
         for button in getattr(self, "_question_action_buttons", ()):
             button.setEnabled(has_selection)
+        if hasattr(self, "question_delete_button"):
+            active = has_selection and self._nav_mode != "trashed"
+            self.question_delete_button.setVisible(self._nav_mode != "trashed")
+            self.question_delete_button.setEnabled(active)
         if hasattr(self, "question_action_bar"):
             self.question_action_bar.setVisible(has_selection)
         if hasattr(self, "copy_problem_id_button"):

@@ -357,6 +357,21 @@ def test_library_uses_soft_workspace_components(window: MainWindow) -> None:
     )
 
 
+def test_question_delete_action_is_next_to_edit_and_not_in_more_menu(
+    window: MainWindow,
+) -> None:
+    layout = window.question_action_bar.layout()
+
+    assert layout.indexOf(window.question_delete_button) == (
+        layout.indexOf(window.question_edit_button) + 1
+    )
+    assert window.question_delete_button.objectName() == "DangerButton"
+    assert "删除" not in {
+        action.text()
+        for action in window._build_question_more_menu().actions()
+    }
+
+
 def test_large_library_only_materializes_rows_near_viewport(
     window: MainWindow,
     monkeypatch: pytest.MonkeyPatch,
