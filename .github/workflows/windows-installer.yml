@@ -1,0 +1,55 @@
+name: Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: Build and verify installer
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: apps/windows/pyproject.toml
+
+      - name: Install packaging dependencies
+        working-directory: apps/windows
+        run: python -m pip install --upgrade pip; python -m pip install ".[packaging]"
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        working-directory: apps/windows
+        run: .\packaging\build_installer.ps1
+
+      - name: Verify install, upgrade, and uninstall
+        working-directory: apps/windows
+        run: |
+          $installer = Get-ChildItem -LiteralPath packaging\output -Filter "*-setup.exe" |
+            Select-Object -First 1
+          .\packaging\verify_installer.ps1 -Installer $installer.FullName
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: yancuo-windows-installer
+          path: apps/windows/packaging/output/*-setup.exe
+          if-no-files-found: error
