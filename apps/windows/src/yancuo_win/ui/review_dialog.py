@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -16,7 +17,6 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTextEdit,
     QVBoxLayout,
-    QWidget,
 )
 
 from yancuo_win.application.ai_service import AIService
@@ -25,6 +25,8 @@ from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.widgets import (
     ConfirmDialog,
     PageHeader,
+    SoftItemDelegate,
+    ToastMessage,
     danger_button,
     default_button,
     primary_button,
@@ -34,6 +36,7 @@ from yancuo_win.ui.widgets import (
 class ReviewDialog(QDialog):
     def __init__(self, ai: AIService, app: AppServices, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("ReviewDialog")
         self.ai = ai
         self.app = app
         self.setWindowTitle("待确认变更")
@@ -46,17 +49,27 @@ class ReviewDialog(QDialog):
             PageHeader("待确认变更", "逐项核对 AI 或外部导入建议，再决定接受、覆盖或保留本地内容。")
         )
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("DialogWorkspace")
 
-        left_box = QWidget()
+        left_box = QFrame()
+        left_box.setObjectName("DialogSidePane")
         left = QVBoxLayout(left_box)
         left_title = QLabel("待审核")
         left_title.setObjectName("SectionTitle")
         left.addWidget(left_title)
         self.list = QListWidget()
+        self.list.setObjectName("DialogItemList")
+        self.list.setAccessibleName("待确认变更列表")
+        self.list.setUniformItemSizes(True)
+        self.list.setMouseTracking(True)
+        self.list.setItemDelegate(
+            SoftItemDelegate(self.list, minimum_height=40)
+        )
         self.list.currentItemChanged.connect(self._on_select)
         left.addWidget(self.list)
 
-        right_box = QWidget()
+        right_box = QFrame()
+        right_box.setObjectName("DialogDetailPane")
         right = QVBoxLayout(right_box)
         meta_title = QLabel("题目来源与信息")
         meta_title.setObjectName("SectionTitle")
@@ -68,12 +81,14 @@ class ReviewDialog(QDialog):
         diff_title.setObjectName("SectionTitle")
         right.addWidget(diff_title)
         self.diff_view = QTextEdit()
+        self.diff_view.setObjectName("DialogTextSurface")
         self.diff_view.setReadOnly(True)
         right.addWidget(self.diff_view)
         uncertain_title = QLabel("不确定字段")
         uncertain_title.setObjectName("SectionTitle")
         right.addWidget(uncertain_title)
         self.uncertain = QTextEdit()
+        self.uncertain.setObjectName("DialogTextSurface")
         self.uncertain.setReadOnly(True)
         self.uncertain.setMaximumHeight(120)
         right.addWidget(self.uncertain)
@@ -84,7 +99,11 @@ class ReviewDialog(QDialog):
         splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter)
 
-        row = QHBoxLayout()
+        actions = QFrame()
+        actions.setObjectName("DialogActionBar")
+        row = QHBoxLayout(actions)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(8)
         accept = primary_button("接受变更")
         accept.clicked.connect(self._accept)
         force = danger_button("强制采用外部")
@@ -95,19 +114,24 @@ class ReviewDialog(QDialog):
         refresh.clicked.connect(self.refresh)
         for btn in (accept, force, reject, refresh):
             row.addWidget(btn)
-        layout.addLayout(row)
+        row.addStretch(1)
+        layout.addWidget(actions)
 
         tip = QLabel(
             "冲突项须用「强制采用外部」或「保留内部」。"
             "撤销请在题库选中题目后使用「撤销 AI 修改」（亦适用于工作区接受）。"
             "请勿直接修改 SQLite。"
         )
+        tip.setObjectName("MutedLabel")
         tip.setWordWrap(True)
         layout.addWidget(tip)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
+        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+        close_button.setText("关闭")
+        close_button.clicked.connect(self.accept)
         layout.addWidget(buttons)
+        self.toast = ToastMessage(self)
         self.refresh()
 
     def refresh(self) -> None:
@@ -121,6 +145,10 @@ class ReviewDialog(QDialog):
             )
             row.setData(Qt.ItemDataRole.UserRole, item.id)
             self.list.addItem(row)
+        if not self.list.count():
+            empty = QListWidgetItem("暂无待确认变更")
+            empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self.list.addItem(empty)
         self.diff_view.clear()
         self.uncertain.clear()
         self.meta.setText("选择左侧条目")
@@ -172,7 +200,7 @@ class ReviewDialog(QDialog):
             self.ai.accept_review_item(rid)
             if item:
                 self.ai.assert_original_untouched(item.problem_id)
-            QMessageBox.information(self, "已接受", "已写入题库并生成版本记录。")
+            self.toast.show_message("变更已写入题库，并生成版本记录")
             self.refresh()
         except DomainError as exc:
             QMessageBox.warning(self, "无法接受", str(exc))
@@ -193,7 +221,7 @@ class ReviewDialog(QDialog):
             self.ai.accept_review_item(rid, force=True)
             if item:
                 self.ai.assert_original_untouched(item.problem_id)
-            QMessageBox.information(self, "已强制接受", "已写入题库并生成版本记录。")
+            self.toast.show_message("外部版本已写入题库，并生成版本记录")
             self.refresh()
         except DomainError as exc:
             QMessageBox.warning(self, "无法接受", str(exc))

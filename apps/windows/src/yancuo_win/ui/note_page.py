@@ -47,14 +47,20 @@ from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.note_worker import NoteExtractionWorker
 from yancuo_win.tasks.note_search_worker import NoteAiSearchWorker
 from yancuo_win.ui.image_viewer import ImageViewerDialog
+from yancuo_win.ui.icons import bind_icon
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
     CardFrame,
     PageHeader,
+    ReadingCanvas,
     SearchInput,
+    SoftItemDelegate,
     danger_button,
+    describe_field,
+    deferred_view_updates,
     ghost_button,
     primary_button,
+    set_tab_order_chain,
 )
 
 _STATUS_LABELS = {
@@ -630,6 +636,8 @@ class NotePage(QWidget):
         self._block: NoteBlock | None = None
         self._original_path: Path | None = None
         self._loading = False
+        self._narrow_layout = False
+        self._narrow_space_open = False
         self._collection_filter_id: str | None = None
         self._collection_note_ids: dict[str, set[str]] = {}
         self.note_ai = NoteAiService(notes.runtime)
@@ -672,17 +680,24 @@ class NotePage(QWidget):
         self.workspace = split
         split.setObjectName("NoteWorkspace")
         split.setChildrenCollapsible(False)
-        split.setHandleWidth(1)
+        split.setHandleWidth(10)
+        split.setContentsMargins(8, 8, 8, 8)
 
         space = CardFrame()
         space.setObjectName("NoteSpacePane")
+        self.space_pane = space
         space.setMinimumWidth(200)
         space.setMaximumWidth(260)
         space.add_title("笔记空间")
+        self.space_back_button = ghost_button("返回笔记列表")
+        self.space_back_button.clicked.connect(self._show_narrow_content)
+        self.space_back_button.hide()
+        space.body.addWidget(self.space_back_button)
         view_label = QLabel("视图")
         view_label.setObjectName("MutedLabel")
         space.body.addWidget(view_label)
         self.status_filter = QComboBox()
+        describe_field(self.status_filter, "笔记视图")
         for label, status in (
             ("正式笔记", "active"),
             ("待整理", "inbox"),
@@ -705,14 +720,31 @@ class NotePage(QWidget):
         space.body.addLayout(collection_header)
         self.collection_list = QListWidget()
         self.collection_list.setObjectName("NoteCollectionList")
+        self.collection_list.setAccessibleName("笔记合集")
+        self.collection_list.setUniformItemSizes(True)
+        self.collection_list.setMouseTracking(True)
+        self.collection_list.setItemDelegate(
+            SoftItemDelegate(
+                self.collection_list,
+                radius=9,
+                horizontal_margin=2,
+                vertical_margin=2,
+                minimum_height=38,
+            )
+        )
         self.collection_list.currentItemChanged.connect(self._select_collection)
         space.body.addWidget(self.collection_list, stretch=1)
         split.addWidget(space)
 
         middle = CardFrame()
         middle.setObjectName("NoteLibraryPane")
+        self.note_library_pane = middle
         middle.setMinimumWidth(280)
         middle.setMaximumWidth(400)
+        self.space_toggle_button = ghost_button("空间与合集")
+        self.space_toggle_button.clicked.connect(self._show_narrow_space)
+        self.space_toggle_button.hide()
+        middle.body.addWidget(self.space_toggle_button)
         list_header = QHBoxLayout()
         list_title = QLabel("笔记列表")
         list_title.setObjectName("SectionTitle")
@@ -723,18 +755,47 @@ class NotePage(QWidget):
         list_header.addWidget(self.note_count_label)
         middle.body.addLayout(list_header)
         self.note_search_edit = SearchInput("搜索标题、内容、标签或合集")
+        describe_field(
+            self.note_search_edit,
+            "搜索笔记",
+            "搜索标题、内容、标签或合集，按回车执行搜索",
+        )
         self.note_search_edit.textChanged.connect(self.reload)
         self.note_search_edit.returnPressed.connect(self._submit_note_search)
         middle.body.addWidget(self.note_search_edit)
         self.note_search_mode = QComboBox()
+        describe_field(self.note_search_mode, "笔记搜索方式")
         self.note_search_mode.addItem("普通搜索", "local")
         self.note_search_mode.addItem("AI 搜索", "ai")
         self.note_search_mode.currentIndexChanged.connect(self._submit_note_search)
         middle.body.addWidget(self.note_search_mode)
+        self.note_list_hint = QLabel("")
+        self.note_list_hint.setObjectName("MutedLabel")
+        self.note_list_hint.setWordWrap(True)
+        self.note_list_hint.hide()
+        middle.body.addWidget(self.note_list_hint)
         self.note_list = QListWidget()
         self.note_list.setObjectName("NoteList")
+        self.note_list.setAccessibleName("笔记列表")
+        self.note_list.setAccessibleDescription("使用方向键选择笔记")
+        self.note_list.setUniformItemSizes(True)
+        self.note_list.setMouseTracking(True)
+        self.note_list.setItemDelegate(
+            SoftItemDelegate(
+                self.note_list,
+                radius=10,
+                horizontal_margin=2,
+                vertical_margin=3,
+                minimum_height=58,
+            )
+        )
         self.note_list.currentItemChanged.connect(self._select_note)
         middle.body.addWidget(self.note_list, stretch=1)
+        set_tab_order_chain(
+            self.note_search_edit,
+            self.note_search_mode,
+            self.note_list,
+        )
         split.addWidget(middle)
 
         self.empty_card = CardFrame()
@@ -765,6 +826,46 @@ class NotePage(QWidget):
         self.page_stack.addWidget(self.ai_intake_page)
         self.draft_preview_page: NoteDraftPreviewPage | None = None
 
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        if hasattr(self, "workspace"):
+            self._set_narrow_layout(self.width() < 900)
+
+    def _set_narrow_layout(self, narrow: bool) -> None:
+        if self._narrow_layout == narrow:
+            return
+        self._narrow_layout = narrow
+        self.space_toggle_button.setVisible(narrow)
+        self.space_back_button.setVisible(narrow)
+        if narrow:
+            self._show_narrow_content()
+        else:
+            self._narrow_space_open = False
+            self.space_pane.setMaximumWidth(260)
+            self.space_pane.show()
+            self.note_library_pane.show()
+            self.detail_stack.show()
+            self.workspace.setSizes([220, 320, 900])
+
+    def _show_narrow_space(self) -> None:
+        if not self._narrow_layout:
+            return
+        self._narrow_space_open = True
+        self.space_pane.setMaximumWidth(16777215)
+        self.space_pane.show()
+        self.note_library_pane.hide()
+        self.detail_stack.hide()
+        self.workspace.setSizes([max(320, self.width()), 0, 0])
+
+    def _show_narrow_content(self) -> None:
+        if not self._narrow_layout:
+            return
+        self._narrow_space_open = False
+        self.space_pane.hide()
+        self.note_library_pane.show()
+        self.detail_stack.show()
+        self.workspace.setSizes([0, 320, max(360, self.width() - 320)])
+
     def _build_manual_create_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -777,21 +878,29 @@ class NotePage(QWidget):
         form = CardFrame()
         form.add_title("笔记信息")
         self.new_note_title = QLineEdit()
+        describe_field(self.new_note_title, "笔记标题")
         self.new_note_title.setPlaceholderText("笔记标题")
         self.new_note_summary = QTextEdit()
+        describe_field(self.new_note_summary, "笔记摘要")
         self.new_note_summary.setPlaceholderText("摘要（可选）")
         self.new_note_summary.setFixedHeight(110)
         form.body.addWidget(self.new_note_title)
         form.body.addWidget(self.new_note_summary)
         actions = QHBoxLayout()
         actions.addStretch(1)
-        cancel = ghost_button("取消")
-        cancel.clicked.connect(self._show_library)
-        create = primary_button("创建并编辑")
-        create.clicked.connect(self._create_note)
-        actions.addWidget(cancel)
-        actions.addWidget(create)
+        self.cancel_note_create_button = ghost_button("取消")
+        self.cancel_note_create_button.clicked.connect(self._show_library)
+        self.create_note_button = primary_button("创建并编辑")
+        self.create_note_button.clicked.connect(self._create_note)
+        actions.addWidget(self.cancel_note_create_button)
+        actions.addWidget(self.create_note_button)
         form.body.addLayout(actions)
+        set_tab_order_chain(
+            self.new_note_title,
+            self.new_note_summary,
+            self.cancel_note_create_button,
+            self.create_note_button,
+        )
         layout.addWidget(form)
         layout.addStretch(1)
         return page
@@ -809,6 +918,7 @@ class NotePage(QWidget):
         form.add_title("识别设置")
         source_row = QHBoxLayout()
         self.ai_source_path = QLineEdit()
+        describe_field(self.ai_source_path, "笔记图片路径")
         self.ai_source_path.setReadOnly(True)
         choose = ghost_button("选择图片")
         choose.clicked.connect(self._choose_ai_source)
@@ -816,10 +926,12 @@ class NotePage(QWidget):
         source_row.addWidget(choose)
         form.body.addLayout(source_row)
         self.ai_classification_mode = QComboBox()
+        describe_field(self.ai_classification_mode, "笔记分类方式")
         self.ai_classification_mode.addItem("自定义分类", "custom")
         self.ai_classification_mode.addItem("AI 识别并分组", "ai")
         form.body.addWidget(self.ai_classification_mode)
         self.ai_instruction = QTextEdit()
+        describe_field(self.ai_instruction, "AI 识别补充要求")
         self.ai_instruction.setPlaceholderText("补充要求（可选）")
         self.ai_instruction.setFixedHeight(100)
         form.body.addWidget(self.ai_instruction)
@@ -863,7 +975,8 @@ class NotePage(QWidget):
         self.read_button.clicked.connect(lambda: self._set_mode("read"))
         self.edit_button = primary_button("编辑笔记")
         self.edit_button.clicked.connect(lambda: self._set_mode("edit"))
-        self.more_button = ghost_button("更多 ▾")
+        self.more_button = ghost_button("更多")
+        bind_icon(self.more_button, "more-horizontal")
         more_menu = QMenu(self.more_button)
         more_menu.addAction("加入合集", self._edit_note_collections)
         more_menu.addAction("加入复习计划", self._request_review)
@@ -912,8 +1025,10 @@ class NotePage(QWidget):
         info = CardFrame()
         info.add_title("笔记信息")
         self.title_edit = QLineEdit()
+        describe_field(self.title_edit, "笔记标题")
         self.title_edit.setPlaceholderText("笔记标题")
         self.summary_edit = QTextEdit()
+        describe_field(self.summary_edit, "笔记摘要")
         self.summary_edit.setPlaceholderText("摘要（可选）")
         self.summary_edit.setFixedHeight(62)
         info.body.addWidget(self.title_edit)
@@ -943,6 +1058,8 @@ class NotePage(QWidget):
         block_card.body.addLayout(block_actions)
         self.block_list = QListWidget()
         self.block_list.setObjectName("NoteBlockList")
+        self.block_list.setAccessibleName("笔记内容块")
+        self.block_list.setAccessibleDescription("使用方向键选择需要编辑的内容块")
         self.block_list.currentItemChanged.connect(self._select_block)
         block_card.body.addWidget(self.block_list, stretch=1)
         up = QPushButton("上移")
@@ -956,6 +1073,7 @@ class NotePage(QWidget):
         self.block_editor.add_title("编辑内容块")
         self.block_type_label = self.block_editor.add_hint("请选择一个内容块")
         self.block_content = QTextEdit()
+        describe_field(self.block_content, "当前内容块内容")
         self.block_content.setPlaceholderText("选择内容块后开始编辑")
         self.block_editor.body.addWidget(self.block_content, stretch=1)
         self.save_block_button = primary_button("保存当前块")
@@ -979,7 +1097,8 @@ class NotePage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.reader = MathContentView()
         self.reader.setObjectName("NoteReader")
-        layout.addWidget(self.reader)
+        self.reading_canvas = ReadingCanvas(self.reader, maximum_width=920)
+        layout.addWidget(self.reading_canvas)
         return page
 
     @staticmethod
@@ -1025,20 +1144,29 @@ class NotePage(QWidget):
                     hit_ids = {str(hit["entity_id"]) for hit in hits}
                 self._notes = [note for note in self._notes if note.id in hit_ids]
         except DomainError as exc:
+            self.note_list_hint.setText(f"笔记加载失败：{exc}")
+            self.note_list_hint.setObjectName("DangerLabel")
+            self.note_list_hint.show()
             self.status_message.emit(str(exc))
             return
         self._loading = True
-        self.note_list.clear()
+        self.note_list_hint.setObjectName("MutedLabel")
+        self.note_list_hint.setText(
+            "当前筛选下暂无笔记；可切换视图、合集或新建笔记。"
+        )
+        self.note_list_hint.setVisible(not self._notes)
         self.note_count_label.setText(f"{len(self._notes)} 篇")
         selected_row = -1
-        for index, note in enumerate(self._notes):
-            title = note.title or "未命名笔记"
-            preview = note.summary.strip() or self._block_preview(note)
-            item = QListWidgetItem(f"{title}\n{preview or '尚未添加内容'}")
-            item.setData(Qt.ItemDataRole.UserRole, note.id)
-            self.note_list.addItem(item)
-            if note.id == current_id:
-                selected_row = index
+        with deferred_view_updates(self.note_list):
+            self.note_list.clear()
+            for index, note in enumerate(self._notes):
+                title = note.title or "未命名笔记"
+                preview = note.summary.strip() or self._block_preview(note)
+                item = QListWidgetItem(f"{title}\n{preview or '尚未添加内容'}")
+                item.setData(Qt.ItemDataRole.UserRole, note.id)
+                self.note_list.addItem(item)
+                if note.id == current_id:
+                    selected_row = index
         self._loading = False
         if selected_row >= 0:
             self.note_list.setCurrentRow(selected_row)
@@ -1057,22 +1185,23 @@ class NotePage(QWidget):
         }
         selected = self._collection_filter_id
         self.collection_list.blockSignals(True)
-        self.collection_list.clear()
-        all_item = QListWidgetItem("全部笔记")
-        all_item.setData(Qt.ItemDataRole.UserRole, None)
-        self.collection_list.addItem(all_item)
-        unfiled_item = QListWidgetItem("未归入合集")
-        unfiled_item.setData(Qt.ItemDataRole.UserRole, "__unfiled__")
-        self.collection_list.addItem(unfiled_item)
-        selected_row = 0
-        for collection in collections:
-            item = QListWidgetItem(
-                f"{collection.title}  ·  {len(collection.notes)}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, collection.id)
-            self.collection_list.addItem(item)
-            if collection.id == selected:
-                selected_row = self.collection_list.count() - 1
+        with deferred_view_updates(self.collection_list):
+            self.collection_list.clear()
+            all_item = QListWidgetItem("全部笔记")
+            all_item.setData(Qt.ItemDataRole.UserRole, None)
+            self.collection_list.addItem(all_item)
+            unfiled_item = QListWidgetItem("未归入合集")
+            unfiled_item.setData(Qt.ItemDataRole.UserRole, "__unfiled__")
+            self.collection_list.addItem(unfiled_item)
+            selected_row = 0
+            for collection in collections:
+                item = QListWidgetItem(
+                    f"{collection.title}  ·  {len(collection.notes)}"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, collection.id)
+                self.collection_list.addItem(item)
+                if collection.id == selected:
+                    selected_row = self.collection_list.count() - 1
         if selected == "__unfiled__":
             selected_row = 1
         elif selected and selected not in self._collection_note_ids:
@@ -1088,6 +1217,7 @@ class NotePage(QWidget):
         collection_id = current.data(Qt.ItemDataRole.UserRole)
         self._collection_filter_id = str(collection_id) if collection_id else None
         self.reload()
+        self._show_narrow_content()
 
     def _create_collection(self) -> None:
         title, accepted = QInputDialog.getText(self, "新建合集", "合集名称：")

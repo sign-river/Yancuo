@@ -16,7 +16,13 @@ from yancuo_win.application.services import AppServices
 from yancuo_win.domain.review_rules import REVIEW_GRADES
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.math_content import MathContentView
-from yancuo_win.ui.widgets import CardFrame, PageHeader, default_button, primary_button
+from yancuo_win.ui.widgets import (
+    CardFrame,
+    PageHeader,
+    ToastMessage,
+    default_button,
+    primary_button,
+)
 
 
 class TodayReviewDialog(QDialog):
@@ -66,6 +72,7 @@ class TodayReviewDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
         layout.addWidget(buttons)
+        self.toast = ToastMessage(self)
         self._render()
 
     def _current(self):
@@ -108,10 +115,8 @@ class TodayReviewDialog(QDialog):
             return
         try:
             result = self.services.record_review(p.id, grade)
-            QMessageBox.information(
-                self,
-                "已记录",
-                f"{result['label']}\n下次复习：{result['next_review_at'][:10]}",
+            self.toast.show_message(
+                f"已记录：{result['label']} · 下次复习 {result['next_review_at'][:10]}"
             )
             # 刷新队列：去掉当前已打分项
             self._queue = self.services.list_due_reviews()

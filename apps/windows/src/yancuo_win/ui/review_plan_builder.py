@@ -7,6 +7,7 @@ from collections import Counter
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,11 +26,16 @@ from yancuo_win.application.services import AppServices
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.widgets import (
     ConfirmDialog,
+    IconButton,
     PageHeader,
     SearchInput,
+    SoftItemDelegate,
     StatusTag,
+    describe_field,
+    deferred_view_updates,
     ghost_button,
     primary_button,
+    set_tab_order_chain,
 )
 
 
@@ -57,7 +63,7 @@ class ReviewPlanBuilder(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(14)
-        back = ghost_button("返回复习")
+        back = IconButton("chevron-left", "返回复习")
         back.clicked.connect(self.back_requested)
         self.problem_mode = QPushButton("题目复习")
         self.problem_mode.setObjectName("SegmentButton")
@@ -80,11 +86,12 @@ class ReviewPlanBuilder(QWidget):
         self.workspace = QSplitter(Qt.Orientation.Horizontal)
         self.workspace.setObjectName("ReviewPlanWorkspace")
         self.workspace.setChildrenCollapsible(False)
-        self.workspace.setHandleWidth(1)
+        self.workspace.setHandleWidth(10)
+        self.workspace.setContentsMargins(8, 8, 8, 8)
         self.browse_workspace = QSplitter(Qt.Orientation.Horizontal)
         self.browse_workspace.setObjectName("ReviewPlanBrowseWorkspace")
         self.browse_workspace.setChildrenCollapsible(False)
-        self.browse_workspace.setHandleWidth(1)
+        self.browse_workspace.setHandleWidth(10)
         self.browse_workspace.addWidget(self._build_tree())
         self.browse_workspace.addWidget(self._build_content())
         self.browse_workspace.setStretchFactor(0, 0)
@@ -92,13 +99,23 @@ class ReviewPlanBuilder(QWidget):
         self.browse_workspace.setSizes([240, 760])
         self.workspace.addWidget(self.browse_workspace)
         self.workspace.addWidget(self._build_queue())
+        set_tab_order_chain(
+            self.tree_search,
+            self.folder_tree,
+            self.content_search,
+            self.source_list,
+            self.add_button,
+            self.queue_list,
+            self.plan_name,
+            self.create_button,
+        )
         self.workspace.setStretchFactor(0, 1)
         self.workspace.setStretchFactor(1, 0)
         self.workspace.setSizes([1000, 320])
         root.addWidget(self.workspace, stretch=1)
 
     def _build_tree(self) -> QWidget:
-        pane = QWidget()
+        pane = QFrame()
         pane.setObjectName("PlanDirectoryPane")
         pane.setMinimumWidth(220)
         pane.setMaximumWidth(280)
@@ -106,17 +123,30 @@ class ReviewPlanBuilder(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel("我的题库"))
         self.tree_search = SearchInput("搜索目录")
+        describe_field(self.tree_search, "搜索复习资料目录")
         self.tree_search.textChanged.connect(self._filter_tree)
         layout.addWidget(self.tree_search)
         self.folder_tree = QTreeWidget()
         self.folder_tree.setObjectName("PlanFolderTree")
+        self.folder_tree.setAccessibleName("复习资料目录")
+        self.folder_tree.setUniformRowHeights(True)
         self.folder_tree.setHeaderHidden(True)
+        self.folder_tree.setMouseTracking(True)
+        self.folder_tree.setItemDelegate(
+            SoftItemDelegate(
+                self.folder_tree,
+                radius=9,
+                horizontal_margin=3,
+                vertical_margin=2,
+                minimum_height=38,
+            )
+        )
         self.folder_tree.currentItemChanged.connect(self._select_folder)
         layout.addWidget(self.folder_tree, stretch=1)
         return pane
 
     def _build_content(self) -> QWidget:
-        pane = QWidget()
+        pane = QFrame()
         pane.setObjectName("PlanContentPane")
         layout = QVBoxLayout(pane)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -125,6 +155,7 @@ class ReviewPlanBuilder(QWidget):
         layout.addWidget(self.breadcrumb)
         tools = QHBoxLayout()
         self.content_search = SearchInput("搜索当前目录")
+        describe_field(self.content_search, "搜索当前目录资料")
         self.content_search.textChanged.connect(self._refresh_sources)
         tools.addWidget(self.content_search, stretch=1)
         self.list_view = QPushButton("列表")
@@ -141,6 +172,18 @@ class ReviewPlanBuilder(QWidget):
         layout.addLayout(tools)
         self.source_list = QListWidget()
         self.source_list.setObjectName("PlanSourceList")
+        self.source_list.setAccessibleName("可加入计划的资料")
+        self.source_list.setUniformItemSizes(True)
+        self.source_list.setMouseTracking(True)
+        self.source_list.setItemDelegate(
+            SoftItemDelegate(
+                self.source_list,
+                radius=10,
+                horizontal_margin=3,
+                vertical_margin=3,
+                minimum_height=48,
+            )
+        )
         self.source_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         layout.addWidget(self.source_list, stretch=1)
         self.selection_hint = StatusTag("未选择资料", "muted")
@@ -171,7 +214,7 @@ class ReviewPlanBuilder(QWidget):
         self._refresh_sources()
 
     def _build_queue(self) -> QWidget:
-        pane = QWidget()
+        pane = QFrame()
         pane.setObjectName("PlanQueuePane")
         self.queue_pane = pane
         pane.setMinimumWidth(290)
@@ -195,12 +238,25 @@ class ReviewPlanBuilder(QWidget):
         layout.addWidget(self.queue_summary)
         self.queue_list = QListWidget()
         self.queue_list.setObjectName("PlanQueueList")
+        self.queue_list.setAccessibleName("计划草稿")
+        self.queue_list.setUniformItemSizes(True)
+        self.queue_list.setMouseTracking(True)
+        self.queue_list.setItemDelegate(
+            SoftItemDelegate(
+                self.queue_list,
+                radius=9,
+                horizontal_margin=3,
+                vertical_margin=2,
+                minimum_height=40,
+            )
+        )
         self.queue_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         layout.addWidget(self.queue_list, stretch=1)
         remove = ghost_button("移除选中项")
         remove.clicked.connect(self._remove_selected)
         layout.addWidget(remove)
         self.plan_name = QLineEdit()
+        describe_field(self.plan_name, "复习计划名称")
         self.plan_name.setPlaceholderText("复习计划名称")
         layout.addWidget(self.plan_name)
         self.create_button = primary_button("创建复习计划")
@@ -292,34 +348,48 @@ class ReviewPlanBuilder(QWidget):
         self._refresh_sources()
 
     def _refresh_sources(self) -> None:
-        self.source_list.clear()
         query = self.content_search.text().strip().lower()
         queued_ids = set(self.services.list_review_waiting_ids(self.content_type))
-        if self.content_type == "problem":
-            rows = self.services.list_problems()
-            if self._selected_chapter_id:
-                rows = [row for row in rows if row.chapter_id == self._selected_chapter_id]
-            for problem in rows:
-                label = problem.title or "未命名题目"
-                if query and query not in label.lower():
-                    continue
-                state = "\n已加入计划草稿" if problem.id in queued_ids else ""
-                item = QListWidgetItem(f"题目  ·  {label}{state}")
-                item.setData(Qt.ItemDataRole.UserRole, problem.id)
-                item.setData(Qt.ItemDataRole.UserRole + 1, problem.id in queued_ids)
-                item.setToolTip("已加入计划草稿" if problem.id in queued_ids else label)
-                self.source_list.addItem(item)
-        elif self.notes:
-            for note in self.notes.list_notes(status="active"):
-                label = note.title or "未命名笔记"
-                if query and query not in label.lower():
-                    continue
-                state = "\n已加入计划草稿" if note.id in queued_ids else ""
-                item = QListWidgetItem(f"笔记  ·  {label}{state}")
-                item.setData(Qt.ItemDataRole.UserRole, note.id)
-                item.setData(Qt.ItemDataRole.UserRole + 1, note.id in queued_ids)
-                item.setToolTip("已加入计划草稿" if note.id in queued_ids else label)
-                self.source_list.addItem(item)
+        with deferred_view_updates(self.source_list):
+            self.source_list.clear()
+            if self.content_type == "problem":
+                rows = self.services.list_problems()
+                if self._selected_chapter_id:
+                    rows = [
+                        row for row in rows
+                        if row.chapter_id == self._selected_chapter_id
+                    ]
+                for problem in rows:
+                    label = problem.title or "未命名题目"
+                    if query and query not in label.lower():
+                        continue
+                    state = "\n已加入计划草稿" if problem.id in queued_ids else ""
+                    item = QListWidgetItem(f"题目  ·  {label}{state}")
+                    item.setData(Qt.ItemDataRole.UserRole, problem.id)
+                    item.setData(
+                        Qt.ItemDataRole.UserRole + 1,
+                        problem.id in queued_ids,
+                    )
+                    item.setToolTip(
+                        "已加入计划草稿" if problem.id in queued_ids else label
+                    )
+                    self.source_list.addItem(item)
+            elif self.notes:
+                for note in self.notes.list_notes(status="active"):
+                    label = note.title or "未命名笔记"
+                    if query and query not in label.lower():
+                        continue
+                    state = "\n已加入计划草稿" if note.id in queued_ids else ""
+                    item = QListWidgetItem(f"笔记  ·  {label}{state}")
+                    item.setData(Qt.ItemDataRole.UserRole, note.id)
+                    item.setData(
+                        Qt.ItemDataRole.UserRole + 1,
+                        note.id in queued_ids,
+                    )
+                    item.setToolTip(
+                        "已加入计划草稿" if note.id in queued_ids else label
+                    )
+                    self.source_list.addItem(item)
         self._update_selection()
 
     def _update_selection(self) -> None:
@@ -344,12 +414,13 @@ class ReviewPlanBuilder(QWidget):
 
     def _refresh_queue(self) -> None:
         ids = self.services.list_review_waiting_ids(self.content_type)
-        self.queue_list.clear()
         labels, total_questions = self._queue_details(ids)
-        for source_id in ids:
-            item = QListWidgetItem(labels.get(source_id, "已移除的资料"))
-            item.setData(Qt.ItemDataRole.UserRole, source_id)
-            self.queue_list.addItem(item)
+        with deferred_view_updates(self.queue_list):
+            self.queue_list.clear()
+            for source_id in ids:
+                item = QListWidgetItem(labels.get(source_id, "已移除的资料"))
+                item.setData(Qt.ItemDataRole.UserRole, source_id)
+                self.queue_list.addItem(item)
         self.queue_summary.setText(f"已添加 {len(ids)} 项 · 共 {total_questions} 道题目")
         self.queue_list.setVisible(bool(ids))
         if not ids:

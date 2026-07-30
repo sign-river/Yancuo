@@ -8,6 +8,7 @@ from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -28,6 +29,7 @@ class ImageViewerDialog(QDialog):
         source_regions: Iterable[Mapping[str, float]] = (),
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("ImageViewerDialog")
         self._source = pixmap
         self._scale = 1.0
         self._source_regions = self._normalize_regions(source_regions)
@@ -38,7 +40,11 @@ class ImageViewerDialog(QDialog):
         root.setContentsMargins(20, 20, 20, 16)
         root.setSpacing(12)
         root.addWidget(PageHeader("原始图片", "缩放和查看录入时保存的不可变原图。"))
-        controls = QHBoxLayout()
+        toolbar = QFrame()
+        toolbar.setObjectName("DialogToolbar")
+        controls = QHBoxLayout(toolbar)
+        controls.setContentsMargins(12, 8, 12, 8)
+        controls.setSpacing(8)
         zoom_out = default_button("缩小")
         zoom_out.clicked.connect(lambda: self._zoom(0.8))
         reset = default_button("重置缩放")
@@ -56,11 +62,13 @@ class ImageViewerDialog(QDialog):
             source_hint.setObjectName("MutedLabel")
             controls.addWidget(source_hint)
         controls.addStretch(1)
-        root.addLayout(controls)
+        root.addWidget(toolbar)
 
         self.image = QLabel()
+        self.image.setObjectName("SourceImage")
         self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("ImageViewerCanvas")
         self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll.setWidget(self.image)
         self.scroll.setWidgetResizable(False)

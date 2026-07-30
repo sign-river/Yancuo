@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QAction
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+from PySide6.QtCore import QModelIndex, QSize, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -12,10 +16,61 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
+
+from yancuo_win.ui.icons import bind_icon, symbolic_icon
+
+
+@contextmanager
+def deferred_view_updates(view: QAbstractItemView) -> Iterator[None]:
+    """Avoid repainting an item view for every row during a bulk refresh."""
+
+    updates_were_enabled = view.updatesEnabled()
+    view.setUpdatesEnabled(False)
+    try:
+        yield
+    finally:
+        view.setUpdatesEnabled(updates_were_enabled)
+        if updates_were_enabled:
+            view.viewport().update()
+
+
+def set_tab_order_chain(*widgets: QWidget) -> None:
+    """Declare a predictable keyboard focus path for a group of controls."""
+
+    focusable = [widget for widget in widgets if widget is not None]
+    for current, following in zip(focusable, focusable[1:]):
+        if current.window() is following.window():
+            QWidget.setTabOrder(current, following)
+            continue
+
+        def apply_when_attached(
+            first: QWidget = current,
+            second: QWidget = following,
+        ) -> None:
+            if first.window() is second.window():
+                QWidget.setTabOrder(first, second)
+
+        QTimer.singleShot(0, apply_when_attached)
+
+
+def describe_field(
+    widget: QWidget,
+    name: str,
+    description: str | None = None,
+) -> QWidget:
+    """Attach a concise screen-reader label to a form control."""
+
+    widget.setAccessibleName(name)
+    if description:
+        widget.setAccessibleDescription(description)
+    return widget
 
 
 def primary_button(text: str, parent: QWidget | None = None) -> QPushButton:
@@ -42,18 +97,105 @@ def default_button(text: str, parent: QWidget | None = None) -> QPushButton:
     return QPushButton(text, parent)
 
 
-class IconButton(QPushButton):
-    """Small accessible icon action backed by Qt's coherent standard icon set."""
+class SoftItemDelegate(QStyledItemDelegate):
+    """Paint restrained, inset hover and selection surfaces for item views."""
 
     def __init__(
         self,
-        icon: QStyle.StandardPixmap,
+        parent: QWidget | None = None,
+        *,
+        radius: float = 9.0,
+        horizontal_margin: int = 4,
+        vertical_margin: int = 2,
+        minimum_height: int = 0,
+    ) -> None:
+        super().__init__(parent)
+        self.radius = radius
+        self.horizontal_margin = horizontal_margin
+        self.vertical_margin = vertical_margin
+        self.minimum_height = minimum_height
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> None:
+        styled = QStyleOptionViewItem(option)
+        self.initStyleOption(styled, index)
+        selected = bool(styled.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(styled.state & QStyle.StateFlag.State_MouseOver)
+        focused = bool(styled.state & QStyle.StateFlag.State_HasFocus)
+        styled.state &= ~(
+            QStyle.StateFlag.State_Selected
+            | QStyle.StateFlag.State_MouseOver
+            | QStyle.StateFlag.State_HasFocus
+        )
+
+        if selected or hovered:
+            from yancuo_win.ui.theme import current_theme_name, theme_tokens
+
+            tokens = theme_tokens(current_theme_name())
+            rect = option.rect.adjusted(
+                self.horizontal_margin,
+                self.vertical_margin,
+                -self.horizontal_margin,
+                -self.vertical_margin,
+            )
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(
+                QColor(tokens.list_selected if selected else tokens.list_hover)
+            )
+            painter.drawRoundedRect(rect, self.radius, self.radius)
+            painter.restore()
+
+        super().paint(painter, styled, index)
+
+        if focused:
+            from yancuo_win.ui.theme import current_theme_name, theme_tokens
+
+            tokens = theme_tokens(current_theme_name())
+            focus_rect = option.rect.adjusted(
+                self.horizontal_margin,
+                self.vertical_margin,
+                -self.horizontal_margin,
+                -self.vertical_margin,
+            )
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(tokens.focus_ring), 1))
+            painter.drawRoundedRect(focus_rect, self.radius, self.radius)
+            painter.restore()
+
+    def sizeHint(
+        self,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> QSize:
+        size = super().sizeHint(option, index)
+        if self.minimum_height:
+            size.setHeight(max(size.height(), self.minimum_height))
+        return size
+
+
+class IconButton(QPushButton):
+    """Small accessible icon action backed by the shared SVG icon service."""
+
+    def __init__(
+        self,
+        icon: str | QStyle.StandardPixmap,
         tooltip: str,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("IconButton")
-        self.setIcon(self.style().standardIcon(icon))
+        if isinstance(icon, str):
+            bind_icon(self, icon)
+        else:
+            self.setIcon(self.style().standardIcon(icon))
         self.setToolTip(tooltip)
         self.setAccessibleName(tooltip)
         self.setFixedSize(32, 32)
@@ -72,11 +214,7 @@ class SearchInput(QLineEdit):
         self.setPlaceholderText(placeholder)
         self.setClearButtonEnabled(True)
         self.setAccessibleName(placeholder)
-        search_action = QAction(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView),
-            "搜索",
-            self,
-        )
+        search_action = QAction(symbolic_icon("search"), "搜索", self)
         search_action.setEnabled(False)
         self.addAction(search_action, QLineEdit.ActionPosition.LeadingPosition)
 
@@ -161,6 +299,7 @@ class ToastMessage(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("ToastMessage")
+        self.setAccessibleName("操作反馈")
         self.setVisible(False)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
@@ -176,6 +315,7 @@ class ToastMessage(QFrame):
         if parent is None:
             return
         self.label.setText(message)
+        self.setAccessibleDescription(message)
         self.adjustSize()
         x = max(12, (parent.width() - self.width()) // 2)
         self.move(x, 68)
@@ -332,6 +472,118 @@ class EmptyState(QWidget):
         body.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(heading)
         layout.addWidget(body)
+
+
+class ReadingCanvas(QFrame):
+    """Centered, width-limited sheet for long-form reading content."""
+
+    def __init__(
+        self,
+        content: QWidget | None = None,
+        parent: QWidget | None = None,
+        *,
+        maximum_width: int = 920,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("ReadingCanvas")
+        self.maximum_content_width = maximum_width
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.sheet = QFrame(self)
+        self.sheet.setObjectName("ReadingCanvasSheet")
+        self.sheet.setMinimumWidth(0)
+        self.sheet.setMaximumWidth(maximum_width)
+        self._content_layout = QVBoxLayout(self.sheet)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+        self.content: QWidget | None = None
+        if content is not None:
+            self.set_content(content)
+
+    def set_content(self, content: QWidget) -> None:
+        if self.content is not None:
+            self._content_layout.removeWidget(self.content)
+        self.content = content
+        self._content_layout.addWidget(content)
+        self._layout_sheet()
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        self._layout_sheet()
+
+    def _layout_sheet(self) -> None:
+        inset = 12
+        available_width = max(0, self.width() - inset * 2)
+        sheet_width = min(self.maximum_content_width, available_width)
+        x = max(inset, (self.width() - sheet_width) // 2)
+        self.sheet.setGeometry(
+            x,
+            inset,
+            sheet_width,
+            max(0, self.height() - inset * 2),
+        )
+
+
+class WorkflowStepBar(QFrame):
+    """Compact progress context for a short, linear desktop workflow."""
+
+    def __init__(
+        self,
+        steps: tuple[str, ...],
+        current_step: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("WorkflowStepBar")
+        self.steps = steps
+        self.labels: list[QLabel] = []
+        self.connectors: list[QFrame] = []
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(8)
+        for index, text in enumerate(steps):
+            label = QLabel(f"{index + 1}  {text}")
+            label.setObjectName("WorkflowStep")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setAccessibleName(f"步骤 {index + 1}：{text}")
+            layout.addWidget(label)
+            self.labels.append(label)
+            if index < len(steps) - 1:
+                connector = QFrame()
+                connector.setObjectName("WorkflowStepConnector")
+                connector.setFixedHeight(1)
+                connector.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Fixed,
+                )
+                layout.addWidget(connector, stretch=1)
+                self.connectors.append(connector)
+        self.set_current_step(current_step)
+
+    def set_current_step(self, current_step: int) -> None:
+        if not 0 <= current_step < len(self.steps):
+            raise ValueError(f"invalid workflow step: {current_step}")
+        self.current_step = current_step
+        for index, label in enumerate(self.labels):
+            state = (
+                "completed"
+                if index < current_step
+                else "current"
+                if index == current_step
+                else "upcoming"
+            )
+            label.setProperty("state", state)
+            label.style().unpolish(label)
+            label.style().polish(label)
+        for index, connector in enumerate(self.connectors):
+            connector.setProperty(
+                "state",
+                "completed" if index < current_step else "upcoming",
+            )
+            connector.style().unpolish(connector)
+            connector.style().polish(connector)
 
 
 class CardFrame(QFrame):

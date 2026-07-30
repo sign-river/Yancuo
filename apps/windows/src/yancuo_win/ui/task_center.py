@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -15,12 +17,19 @@ from PySide6.QtWidgets import (
 
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.tasks.worker import AIJobWorker
-from yancuo_win.ui.widgets import PageHeader, danger_button, default_button, primary_button
+from yancuo_win.ui.widgets import (
+    PageHeader,
+    SoftItemDelegate,
+    danger_button,
+    default_button,
+    primary_button,
+)
 
 
 class TaskCenterDialog(QDialog):
     def __init__(self, ai: AIService, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("TaskCenterDialog")
         self.ai = ai
         self._worker: AIJobWorker | None = None
         self.setWindowTitle("AI 任务中心")
@@ -32,11 +41,27 @@ class TaskCenterDialog(QDialog):
         layout.addWidget(PageHeader("AI 任务中心", "查看后台识别任务、进度和当日估算费用。"))
         self.summary = QLabel("")
         self.summary.setObjectName("MutedLabel")
-        layout.addWidget(self.summary)
+        summary_surface = QFrame()
+        summary_surface.setObjectName("DialogSummarySurface")
+        summary_layout = QVBoxLayout(summary_surface)
+        summary_layout.setContentsMargins(16, 12, 16, 12)
+        summary_layout.addWidget(self.summary)
+        layout.addWidget(summary_surface)
         self.list = QListWidget()
-        layout.addWidget(self.list)
+        self.list.setObjectName("DialogItemList")
+        self.list.setAccessibleName("AI 后台任务")
+        self.list.setUniformItemSizes(True)
+        self.list.setMouseTracking(True)
+        self.list.setItemDelegate(
+            SoftItemDelegate(self.list, minimum_height=40)
+        )
+        layout.addWidget(self.list, stretch=1)
 
-        row = QHBoxLayout()
+        actions = QFrame()
+        actions.setObjectName("DialogActionBar")
+        row = QHBoxLayout(actions)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(8)
         refresh = default_button("刷新")
         refresh.clicked.connect(self.refresh)
         run_btn = primary_button("运行选中任务")
@@ -46,11 +71,14 @@ class TaskCenterDialog(QDialog):
         row.addWidget(refresh)
         row.addWidget(run_btn)
         row.addWidget(cancel_btn)
-        layout.addLayout(row)
+        row.addStretch(1)
+        layout.addWidget(actions)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
-        buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
+        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+        close_button.setText("关闭")
+        close_button.clicked.connect(self.accept)
         layout.addWidget(buttons)
         self.refresh()
 
@@ -69,6 +97,10 @@ class TaskCenterDialog(QDialog):
             item = QListWidgetItem(text)
             item.setData(256, job.id)  # Qt.UserRole
             self.list.addItem(item)
+        if not self.list.count():
+            empty = QListWidgetItem("暂无后台任务")
+            empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self.list.addItem(empty)
 
     def _run_selected(self) -> None:
         items = self.list.selectedItems()

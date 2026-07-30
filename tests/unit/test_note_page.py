@@ -23,6 +23,7 @@ from yancuo_win.application.note_intake_service import (
 from yancuo_win.application.note_service import NoteService
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.ui.note_page import NotePage
+from yancuo_win.ui.widgets import ReadingCanvas, SoftItemDelegate
 
 
 class _ReaderStub(QWidget):
@@ -77,12 +78,54 @@ def test_note_library_uses_space_list_detail_hierarchy(note_page: NotePage) -> N
     note_page.reload(select_note_id=first.id)
 
     assert note_page.workspace.count() == 3
+    assert note_page.workspace.handleWidth() == 10
+    assert note_page.workspace.contentsMargins().left() == 8
+    assert isinstance(note_page.collection_list.itemDelegate(), SoftItemDelegate)
+    assert isinstance(note_page.note_list.itemDelegate(), SoftItemDelegate)
     assert note_page.collection_list.item(0).text() == "全部笔记"
     assert note_page.collection_list.item(1).text() == "未归入合集"
     assert note_page.note_count_label.text() == "2 篇"
     assert note_page.mode_stack.currentIndex() == 1
     assert note_page.read_button.isHidden()
     assert not note_page.edit_button.isHidden()
+    assert isinstance(note_page.reading_canvas, ReadingCanvas)
+    assert note_page.reading_canvas.content is note_page.reader
+    assert note_page.reading_canvas.maximum_content_width == 920
+    assert note_page.more_button.text() == "更多"
+    assert not note_page.more_button.icon().isNull()
+    assert note_page.collection_list.uniformItemSizes()
+    assert note_page.note_list.uniformItemSizes()
+    assert note_page.collection_list.accessibleName() == "笔记合集"
+    assert note_page.note_list.accessibleName() == "笔记列表"
+
+
+def test_empty_note_filter_explains_the_next_action(note_page: NotePage) -> None:
+    note_page.reload()
+
+    assert note_page.note_list.count() == 0
+    assert not note_page.note_list_hint.isHidden()
+    assert "暂无笔记" in note_page.note_list_hint.text()
+
+
+def test_narrow_note_layout_discloses_space_separately(note_page: NotePage) -> None:
+    app = QApplication.instance()
+    assert app is not None
+
+    note_page._set_narrow_layout(True)
+    app.processEvents()
+    assert note_page.space_pane.isHidden()
+    assert not note_page.note_library_pane.isHidden()
+    assert not note_page.detail_stack.isHidden()
+    assert not note_page.space_toggle_button.isHidden()
+
+    note_page._show_narrow_space()
+    app.processEvents()
+    assert not note_page.space_pane.isHidden()
+    assert note_page.note_library_pane.isHidden()
+    assert note_page.detail_stack.isHidden()
+
+    note_page._show_narrow_content()
+    assert note_page.space_pane.isHidden()
 
 
 def test_note_collection_navigation_filters_the_middle_list(note_page: NotePage) -> None:

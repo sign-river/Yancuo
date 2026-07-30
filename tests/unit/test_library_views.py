@@ -7,17 +7,21 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtGui import QPalette
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QWidget
 
 import yancuo_win.ui.intake_page as intake_page_module
 import yancuo_win.ui.note_page as note_page_module
 import yancuo_win.ui.problem_detail as problem_detail_module
 import yancuo_win.ui.review_page as review_page_module
+import yancuo_win.ui.settings_dialog as settings_dialog_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
+from yancuo_win.ui.widgets import SoftItemDelegate
 
 
 class _ReaderStub(QWidget):
@@ -124,6 +128,79 @@ def test_settings_page_consolidates_account_services_and_data(window: MainWindow
     assert window.settings_tabs.currentIndex() == 1
 
 
+def test_primary_navigation_and_large_views_are_keyboard_accessible(
+    window: MainWindow,
+) -> None:
+    assert window.main_nav.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    assert window.main_nav.accessibleName() == "主导航"
+    assert window.knowledge_tree.accessibleName() == "知识目录"
+    assert window.knowledge_tree.uniformRowHeights()
+    assert window.process_nav.uniformItemSizes()
+    assert window.problem_list.accessibleName() == "题目列表"
+
+    window.main_nav.setCurrentRow(0)
+    window.main_nav.setFocus()
+    QTest.keyClick(window.main_nav, Qt.Key.Key_Down)
+    assert window.main_nav.currentRow() == 1
+
+    window.search_edit.setText("不存在的题目")
+    window.refresh_problems()
+    assert window.problem_list.count() == 0
+    assert not window.library_list_hint.isHidden()
+    assert "暂无题目" in window.library_list_hint.text()
+
+
+def test_navigation_shortcuts_and_search_focus_are_discoverable(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    window.show()
+    app.processEvents()
+    shortcuts = {
+        shortcut.key().toString(): shortcut for shortcut in window.navigation_shortcuts
+    }
+    assert set(shortcuts) == {"Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+,"}
+    assert window.main_nav.item(1).toolTip() == "题库（Ctrl+2）"
+
+    QTest.keyClick(window, Qt.Key.Key_3, Qt.KeyboardModifier.ControlModifier)
+    app.processEvents()
+    assert window.stack.currentIndex() == 4
+    QTest.keyClick(window, Qt.Key.Key_K, Qt.KeyboardModifier.ControlModifier)
+    app.processEvents()
+    assert window.note_page.note_search_edit.hasFocus()
+
+    QTest.keyClick(window, Qt.Key.Key_2, Qt.KeyboardModifier.ControlModifier)
+    QTest.keyClick(window, Qt.Key.Key_K, Qt.KeyboardModifier.ControlModifier)
+    app.processEvents()
+    assert window.search_edit.hasFocus()
+
+
+def test_settings_success_uses_non_blocking_status_signal(
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages: list[str] = []
+    page = window.ai_settings_page
+    page.status_message.connect(messages.append)
+    monkeypatch.setattr(settings_dialog_module, "set_secret", lambda *_args: None)
+    monkeypatch.setattr(settings_dialog_module, "get_secret", lambda *_args: "secret")
+
+    def fail_information(*_args, **_kwargs) -> None:
+        raise AssertionError("低风险成功反馈不应打开阻塞式信息框")
+
+    monkeypatch.setattr(
+        settings_dialog_module.QMessageBox,
+        "information",
+        fail_information,
+    )
+    page.ai_token_edit.setText("test-token")
+    page._save_ai_token()
+
+    assert messages == ["AI 密钥已保存到系统凭据"]
+    assert page.ai_token_edit.text() == ""
+
+
 def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
     window: MainWindow,
 ) -> None:
@@ -137,7 +214,28 @@ def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
     assert window.sidebar.isHidden()
     assert not window.library_navigation_panel.isHidden()
 
+    window._toggle_sidebar()
+    app.processEvents()
+    assert not window.sidebar.isHidden()
+    assert window.sidebar_rail.isHidden()
+
+    notes_item = window.main_nav.item(2)
+    window._on_main_nav_clicked(notes_item)
+    app.processEvents()
+    assert window.sidebar.isHidden()
+    assert not window.sidebar_rail.isHidden()
+
     builder = window.review_page.plan_builder_page
+    assert builder.workspace.handleWidth() == 10
+    assert builder.workspace.contentsMargins().left() == 8
+    assert builder.browse_workspace.handleWidth() == 10
+    assert isinstance(builder.folder_tree.itemDelegate(), SoftItemDelegate)
+    assert isinstance(builder.source_list.itemDelegate(), SoftItemDelegate)
+    assert isinstance(builder.queue_list.itemDelegate(), SoftItemDelegate)
+    assert builder.folder_tree.uniformRowHeights()
+    assert builder.source_list.uniformItemSizes()
+    assert builder.queue_list.uniformItemSizes()
+    assert isinstance(builder.queue_pane, QFrame)
     builder._set_narrow_layout(True)
     app.processEvents()
     assert not builder.draft_toggle.isHidden()
@@ -156,6 +254,19 @@ def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
     app.processEvents()
     assert not window.sidebar.isHidden()
     assert not window.library_navigation_panel.isHidden()
+
+
+def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
+    window: MainWindow,
+) -> None:
+    page = window.intake_page
+
+    assert page.ai_upload_steps.current_step == 0
+    assert page.ai_processing_steps_bar.current_step == 1
+    assert page.ai_confirmation_steps.current_step == 2
+    assert page.ai_confirmation_surface.objectName() == "IntakeConfirmationSurface"
+    assert page.ai_confirmation_action_bar.objectName() == "IntakeActionBar"
+    assert isinstance(page.ai_file_list.itemDelegate(), SoftItemDelegate)
 
 
 def _select_mode(window: MainWindow, mode: str) -> None:
@@ -229,6 +340,59 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
     window._set_library_view("process")
     assert window._nav_mode == "archived"
     assert _problem_titles(window) == ["归档题"]
+
+
+def test_library_uses_soft_workspace_components(window: MainWindow) -> None:
+    assert window.library_splitter.handleWidth() == 10
+    assert isinstance(window.knowledge_tree.itemDelegate(), SoftItemDelegate)
+    assert isinstance(window.process_nav.itemDelegate(), SoftItemDelegate)
+    assert isinstance(window.problem_list.itemDelegate(), SoftItemDelegate)
+    assert window.library_navigation_panel.metaObject().className() == "QFrame"
+    assert window.library_splitter.widget(1).objectName() == "LibraryListPanel"
+    assert (
+        window.knowledge_tree.palette()
+        .color(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight)
+        .alpha()
+        == 0
+    )
+
+
+def test_large_library_only_materializes_rows_near_viewport(
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    problem_ids = [
+        window.services.create_problem(
+            title=f"虚拟化题目 {index:03d}",
+            question_markdown=f"题干 {index}",
+            status="active",
+        ).id
+        for index in range(80)
+    ]
+    problems = window.services.list_problems_by_ids(problem_ids)
+    monkeypatch.setattr(window, "_problems_for_current_view", lambda: problems)
+    window.show()
+    window._show_navigation_page(2)
+    window.refresh_problems(preserve_view=False)
+    app.processEvents()
+
+    initial_widgets = sum(
+        window.problem_list.itemWidget(window.problem_list.item(row)) is not None
+        for row in range(window.problem_list.count())
+    )
+    assert window.problem_list.count() == 80
+    assert 0 < initial_widgets < 40
+    assert window.problem_list.itemWidget(window.problem_list.item(0)) is not None
+    assert window.problem_list.itemWidget(window.problem_list.item(79)) is None
+
+    window.problem_list.scrollToBottom()
+    app.processEvents()
+    window._materialize_visible_problem_widgets()
+
+    assert window.problem_list.itemWidget(window.problem_list.item(79)) is not None
+    assert window.problem_list.itemWidget(window.problem_list.item(0)) is None
 
 
 def test_question_preview_expands_inline_and_remains_single(window: MainWindow) -> None:

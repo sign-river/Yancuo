@@ -33,7 +33,18 @@ from yancuo_win.domain.review_rules import REVIEW_GRADES
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.review_plan_builder import ReviewPlanBuilder
-from yancuo_win.ui.widgets import CardFrame, PageHeader, ghost_button, primary_button
+from yancuo_win.ui.widgets import (
+    CardFrame,
+    IconButton,
+    PageHeader,
+    ReadingCanvas,
+    SoftItemDelegate,
+    describe_field,
+    deferred_view_updates,
+    ghost_button,
+    primary_button,
+    set_tab_order_chain,
+)
 
 
 class ReviewPage(QWidget):
@@ -94,7 +105,7 @@ class ReviewPage(QWidget):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
         header = PageHeader(title_text)
-        back = ghost_button("返回复习")
+        back = IconButton("chevron-left", "返回复习")
         back.clicked.connect(self.show_home)
         header.add_leading(back)
         layout.addWidget(header)
@@ -112,6 +123,7 @@ class ReviewPage(QWidget):
         action_grid.setHorizontalSpacing(14)
         action_grid.setVerticalSpacing(14)
         select = CardFrame()
+        select.setObjectName("ReviewActionCard")
         select.add_title("选择并开始复习")
         select.add_hint("选择已有的题目或笔记复习计划，开始本轮复习。")
         button = primary_button("选择复习计划")
@@ -120,6 +132,7 @@ class ReviewPage(QWidget):
         select.setMinimumHeight(178)
         action_grid.addWidget(select, 0, 0)
         create = CardFrame()
+        create.setObjectName("ReviewActionCard")
         create.add_title("制定复习计划")
         create.add_hint("从题库或笔记库选择资料，编辑等待队列并命名创建计划。")
         button = QPushButton("制定计划")
@@ -142,7 +155,7 @@ class ReviewPage(QWidget):
         header = PageHeader("复习会话")
         self.progress_label = header.description
         self.progress_label.setVisible(True)
-        back = ghost_button("返回复习")
+        back = IconButton("chevron-left", "返回复习")
         back.clicked.connect(self.show_home)
         self.detail_button = QPushButton("打开题目详情")
         self.detail_button.clicked.connect(self._open_current_detail)
@@ -151,11 +164,12 @@ class ReviewPage(QWidget):
         root.addWidget(header)
 
         self.hero = QLabel("今日待复习")
-        self.hero.setObjectName("HeroBanner")
+        self.hero.setObjectName("ReviewSessionOverview")
         root.addWidget(self.hero)
 
         self.reader = MathContentView()
-        root.addWidget(self.reader, stretch=1)
+        self.session_canvas = ReadingCanvas(self.reader, maximum_width=960)
+        root.addWidget(self.session_canvas, stretch=1)
 
         self.note_complete_button = primary_button("标记已阅读并继续")
         self.note_complete_button.clicked.connect(self._complete_note)
@@ -166,6 +180,7 @@ class ReviewPage(QWidget):
         root.addWidget(self.session_finish_button)
 
         self.grade_card = CardFrame()
+        self.grade_card.setObjectName("ReviewGradeSurface")
         self.grade_card.add_title("完成思考后评分")
         self.grade_hint = self.grade_card.add_hint(
             "请先独立思考，再点击“显示答案与解析”；查看答案后才可评分。"
@@ -223,26 +238,29 @@ class ReviewPage(QWidget):
         )
 
         self.review_overview = QLabel()
-        self.review_overview.setObjectName("HeroBanner")
+        self.review_overview.setObjectName("ReviewOverview")
         root.addWidget(self.review_overview)
 
         plans = CardFrame()
+        plans.setObjectName("ReviewPlanSurface")
         self.plan_select_card = plans
         plans.add_title("选择复习计划")
         plans.add_hint("必须选择一个题目或笔记复习计划后，才能开始本轮复习。")
         self.plan_combo = QComboBox()
+        describe_field(self.plan_combo, "复习计划")
         plans.body.addWidget(self.plan_combo)
         refresh_plans = ghost_button("刷新计划")
         refresh_plans.clicked.connect(self.show_home)
-        start_selected = primary_button("开始所选计划")
-        start_selected.clicked.connect(self.start_session)
-        plans.body.addLayout(self._actions(refresh_plans, start_selected))
+        self.start_selected_button = primary_button("开始所选计划")
+        self.start_selected_button.clicked.connect(self.start_session)
+        plans.body.addLayout(self._actions(refresh_plans, self.start_selected_button))
 
         queue_card = CardFrame()
         self.plan_builder_card = queue_card
         queue_card.add_title("制定复习计划")
         queue_card.add_hint("先将同一类型的资料加入等待队列，再命名创建复习计划。")
         self.queue_type = QComboBox()
+        describe_field(self.queue_type, "复习资料类型")
         self.queue_type.addItem("题目复习", "problem")
         self.queue_type.addItem("笔记复习", "note")
         self.queue_type.currentIndexChanged.connect(self._refresh_plan_builder)
@@ -253,6 +271,19 @@ class ReviewPage(QWidget):
         source_layout.setContentsMargins(0, 0, 0, 0)
         source_layout.addWidget(QLabel("可加入的资料"))
         self.source_list = QListWidget()
+        self.source_list.setObjectName("ReviewSourceList")
+        self.source_list.setAccessibleName("可加入复习计划的资料")
+        self.source_list.setUniformItemSizes(True)
+        self.source_list.setMouseTracking(True)
+        self.source_list.setItemDelegate(
+            SoftItemDelegate(
+                self.source_list,
+                radius=9,
+                horizontal_margin=3,
+                vertical_margin=2,
+                minimum_height=38,
+            )
+        )
         self.source_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.source_list.setMinimumHeight(260)
         source_layout.addWidget(self.source_list)
@@ -264,6 +295,19 @@ class ReviewPage(QWidget):
         waiting_layout.setContentsMargins(0, 0, 0, 0)
         waiting_layout.addWidget(QLabel("等待队列"))
         self.waiting_list = QListWidget()
+        self.waiting_list.setObjectName("ReviewWaitingList")
+        self.waiting_list.setAccessibleName("复习计划等待队列")
+        self.waiting_list.setUniformItemSizes(True)
+        self.waiting_list.setMouseTracking(True)
+        self.waiting_list.setItemDelegate(
+            SoftItemDelegate(
+                self.waiting_list,
+                radius=9,
+                horizontal_margin=3,
+                vertical_margin=2,
+                minimum_height=38,
+            )
+        )
         self.waiting_list.setMinimumHeight(260)
         waiting_layout.addWidget(self.waiting_list)
         remove_selected = ghost_button("移除选中项")
@@ -277,11 +321,22 @@ class ReviewPage(QWidget):
         workspace.setStretchFactor(1, 1)
         queue_card.body.addWidget(workspace)
         self.plan_name_edit = QLineEdit()
+        describe_field(self.plan_name_edit, "复习计划名称")
         self.plan_name_edit.setPlaceholderText("复习计划名称")
         queue_card.body.addWidget(self.plan_name_edit)
-        create_plan = primary_button("创建复习计划")
-        create_plan.clicked.connect(self._create_plan)
-        queue_card.body.addLayout(self._actions(create_plan))
+        self.create_plan_button = primary_button("创建复习计划")
+        self.create_plan_button.clicked.connect(self._create_plan)
+        queue_card.body.addLayout(self._actions(self.create_plan_button))
+        set_tab_order_chain(
+            self.plan_combo,
+            self.start_selected_button,
+            self.queue_type,
+            self.source_list,
+            add_selected,
+            self.waiting_list,
+            self.plan_name_edit,
+            self.create_plan_button,
+        )
 
         plan = CardFrame()
         plan.add_title("本次复习")
@@ -326,28 +381,32 @@ class ReviewPage(QWidget):
 
     def _refresh_plan_builder(self) -> None:
         content_type = str(self.queue_type.currentData())
-        self.source_list.clear()
-        self.waiting_list.clear()
         labels: dict[str, str] = {}
-        if content_type == "problem":
-            sources = self.services.list_problems()
-            for problem in sources:
-                label = problem.title or "未命名题目"
-                labels[problem.id] = label
-                item = QListWidgetItem(label)
-                item.setData(Qt.ItemDataRole.UserRole, problem.id)
-                self.source_list.addItem(item)
-        elif self.notes is not None:
-            for note in self.notes.list_notes(status="active"):
-                label = note.title or "未命名笔记"
-                labels[note.id] = label
-                item = QListWidgetItem(label)
-                item.setData(Qt.ItemDataRole.UserRole, note.id)
-                self.source_list.addItem(item)
-        for source_id in self.services.list_review_waiting_ids(content_type):
-            item = QListWidgetItem(labels.get(source_id, "已移除的资料"))
-            item.setData(Qt.ItemDataRole.UserRole, source_id)
-            self.waiting_list.addItem(item)
+        with (
+            deferred_view_updates(self.source_list),
+            deferred_view_updates(self.waiting_list),
+        ):
+            self.source_list.clear()
+            self.waiting_list.clear()
+            if content_type == "problem":
+                sources = self.services.list_problems()
+                for problem in sources:
+                    label = problem.title or "未命名题目"
+                    labels[problem.id] = label
+                    item = QListWidgetItem(label)
+                    item.setData(Qt.ItemDataRole.UserRole, problem.id)
+                    self.source_list.addItem(item)
+            elif self.notes is not None:
+                for note in self.notes.list_notes(status="active"):
+                    label = note.title or "未命名笔记"
+                    labels[note.id] = label
+                    item = QListWidgetItem(label)
+                    item.setData(Qt.ItemDataRole.UserRole, note.id)
+                    self.source_list.addItem(item)
+            for source_id in self.services.list_review_waiting_ids(content_type):
+                item = QListWidgetItem(labels.get(source_id, "已移除的资料"))
+                item.setData(Qt.ItemDataRole.UserRole, source_id)
+                self.waiting_list.addItem(item)
 
     def _add_selected_to_waiting(self) -> None:
         ids = [item.data(Qt.ItemDataRole.UserRole) for item in self.source_list.selectedItems()]

@@ -7,8 +7,15 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QPoint, QTimer, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QFontMetrics
+from PySide6.QtCore import QPoint, QSize, QTimer, Qt, QUrl
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFontMetrics,
+    QKeySequence,
+    QPalette,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -28,7 +35,6 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStatusBar,
-    QStyle,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -61,6 +67,7 @@ from yancuo_win.import_export.workspace import WorkspaceService
 from yancuo_win.tasks.worker import AIJobWorker
 from yancuo_win.tasks.search_worker import AiSearchWorker
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
+from yancuo_win.ui.icons import bind_icon
 from yancuo_win.ui.intake_page import IntakePage
 from yancuo_win.ui.math_content import MathContentView, set_preview_zoom_scale
 from yancuo_win.ui.note_page import NotePage
@@ -75,11 +82,14 @@ from yancuo_win.ui.widgets import (
     IconButton,
     PageHeader,
     SearchInput,
+    SoftItemDelegate,
     ToastMessage,
     button_row,
     danger_button,
+    deferred_view_updates,
     ghost_button,
     primary_button,
+    set_tab_order_chain,
 )
 
 _PAGE_DASHBOARD = 0
@@ -152,9 +162,11 @@ class _InlineQuestionItem(QWidget):
         header.addWidget(title, 1)
         chevron = QPushButton()
         chevron.setObjectName("QuestionChevron")
-        chevron.setIcon(self.style().standardIcon(
-            QStyle.StandardPixmap.SP_ArrowUp if expanded else QStyle.StandardPixmap.SP_ArrowDown
-        ))
+        bind_icon(
+            chevron,
+            "chevron-up" if expanded else "chevron-down",
+            size=16,
+        )
         chevron.setToolTip("收起原题预览" if expanded else "展开原题预览")
         chevron.clicked.connect(on_toggle)
         header.addWidget(chevron)
@@ -255,6 +267,14 @@ class MainWindow(QMainWindow):
         self._ctx_buttons: list[QPushButton] = []
         self._detail_return_page = _PAGE_LIBRARY
         self._sidebar_collapsed = False
+        self._sidebar_narrow_open = False
+        self._problem_rows: dict[str, Problem] = {}
+        self._materialized_problem_rows: set[int] = set()
+        self._problem_widget_timer = QTimer(self)
+        self._problem_widget_timer.setSingleShot(True)
+        self._problem_widget_timer.timeout.connect(
+            self._materialize_visible_problem_widgets
+        )
 
         self.setWindowTitle("研错库")
         self.setMinimumSize(760, 560)
@@ -262,6 +282,7 @@ class MainWindow(QMainWindow):
         self._build_central()
         self._build_status()
         self.toast = ToastMessage(self)
+        self._build_shortcuts()
         self.refresh_all()
         self._update_context_bar(False)
         self._refresh_focus_pages()
@@ -288,14 +309,7 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        self.sidebar_toggle = QPushButton("◀")
-        self.sidebar_toggle.setObjectName("IconButton")
-        self.sidebar_toggle.setToolTip("收起导航栏")
-        self.sidebar_toggle.setAccessibleName("收起导航栏")
-        self.sidebar_toggle.setFixedSize(32, 32)
-        sidebar_arrow_font = self.sidebar_toggle.font()
-        sidebar_arrow_font.setPointSize(14)
-        self.sidebar_toggle.setFont(sidebar_arrow_font)
+        self.sidebar_toggle = IconButton("chevron-left", "收起导航栏")
         self.sidebar_toggle.clicked.connect(self._toggle_sidebar)
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -309,12 +323,7 @@ class MainWindow(QMainWindow):
         self.sidebar_rail.setFixedWidth(40)
         rail_layout = QVBoxLayout(self.sidebar_rail)
         rail_layout.setContentsMargins(4, 16, 4, 0)
-        self.sidebar_expand_button = QPushButton("▶")
-        self.sidebar_expand_button.setObjectName("IconButton")
-        self.sidebar_expand_button.setToolTip("展开导航栏")
-        self.sidebar_expand_button.setAccessibleName("展开导航栏")
-        self.sidebar_expand_button.setFixedSize(32, 32)
-        self.sidebar_expand_button.setFont(sidebar_arrow_font)
+        self.sidebar_expand_button = IconButton("chevron-right", "展开导航栏")
         self.sidebar_expand_button.clicked.connect(self._toggle_sidebar)
         rail_layout.addWidget(self.sidebar_expand_button)
         rail_layout.addStretch(1)
@@ -374,16 +383,25 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
         self._apply_sidebar_visibility()
+        if hasattr(self, "_problem_widget_timer"):
+            self._queue_problem_widget_materialization()
 
     def _toggle_sidebar(self) -> None:
-        self._sidebar_collapsed = not self._sidebar_collapsed
+        if self.width() < 900:
+            self._sidebar_narrow_open = not self._sidebar_narrow_open
+        else:
+            self._sidebar_collapsed = not self._sidebar_collapsed
         self._apply_sidebar_visibility()
 
     def _apply_sidebar_visibility(self) -> None:
         if not hasattr(self, "sidebar"):
             return
         auto_hidden = self.width() < 900
-        visible = not auto_hidden and not self._sidebar_collapsed
+        if auto_hidden:
+            visible = self._sidebar_narrow_open
+        else:
+            self._sidebar_narrow_open = False
+            visible = not self._sidebar_collapsed
         self.sidebar.setVisible(visible)
         self.sidebar_rail.setVisible(not visible)
         self.sidebar_toggle.setToolTip("收起导航栏")
@@ -422,19 +440,23 @@ class MainWindow(QMainWindow):
 
         self.main_nav = QListWidget()
         self.main_nav.setObjectName("MainNav")
-        self.main_nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        for label, page in (
-            ("工作台", _PAGE_DASHBOARD),
-            ("题库", _PAGE_LIBRARY),
-            ("笔记", _PAGE_NOTES),
-            ("复习", _PAGE_REVIEW),
-            ("设置", _PAGE_SETTINGS),
+        self.main_nav.setAccessibleName("主导航")
+        self.main_nav.setAccessibleDescription("使用上下方向键切换工作台、题库、笔记、复习和设置")
+        self.main_nav.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for label, page, shortcut in (
+            ("工作台", _PAGE_DASHBOARD, "Ctrl+1"),
+            ("题库", _PAGE_LIBRARY, "Ctrl+2"),
+            ("笔记", _PAGE_NOTES, "Ctrl+3"),
+            ("复习", _PAGE_REVIEW, "Ctrl+4"),
+            ("设置", _PAGE_SETTINGS, "Ctrl+,"),
         ):
             item = QListWidgetItem(label)
+            item.setToolTip(f"{label}（{shortcut}）")
             item.setData(Qt.ItemDataRole.UserRole, page)
             self.main_nav.addItem(item)
         self.main_nav.currentRowChanged.connect(self._on_main_nav)
         self.main_nav.itemClicked.connect(self._on_main_nav_clicked)
+        self.main_nav.itemActivated.connect(self._on_main_nav_clicked)
         lay.addWidget(self.main_nav, stretch=1)
 
         stats = QLabel()
@@ -469,6 +491,9 @@ class MainWindow(QMainWindow):
         page = int(item.data(Qt.ItemDataRole.UserRole))
         if self.stack.currentIndex() != page:
             self._on_main_nav(self.main_nav.row(item))
+        if self.width() < 900:
+            self._sidebar_narrow_open = False
+            self._apply_sidebar_visibility()
 
     def _show_navigation_page(self, page: int) -> None:
         """Select a visible navigation item by its page value."""
@@ -489,6 +514,41 @@ class MainWindow(QMainWindow):
 
     def _show_toast(self, message: str) -> None:
         self.toast.show_message(message)
+
+    def _show_status_toast(self, message: str) -> None:
+        self.statusBar().showMessage(message, 3500)
+        self._show_toast(message)
+
+    def _build_shortcuts(self) -> None:
+        shortcuts = (
+            ("打开工作台", "Ctrl+1", _PAGE_DASHBOARD),
+            ("打开题库", "Ctrl+2", _PAGE_LIBRARY),
+            ("打开笔记", "Ctrl+3", _PAGE_NOTES),
+            ("打开复习", "Ctrl+4", _PAGE_REVIEW),
+            ("打开设置", "Ctrl+,", _PAGE_SETTINGS),
+        )
+        self.navigation_shortcuts: list[QShortcut] = []
+        for label, sequence, page in shortcuts:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setObjectName(label)
+            shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            shortcut.activated.connect(
+                lambda target=page: self._show_navigation_page(target)
+            )
+            self.navigation_shortcuts.append(shortcut)
+        self.focus_search_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        self.focus_search_shortcut.setObjectName("聚焦当前搜索")
+        self.focus_search_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.focus_search_shortcut.activated.connect(self._focus_current_search)
+
+    def _focus_current_search(self) -> None:
+        current = self.stack.currentIndex()
+        if current == _PAGE_LIBRARY:
+            self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        elif current == _PAGE_NOTES:
+            self.note_page.note_search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        else:
+            self._show_status_toast("当前页面没有可聚焦的搜索框")
 
     # —— 工作台 ——
 
@@ -589,7 +649,7 @@ class MainWindow(QMainWindow):
         btn_import.clicked.connect(self._show_ai_intake)
         btn_new = QPushButton("手动录题")
         btn_new.clicked.connect(self._show_manual_intake)
-        btn_more = IconButton(QStyle.StandardPixmap.SP_TitleBarMenuButton, "更多题库操作")
+        btn_more = IconButton("more-horizontal", "更多题库操作")
         btn_more.clicked.connect(self._library_more_menu)
         header = PageHeader("题库", "浏览知识目录、整理题目并进入复习计划。")
         header.add_action(btn_new)
@@ -619,6 +679,7 @@ class MainWindow(QMainWindow):
             button.clicked.connect(self._on_search_mode_changed)
 
         self.search_scope_combo = QComboBox()
+        self.search_scope_combo.setAccessibleName("题库搜索范围")
         self.search_scope_combo.setObjectName("SearchScopeCombo")
         self.search_scope_combo.addItem("当前范围", "current")
         self.search_scope_combo.addItem("全部正式题目", "all_active")
@@ -629,6 +690,8 @@ class MainWindow(QMainWindow):
         search_row.addWidget(self.search_scope_combo)
 
         self.search_edit = SearchInput("搜索题目、答案、解析、标签、备注或来源")
+        self.search_edit.setAccessibleName("搜索题库")
+        self.search_edit.setAccessibleDescription("输入关键词后按回车搜索题目")
         self.search_edit.returnPressed.connect(self._submit_library_search)
         self.search_edit.textEdited.connect(self._on_search_text_edited)
         search_row.addWidget(self.search_edit, stretch=1)
@@ -682,6 +745,8 @@ class MainWindow(QMainWindow):
         self.library_nav_stack = QStackedWidget()
         self.knowledge_tree = QTreeWidget()
         self.knowledge_tree.setObjectName("KnowledgeTree")
+        self.knowledge_tree.setAccessibleName("知识目录")
+        self.knowledge_tree.setUniformRowHeights(True)
         self.knowledge_tree.setHeaderHidden(True)
         self.knowledge_tree.setIndentation(16)
         self.knowledge_tree.setContextMenuPolicy(
@@ -704,7 +769,8 @@ class MainWindow(QMainWindow):
         self.new_subject_button.clicked.connect(self._new_subject)
         self.new_tag_button = ghost_button("新建标签")
         self.new_tag_button.clicked.connect(self._new_tag)
-        self.catalog_menu_button = ghost_button("目录操作 ▾")
+        self.catalog_menu_button = ghost_button("目录操作")
+        bind_icon(self.catalog_menu_button, "chevron-down", size=16)
         self.catalog_menu_button.clicked.connect(self._show_catalog_menu)
         filter_btns.addWidget(self.new_subject_button)
         filter_btns.addWidget(self.new_tag_button)
@@ -794,7 +860,8 @@ class MainWindow(QMainWindow):
         manual.clicked.connect(self._show_manual_intake)
         ai_intake = primary_button("AI \u56fe\u7247\u5f55\u9898")
         ai_intake.clicked.connect(self._show_ai_intake)
-        imports = QPushButton("\u66f4\u591a \u25be")
+        imports = QPushButton("\u66f4\u591a")
+        bind_icon(imports, "more-horizontal")
         imports.setToolTip("\u5bfc\u5165\u3001\u5bfc\u51fa\u548c\u6279\u91cf\u9898\u5e93\u64cd\u4f5c")
         imports.clicked.connect(self._library_more_menu)
         for button in (ai_intake, manual, imports):
@@ -832,6 +899,8 @@ class MainWindow(QMainWindow):
         self.search_scope_combo.currentIndexChanged.connect(self._on_search_scope_changed)
         search_row.addWidget(self.search_scope_combo)
         self.search_edit = SearchInput("\u641c\u7d22\u9898\u76ee\u3001\u7b54\u6848\u3001\u89e3\u6790\u3001\u6807\u7b7e\u3001\u5907\u6ce8\u6216\u6765\u6e90")
+        self.search_edit.setAccessibleName("搜索题库")
+        self.search_edit.setAccessibleDescription("输入关键词后按回车搜索题目")
         self.search_edit.setFixedHeight(36)
         self.search_edit.returnPressed.connect(self._submit_library_search)
         self.search_edit.textEdited.connect(self._on_search_text_edited)
@@ -848,6 +917,14 @@ class MainWindow(QMainWindow):
             button.setFixedHeight(36)
             button.setMinimumWidth(button.sizeHint().width() + 8)
             search_row.addWidget(button)
+        set_tab_order_chain(
+            self.local_search_button,
+            self.ai_search_button,
+            self.search_scope_combo,
+            self.search_edit,
+            self.search_button,
+            self.clear_search_button,
+        )
         search_bar.setMinimumWidth(0)
         # Kept as a non-visual compatibility field for search-state updates.
         self.search_privacy_hint = QLabel("\u666e\u901a\u641c\u7d22\u5b8c\u5168\u79bb\u7ebf\uff0c\u53ea\u67e5\u8be2\u672c\u5730\u7d22\u5f15\uff1bAI \u641c\u7d22\u4e0d\u4f1a\u53d1\u9001\u9898\u76ee\u6b63\u6587\u3002")
@@ -855,32 +932,39 @@ class MainWindow(QMainWindow):
         self.library_view_hint = QLabel()
 
         tabs = QHBoxLayout()
-        tabs.setSpacing(12)
+        tabs.setSpacing(10)
         self.library_view_group = QButtonGroup(self)
         self.library_view_group.setExclusive(True)
+        view_switch = QFrame()
+        view_switch.setObjectName("LibraryViewSwitch")
+        view_switch.setFixedHeight(44)
+        view_switch_layout = QHBoxLayout(view_switch)
+        view_switch_layout.setContentsMargins(4, 4, 4, 4)
+        view_switch_layout.setSpacing(2)
         self.library_browse_button = QPushButton("\u6d4f\u89c8\u9898\u5e93")
         self.library_process_button = QPushButton("\u5904\u7406\u4e2d\u5fc3")
         for button, view in ((self.library_browse_button, "browse"), (self.library_process_button, "process")):
             button.setObjectName("LibraryViewButton")
             button.setCheckable(True)
-            button.setFixedHeight(36)
+            button.setFixedHeight(34)
             button.clicked.connect(lambda _checked=False, target=view: self._set_library_view(target))
             self.library_view_group.addButton(button)
-            tabs.addWidget(button)
+            view_switch_layout.addWidget(button)
         self.library_browse_button.setChecked(True)
+        tabs.addWidget(view_switch)
         tabs.addWidget(search_bar, 1)
         outer.addLayout(tabs)
 
         workspace = QFrame()
         workspace.setObjectName("LibraryWorkspace")
         workspace_layout = QVBoxLayout(workspace)
-        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setContentsMargins(8, 8, 8, 8)
         self.library_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.library_splitter.setObjectName("LibraryWorkspaceSplitter")
-        self.library_splitter.setHandleWidth(1)
+        self.library_splitter.setHandleWidth(10)
         workspace_layout.addWidget(self.library_splitter)
 
-        navigation = QWidget()
+        navigation = QFrame()
         navigation.setObjectName("LibraryNavigationPanel")
         nav_layout = QVBoxLayout(navigation)
         nav_layout.setContentsMargins(0, 0, 0, 0)
@@ -892,13 +976,49 @@ class MainWindow(QMainWindow):
         self.library_nav_stack = QStackedWidget()
         self.knowledge_tree = QTreeWidget()
         self.knowledge_tree.setObjectName("KnowledgeTree")
+        self.knowledge_tree.setAccessibleName("知识目录")
+        self.knowledge_tree.setAccessibleDescription("使用方向键展开科目和章节")
+        self.knowledge_tree.setUniformRowHeights(True)
         self.knowledge_tree.setHeaderHidden(True)
         self.knowledge_tree.setIndentation(16)
+        tree_palette = self.knowledge_tree.palette()
+        for color_group in (
+            QPalette.ColorGroup.Active,
+            QPalette.ColorGroup.Inactive,
+        ):
+            tree_palette.setColor(
+                color_group,
+                QPalette.ColorRole.Highlight,
+                QColor(0, 0, 0, 0),
+            )
+        self.knowledge_tree.setPalette(tree_palette)
+        self.knowledge_tree.setMouseTracking(True)
+        self.knowledge_tree.setItemDelegate(
+            SoftItemDelegate(
+                self.knowledge_tree,
+                radius=9,
+                horizontal_margin=4,
+                vertical_margin=2,
+                minimum_height=38,
+            )
+        )
         self.knowledge_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.knowledge_tree.customContextMenuRequested.connect(self._show_catalog_context_menu)
         self.knowledge_tree.currentItemChanged.connect(self._on_knowledge_nav_changed)
         self.process_nav = QListWidget()
         self.process_nav.setObjectName("FilterNav")
+        self.process_nav.setAccessibleName("题库处理视图")
+        self.process_nav.setUniformItemSizes(True)
+        self.process_nav.setMouseTracking(True)
+        self.process_nav.setItemDelegate(
+            SoftItemDelegate(
+                self.process_nav,
+                radius=9,
+                horizontal_margin=4,
+                vertical_margin=2,
+                minimum_height=38,
+            )
+        )
         self.process_nav.currentItemChanged.connect(self._on_process_nav_changed)
         self.library_nav_stack.addWidget(self.knowledge_tree)
         self.library_nav_stack.addWidget(self.process_nav)
@@ -911,7 +1031,8 @@ class MainWindow(QMainWindow):
         self.new_subject_button = QPushButton("\uff0b \u65b0\u5efa")
         self.new_subject_button.setToolTip("\u65b0\u5efa\u79d1\u76ee\u3001\u7ae0\u8282\u6216\u6807\u7b7e")
         self.new_subject_button.clicked.connect(self._show_catalog_create_menu)
-        self.new_tag_button = QPushButton("\u7ba1\u7406 \u25be")
+        self.new_tag_button = QPushButton("\u7ba1\u7406")
+        bind_icon(self.new_tag_button, "chevron-down", size=16)
         self.new_tag_button.setToolTip("\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u79d1\u76ee\u6216\u7ae0\u8282")
         self.new_tag_button.clicked.connect(self._show_catalog_menu)
         self.catalog_menu_button = self.new_tag_button
@@ -923,7 +1044,7 @@ class MainWindow(QMainWindow):
         self.library_navigation_panel = navigation
         self.library_splitter.addWidget(navigation)
 
-        center = QWidget()
+        center = QFrame()
         center.setObjectName("LibraryListPanel")
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -948,9 +1069,23 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(list_header)
         self.problem_list = QListWidget()
         self.problem_list.setObjectName("ProblemList")
+        self.problem_list.setAccessibleName("题目列表")
+        self.problem_list.setAccessibleDescription("使用方向键选择题目，按回车打开详情")
+        self.problem_list.setMouseTracking(True)
+        self.problem_list.setItemDelegate(
+            SoftItemDelegate(
+                self.problem_list,
+                radius=10,
+                horizontal_margin=4,
+                vertical_margin=3,
+            )
+        )
         self.problem_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.problem_list.itemSelectionChanged.connect(self._on_problem_selected)
-        self.problem_list.itemDoubleClicked.connect(self._open_selected_detail)
+        self.problem_list.itemActivated.connect(self._open_selected_detail)
+        self.problem_list.verticalScrollBar().valueChanged.connect(
+            self._queue_problem_widget_materialization
+        )
         center_layout.addWidget(self.problem_list, 1)
 
         self.question_action_bar = QFrame()
@@ -965,7 +1100,8 @@ class MainWindow(QMainWindow):
         self.question_edit_button.clicked.connect(self._edit_selected)
         self.question_review_button = QPushButton("加入复习计划")
         self.question_review_button.clicked.connect(self._schedule_review)
-        self.question_more_button = QPushButton("更多 ▾")
+        self.question_more_button = QPushButton("更多")
+        bind_icon(self.question_more_button, "more-horizontal")
         self.question_more_button.clicked.connect(
             lambda: self._show_question_more_menu(self.question_more_button)
         )
@@ -1120,8 +1256,10 @@ class MainWindow(QMainWindow):
         self.settings_tabs = QTabWidget()
         self.settings_tabs.addTab(self._build_account_page(), "账户与身份")
         self.ai_settings_page = ServiceSettingsPage(self.runtime, "ai")
+        self.ai_settings_page.status_message.connect(self._show_status_toast)
         self.settings_tabs.addTab(self.ai_settings_page, "AI 服务")
         self.appearance_settings_page = ServiceSettingsPage(self.runtime, "appearance")
+        self.appearance_settings_page.status_message.connect(self._show_status_toast)
         self.settings_tabs.addTab(self.appearance_settings_page, "外观")
         self.settings_tabs.addTab(self._build_data_page(), "本机与数据")
         self.cloud_settings_page = self._build_cloud_sync_page()
@@ -1146,6 +1284,7 @@ class MainWindow(QMainWindow):
         workspace.setColumnStretch(1, 1)
 
         pack = CardFrame()
+        pack.setProperty("surfaceRole", "data")
         pack.add_title("完整备份包")
         pack.add_hint("推荐使用 ebpack；zip 为旧版兼容。")
         p1 = primary_button("导出 ebpack")
@@ -1160,6 +1299,7 @@ class MainWindow(QMainWindow):
         workspace.addWidget(pack, 0, 0, 1, 2)
 
         share = CardFrame()
+        share.setProperty("surfaceRole", "data")
         share.add_title("分享与工作区")
         share.add_hint("分享包会脱敏；工作区用于外部编辑 Markdown。")
         s1 = QPushButton("导出分享包")
@@ -1175,6 +1315,7 @@ class MainWindow(QMainWindow):
         workspace.addWidget(share, 1, 0)
 
         path_card = CardFrame()
+        path_card.setProperty("surfaceRole", "data")
         path_card.add_title("本机存储")
         path_card.add_hint("本机资料默认离线保存；移动或清理前请先完成备份。")
         local_form = QGridLayout()
@@ -1194,6 +1335,7 @@ class MainWindow(QMainWindow):
         path_card.body.addLayout(button_row(open_data))
 
         search_card = CardFrame()
+        search_card.setProperty("surfaceRole", "data")
         search_card.add_title("本地搜索索引")
         self.search_index_summary = QLabel(self.search.check_consistency().summary)
         self.search_index_summary.setObjectName("MutedLabel")
@@ -1210,7 +1352,9 @@ class MainWindow(QMainWindow):
 
     def _build_cloud_sync_page(self) -> QWidget:
         page = ServiceSettingsPage(self.runtime, "cloud")
+        page.status_message.connect(self._show_status_toast)
         profiles = CardFrame()
+        profiles.setProperty("surfaceRole", "settings")
         profiles.add_title("云端资料")
         profiles.add_hint("查看、恢复或合并自己的远端资料；不会创建研错库在线账户。")
         self.account_remote_summary = QLabel("尚未检查云端资料")
@@ -1229,6 +1373,7 @@ class MainWindow(QMainWindow):
             button_row(inspect_profiles, restore_profile, preview_merge, merge_profile)
         )
         operations = CardFrame()
+        operations.setProperty("surfaceRole", "settings")
         operations.add_title("备份与同步操作")
         operations.add_hint("云备份创建完整快照；增量推拉不会逐题实时上传。")
         backup = primary_button("云备份")
@@ -1666,46 +1811,47 @@ class MainWindow(QMainWindow):
     def _refresh_knowledge_tree(self, current_mode: str) -> None:
         self._capture_knowledge_tree_state()
         self.knowledge_tree.blockSignals(True)
-        self.knowledge_tree.clear()
+        with deferred_view_updates(self.knowledge_tree):
+            self.knowledge_tree.clear()
 
-        for subject in self.services.list_subjects():
-            subject_problems = self.services.list_problems(
-                ProblemFilter(status="active", subject_id=subject.id)
-            )
-            subject_item = QTreeWidgetItem(
-                [f"{subject.name} · {len(subject_problems)}"]
-            )
-            subject_mode = f"subject:{subject.id}"
-            self._set_tree_item_data(
-                subject_item,
-                mode=subject_mode,
-                path=f"题库 / {subject.name}",
-            )
-            self.knowledge_tree.addTopLevelItem(subject_item)
-
-            uncategorized_count = sum(
-                problem.chapter_id is None for problem in subject_problems
-            )
-            if uncategorized_count:
-                uncategorized = QTreeWidgetItem(
-                    [f"未指定章节 · {uncategorized_count}"]
+            for subject in self.services.list_subjects():
+                subject_problems = self.services.list_problems(
+                    ProblemFilter(status="active", subject_id=subject.id)
                 )
-                uncategorized.setToolTip(
-                    0,
-                    "这是尚未指定章节的题目筛选项，不是实际章节；"
-                    "为这些题目选择章节后会自动消失。",
+                subject_item = QTreeWidgetItem(
+                    [f"{subject.name} · {len(subject_problems)}"]
                 )
+                subject_mode = f"subject:{subject.id}"
                 self._set_tree_item_data(
-                    uncategorized,
-                    mode=f"uncategorized:{subject.id}",
-                    path=f"题库 / {subject.name} / 未指定章节",
+                    subject_item,
+                    mode=subject_mode,
+                    path=f"题库 / {subject.name}",
                 )
-                subject_item.addChild(uncategorized)
-            self._append_chapter_nodes(
-                subject_item,
-                self.services.list_chapter_tree(subject.id),
-                subject_name=subject.name,
-            )
+                self.knowledge_tree.addTopLevelItem(subject_item)
+
+                uncategorized_count = sum(
+                    problem.chapter_id is None for problem in subject_problems
+                )
+                if uncategorized_count:
+                    uncategorized = QTreeWidgetItem(
+                        [f"未指定章节 · {uncategorized_count}"]
+                    )
+                    uncategorized.setToolTip(
+                        0,
+                        "这是尚未指定章节的题目筛选项，不是实际章节；"
+                        "为这些题目选择章节后会自动消失。",
+                    )
+                    self._set_tree_item_data(
+                        uncategorized,
+                        mode=f"uncategorized:{subject.id}",
+                        path=f"题库 / {subject.name} / 未指定章节",
+                    )
+                    subject_item.addChild(uncategorized)
+                self._append_chapter_nodes(
+                    subject_item,
+                    self.services.list_chapter_tree(subject.id),
+                    subject_name=subject.name,
+                )
 
         for item in self._iter_knowledge_items():
             mode = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
@@ -2129,11 +2275,18 @@ class MainWindow(QMainWindow):
 
     def _update_library_list_hint(self, result_count: int | None = None) -> None:
         query = self.search_edit.text().strip()
-        self.library_list_hint.setVisible(bool(query) or self._library_view != "browse")
-        self.library_list_header.setFixedHeight(
-            80 if query or self._library_view != "browse" else 48
+        is_empty = result_count == 0
+        self.library_list_hint.setVisible(
+            is_empty or bool(query) or self._library_view != "browse"
         )
-        if query and result_count is not None:
+        self.library_list_header.setFixedHeight(
+            80 if is_empty or query or self._library_view != "browse" else 48
+        )
+        if is_empty:
+            self.library_list_hint.setText(
+                "当前范围暂无题目（0 条结果）；可切换目录、筛选条件或新建题目。"
+            )
+        elif query and result_count is not None:
             scope = self.search_scope_combo.currentText()
             if (
                 self._is_ai_search_mode()
@@ -2172,11 +2325,10 @@ class MainWindow(QMainWindow):
         return f"{title}\n{line2}"
 
     def _make_problem_item(self, problem: Problem) -> QListWidgetItem:
-        # The custom widget is the sole visual renderer.  Keeping text on the
-        # QListWidgetItem paints a second title and metadata layer underneath it.
-        item = QListWidgetItem()
+        item = QListWidgetItem(self._problem_item_text(problem))
         item.setData(Qt.ItemDataRole.UserRole, problem.id)
         item.setToolTip(self._problem_item_tooltip(problem))
+        item.setSizeHint(QSize(0, 58))
         return item
 
     def _problem_item_tooltip(self, problem: Problem) -> str:
@@ -2212,7 +2364,79 @@ class MainWindow(QMainWindow):
                 )
             )
         item.setSizeHint(widget.sizeHint())
+        item.setText("")
         self.problem_list.setItemWidget(item, widget)
+
+    def _release_inline_question_widget(self, row: int) -> None:
+        item = self.problem_list.item(row)
+        if item is None:
+            return
+        widget = self.problem_list.itemWidget(item)
+        if widget is not None:
+            self.problem_list.removeItemWidget(item)
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
+        problem_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        problem = self._problem_rows.get(problem_id)
+        if problem is not None:
+            item.setText(self._problem_item_text(problem))
+            item.setSizeHint(QSize(0, 58))
+
+    def _queue_problem_widget_materialization(self) -> None:
+        self._problem_widget_timer.start(0)
+
+    def _reindex_problem_widget_rows(self) -> None:
+        visible_ids = {
+            str(self.problem_list.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(self.problem_list.count())
+        }
+        self._problem_rows = {
+            problem_id: problem
+            for problem_id, problem in self._problem_rows.items()
+            if problem_id in visible_ids
+        }
+        self._materialized_problem_rows = {
+            row
+            for row in range(self.problem_list.count())
+            if self.problem_list.itemWidget(self.problem_list.item(row)) is not None
+        }
+
+    def _materialize_visible_problem_widgets(self) -> None:
+        count = self.problem_list.count()
+        if count == 0:
+            self._materialized_problem_rows.clear()
+            return
+        viewport = self.problem_list.viewport()
+        first_index = self.problem_list.indexAt(QPoint(4, 0))
+        last_index = self.problem_list.indexAt(
+            QPoint(4, max(0, viewport.height() - 1))
+        )
+        first = first_index.row() if first_index.isValid() else 0
+        last = (
+            last_index.row()
+            if last_index.isValid()
+            else min(count - 1, first + 24)
+        )
+        desired = set(range(max(0, first - 4), min(count, last + 5)))
+        if self._expanded_question_id:
+            expanded_row, expanded_item = self._find_problem_item(
+                self._expanded_question_id
+            )
+            if expanded_item is not None:
+                desired.add(expanded_row)
+
+        for row in self._materialized_problem_rows - desired:
+            self._release_inline_question_widget(row)
+        for row in desired - self._materialized_problem_rows:
+            item = self.problem_list.item(row)
+            if item is None:
+                continue
+            problem_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            problem = self._problem_rows.get(problem_id)
+            if problem is not None:
+                self._set_inline_question_widget(item, problem)
+        self._materialized_problem_rows = desired
 
     def _sync_inline_question_size(
         self, item: QListWidgetItem, widget: _InlineQuestionItem
@@ -2272,18 +2496,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "搜索或筛选失败", str(exc))
             return
         visible_ids = {problem.id for problem in problems}
+        self._problem_rows = {problem.id: problem for problem in problems}
         if self._expanded_question_id not in visible_ids:
             self._expanded_question_id = None
         self.problem_list.blockSignals(True)
-        self.problem_list.clear()
-        for p in problems:
-            item = self._make_problem_item(p)
-            self.problem_list.addItem(item)
-            self._set_inline_question_widget(item, p)
-            if p.id in selected_ids:
-                item.setSelected(True)
-            if p.id == current_id:
-                self.problem_list.setCurrentItem(item)
+        with deferred_view_updates(self.problem_list):
+            self.problem_list.clear()
+            self._materialized_problem_rows.clear()
+            for p in problems:
+                item = self._make_problem_item(p)
+                self.problem_list.addItem(item)
+                if p.id in selected_ids:
+                    item.setSelected(True)
+                if p.id == current_id:
+                    self.problem_list.setCurrentItem(item)
+            self._materialize_visible_problem_widgets()
         self.problem_list.blockSignals(False)
         if preserve_view:
             scrollbar = self.problem_list.verticalScrollBar()
@@ -2325,15 +2552,23 @@ class MainWindow(QMainWindow):
         if matching is None and item is not None:
             was_current = item is self.problem_list.currentItem()
             self.problem_list.takeItem(row)
+            self._reindex_problem_widget_rows()
             if was_current and self.problem_list.count():
                 self.problem_list.setCurrentRow(min(row, self.problem_list.count() - 1))
         elif matching is not None and item is None:
+            self._problem_rows[matching.id] = matching
             item = self._make_problem_item(matching)
             self.problem_list.insertItem(0, item)
             self._set_inline_question_widget(item, matching)
+            self._materialized_problem_rows = {
+                row + 1 for row in self._materialized_problem_rows
+            }
+            self._materialized_problem_rows.add(0)
         elif matching is not None and item is not None:
+            self._problem_rows[matching.id] = matching
             item.setToolTip(self._problem_item_tooltip(matching))
             self._set_inline_question_widget(item, matching)
+            self._materialized_problem_rows.add(row)
         if select and item is not None and matching is not None:
             self.problem_list.clearSelection()
             self.problem_list.setCurrentItem(item)
@@ -2360,6 +2595,7 @@ class MainWindow(QMainWindow):
         self.problem_list.blockSignals(True)
         for row in rows:
             self.problem_list.takeItem(row)
+        self._reindex_problem_widget_rows()
         if not self.problem_list.selectedItems() and self.problem_list.count():
             self.problem_list.setCurrentRow(min(rows[-1] if rows else 0, self.problem_list.count() - 1))
         self.problem_list.blockSignals(False)
@@ -2986,11 +3222,8 @@ class MainWindow(QMainWindow):
             self.search_index_summary.setText(health.summary)
             if self.search_edit.text().strip():
                 self.refresh_problems()
-            self.status.showMessage(f"本地搜索索引已重建：{count} 道题", 5000)
-            QMessageBox.information(
-                self,
-                "搜索索引已重建",
-                f"已处理 {count} 道题。\n{health.summary}",
+            self._show_status_toast(
+                f"本地搜索索引已重建：{count} 道题 · {health.summary}"
             )
         except Exception as exc:  # noqa: BLE001
             self.search_index_summary.setText(f"重建失败：{exc}")
@@ -3037,7 +3270,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.ai.undo_last_ai_accept(pid)
-            QMessageBox.information(self, "已撤销", "已恢复到接受之前的内容。")
+            self._show_status_toast("已恢复到接受 AI 结果之前的内容")
             self._refresh_problem_item(pid, select=True)
         except DomainError as exc:
             QMessageBox.warning(self, "无法撤销", str(exc))
@@ -3093,7 +3326,7 @@ class MainWindow(QMainWindow):
                 self.services.add_to_daily_review_plan(
                     "problem", pid, self.services.review_plan_date()
                 )
-            QMessageBox.information(self, "完成", f"已将 {len(ids)} 题加入当日题目复习计划")
+            self._show_status_toast(f"已将 {len(ids)} 题加入当日题目复习计划")
             for pid in ids:
                 self._refresh_problem_item(pid, update_summary=False)
             self._update_status()
@@ -3115,7 +3348,7 @@ class MainWindow(QMainWindow):
             return
         try:
             n = self.services.batch_update_problems(ids, priority=value)
-            QMessageBox.information(self, "完成", f"已更新 {n} 题")
+            self._show_status_toast(f"已更新 {n} 题的优先级")
             for pid in ids:
                 self._refresh_problem_item(pid, update_summary=False)
             self._update_status()
@@ -3501,7 +3734,7 @@ class MainWindow(QMainWindow):
             )
             self.refresh_nav()
             self.refresh_problems()
-            QMessageBox.information(self, "完成", f"已移动 {count} 道题")
+            self._show_status_toast(f"已移动 {count} 道题")
         except DomainError as exc:
             QMessageBox.warning(self, "无法移动分类", str(exc))
 
@@ -3511,6 +3744,6 @@ class MainWindow(QMainWindow):
             return
         try:
             self.services.create_tag(name.strip())
-            QMessageBox.information(self, "完成", f"已创建标签：{name.strip()}")
+            self._show_status_toast(f"已创建标签：{name.strip()}")
         except DomainError as exc:
             QMessageBox.warning(self, "失败", str(exc))

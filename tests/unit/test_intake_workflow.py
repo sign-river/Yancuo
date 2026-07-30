@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from sqlalchemy import func, select
 
@@ -30,6 +32,7 @@ from yancuo_win.data.models import (
 )
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.intake_page import ProblemForm
+from yancuo_win.ui.problem_editor import ProblemEditorDialog
 
 
 @pytest.fixture()
@@ -263,6 +266,58 @@ def test_problem_form_preserves_and_confirms_ai_chapter_proposal(
     assert "taxonomy_proposal" not in form.values()
     assert form.taxonomy_hint.isHidden()
     form.close()
+
+
+def test_problem_form_exposes_field_names_and_focus_order(
+    intake: ProblemIntakeService,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    form = ProblemForm(intake)
+
+    assert form.title_edit.accessibleName() == "题目标题"
+    assert form.subject.accessibleName() == "题目科目"
+    assert form.chapter.accessibleName() == "题目章节"
+    assert form.question.accessibleName() == "题干"
+    assert form.correct_answer.accessibleName() == "正确答案"
+    assert form.notes.accessibleName() == "题目备注"
+    form.show()
+    form.title_edit.setFocus()
+    QTest.keyClick(form.title_edit, Qt.Key.Key_Tab)
+    app.processEvents()
+    assert form.subject.hasFocus()
+    QTest.keyClick(form.subject, Qt.Key.Key_Tab)
+    app.processEvents()
+    assert form.chapter.hasFocus()
+    form.close()
+    app.processEvents()
+
+
+def test_problem_editor_exposes_complete_accessible_form(
+    intake: ProblemIntakeService,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    problem = intake.app.create_problem(
+        title="编辑器可访问性题目",
+        question_markdown="求函数极限",
+        status="active",
+    )
+    dialog = ProblemEditorDialog(intake.app, problem)
+
+    assert dialog.title_edit.accessibleName() == "题目标题"
+    assert dialog.priority.accessibleName() == "题目优先级"
+    assert dialog.status.accessibleName() == "题目状态"
+    assert dialog.subject.accessibleName() == "题目科目"
+    assert dialog.chapter.accessibleName() == "题目章节"
+    assert dialog.question.accessibleName() == "题干"
+    assert dialog.solution.accessibleName() == "题目解析"
+    assert dialog.notes.accessibleName() == "题目备注"
+    dialog.show()
+    dialog.title_edit.setFocus()
+    QTest.keyClick(dialog.title_edit, Qt.Key.Key_Tab)
+    app.processEvents()
+    assert dialog.priority.hasFocus()
+    dialog.close()
+    app.processEvents()
 
 
 def test_existing_subject_can_accept_a_new_chapter_proposal(

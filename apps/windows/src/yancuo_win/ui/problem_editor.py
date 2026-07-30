@@ -21,7 +21,12 @@ from PySide6.QtWidgets import (
 from yancuo_win.application.services import AppServices
 from yancuo_win.data.models import Problem
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.ui.widgets import CardFrame, PageHeader
+from yancuo_win.ui.widgets import (
+    CardFrame,
+    PageHeader,
+    describe_field,
+    set_tab_order_chain,
+)
 
 
 class ProblemEditorDialog(QDialog):
@@ -49,10 +54,13 @@ class ProblemEditorDialog(QDialog):
 
         self.title_edit = QLineEdit(problem.title or "")
         self.priority = QSpinBox()
+        describe_field(self.title_edit, "题目标题")
+        describe_field(self.priority, "题目优先级")
         self.priority.setRange(1, 5)
         self.priority.setValue(problem.priority or 3)
 
         self.status = QComboBox()
+        describe_field(self.status, "题目状态")
         for st, label in (
             ("inbox", "收件箱"),
             ("active", "正式题库"),
@@ -65,6 +73,7 @@ class ProblemEditorDialog(QDialog):
             self.status.setCurrentIndex(idx)
 
         self.subject = QComboBox()
+        describe_field(self.subject, "题目科目")
         self.subject.addItem("（未指定）", None)
         for sub in services.list_subjects():
             self.subject.addItem(sub.name, sub.id)
@@ -73,6 +82,7 @@ class ProblemEditorDialog(QDialog):
             if i >= 0:
                 self.subject.setCurrentIndex(i)
         self.chapter = QComboBox()
+        describe_field(self.chapter, "题目章节")
         self.subject.currentIndexChanged.connect(self._reload_chapters)
         self._reload_chapters()
         if problem.chapter_id:
@@ -94,6 +104,12 @@ class ProblemEditorDialog(QDialog):
         self.correct = QTextEdit(problem.correct_answer or "")
         self.solution = QTextEdit(problem.solution_markdown or "")
         self.notes = QTextEdit(problem.notes or "")
+        describe_field(self.question, "题干")
+        describe_field(self.latex, "题干 LaTeX")
+        describe_field(self.user_answer, "我的作答")
+        describe_field(self.correct, "正确答案")
+        describe_field(self.solution, "题目解析")
+        describe_field(self.notes, "题目备注")
 
         basic = CardFrame()
         basic.add_title("基本信息")
@@ -135,6 +151,23 @@ class ProblemEditorDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        set_tab_order_chain(
+            self.title_edit,
+            self.priority,
+            self.status,
+            self.subject,
+            self.chapter,
+            self.question,
+            self.latex,
+            self.user_answer,
+            self.correct,
+            self.solution,
+            self.notes,
+            save_button,
+            cancel_button,
+        )
 
         # 编辑器级撤销：QTextEdit 自带 Undo
         for w in (

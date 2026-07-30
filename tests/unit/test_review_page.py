@@ -7,7 +7,9 @@ from types import SimpleNamespace
 from PySide6.QtWidgets import QApplication, QWidget
 
 import yancuo_win.ui.review_page as review_page_module
+import yancuo_win.ui.today_review as today_review_module
 from yancuo_win.data.models import Problem
+from yancuo_win.ui.widgets import ReadingCanvas
 
 
 class _ReaderStub(QWidget):
@@ -122,6 +124,10 @@ def test_answer_control_lives_in_grade_card_and_unlocks_grading(
     page.plan_combo.setCurrentIndex(0)
     page.start_session()
     assert page.grade_card.isAncestorOf(page.answer_button)
+    assert page.grade_card.objectName() == "ReviewGradeSurface"
+    assert isinstance(page.session_canvas, ReadingCanvas)
+    assert page.session_canvas.content is page.reader
+    assert page.session_canvas.maximum_content_width == 960
     assert "查看答案后才可评分" in page.grade_hint.text()
     assert not any(button.isEnabled() for button in page.grade_buttons)
 
@@ -150,6 +156,21 @@ def test_review_workbench_collects_session_options(monkeypatch) -> None:
     assert page.type_checks
 
     page.close()
+
+
+def test_legacy_today_review_grade_uses_non_blocking_feedback(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(today_review_module, "MathContentView", _ReaderStub)
+    services = _ServicesStub()
+    dialog = today_review_module.TodayReviewDialog(services)
+
+    dialog._grade(3)
+    app.processEvents()
+
+    assert services.recorded == [("problem_review_ui", 3)]
+    assert not dialog.toast.isHidden()
+    assert "下次复习 2026-07-24" in dialog.toast.label.text()
+    dialog.close()
 
 
 def test_note_session_completes_and_skips_trashed_notes(monkeypatch) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QTextEdit,
     QVBoxLayout,
 )
@@ -22,6 +23,7 @@ class DuplicateDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("DuplicateDialog")
         self.setWindowTitle("重复题检测（仅提示）")
         self.resize(640, 480)
         layout = QVBoxLayout(self)
@@ -31,6 +33,7 @@ class DuplicateDialog(QDialog):
             PageHeader("重复题检测", "疑似重复不会自动删除，请人工决定保留或合并。")
         )
         view = QTextEdit()
+        view.setObjectName("DialogTextSurface")
         view.setReadOnly(True)
         lines: list[str] = []
         hash_groups = services.find_hash_duplicates()
@@ -53,7 +56,14 @@ class DuplicateDialog(QDialog):
             )
         else:
             view.setPlainText("\n".join(lines))
-            layout.addWidget(view)
+            content = QFrame()
+            content.setObjectName("DialogContentSurface")
+            content_layout = QVBoxLayout(content)
+            content_layout.setContentsMargins(12, 12, 12, 12)
+            content_layout.addWidget(view)
+            layout.addWidget(content, stretch=1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
+        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+        close_button.setText("关闭")
+        close_button.clicked.connect(self.accept)
         layout.addWidget(buttons)

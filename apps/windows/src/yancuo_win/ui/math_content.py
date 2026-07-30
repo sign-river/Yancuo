@@ -417,7 +417,10 @@ def build_note_html(
 
     if not rendered_blocks:
         rendered_blocks.append(
-            '<section class="empty-note">尚未添加内容块。</section>'
+            '<section class="empty-note">'
+            '<div class="empty-note-title">尚未添加内容</div>'
+            '<div class="empty-note-hint">进入编辑模式，添加标题、正文、公式或提示。</div>'
+            "</section>"
         )
     summary_html = (
         f'<p class="summary">{render_math_text(summary, empty="", allow_bare_latex=True)}</p>'
@@ -432,7 +435,7 @@ def build_note_html(
 <style>
   :root {{ color-scheme: {colors.name}; }}
   * {{ box-sizing: border-box; }}
-  html, body {{ margin: 0; min-height: 100%; background: {colors.bg}; color: {colors.text}; }}
+  html, body {{ margin: 0; min-height: 100%; background: {colors.surface}; color: {colors.text}; }}
   body {{
     padding: 24px;
     font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
@@ -459,7 +462,13 @@ def build_note_html(
   .rich-text {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
   .rich-text math {{ font-family: "Cambria Math", "STIX Two Math", serif; font-size: 1.18em; }}
   .rich-text math[display="block"] {{ margin: .85em 0; text-align: left; }}
-  .empty-note {{ padding: 28px; color: {colors.muted}; text-align: center; }}
+  .empty-note {{
+    margin-top: 24px; padding: 52px 28px; color: {colors.muted};
+    text-align: center; border: 1px dashed {colors.border}; border-radius: 12px;
+    background: {colors.surface_subtle};
+  }}
+  .empty-note-title {{ color: {colors.text}; font-size: 16px; font-weight: 600; }}
+  .empty-note-hint {{ margin-top: 6px; font-size: 13px; }}
   .empty {{ color: {colors.muted}; }}
   .math-fallback {{ padding: 2px 5px; border-radius: 4px; background: {colors.fallback_bg}; color: {colors.fallback_text}; }}
   .math-fallback-block {{ display: block; padding: 10px; overflow-x: auto; }}

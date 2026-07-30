@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -53,10 +54,15 @@ from yancuo_win.tasks.worker import (
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
     CardFrame,
+    IconButton,
     PageHeader,
+    SoftItemDelegate,
+    WorkflowStepBar,
     danger_button,
+    describe_field,
     ghost_button,
     primary_button,
+    set_tab_order_chain,
 )
 
 
@@ -469,6 +475,13 @@ class ProblemForm(QWidget):
         self.title_edit.setPlaceholderText("例如：换元积分中遗漏绝对值")
         self.subject = QComboBox()
         self.chapter = QComboBox()
+        describe_field(self.title_edit, "题目标题")
+        describe_field(self.subject, "题目科目")
+        describe_field(
+            self.chapter,
+            "题目章节",
+            "选择已有章节，或确认 AI 建议的新章节",
+        )
         self._taxonomy_proposal: dict[str, Any] | None = None
         self.taxonomy_hint = QLabel()
         self.taxonomy_hint.setObjectName("MutedLabel")
@@ -484,6 +497,12 @@ class ProblemForm(QWidget):
         self.original_number = QLineEdit()
         self.tags = QLineEdit()
         self.tags.setPlaceholderText("多个标签用逗号分隔")
+        describe_field(self.problem_type, "题型")
+        describe_field(self.priority, "题目优先级")
+        describe_field(self.source_book, "来源书籍")
+        describe_field(self.source_year, "来源年份")
+        describe_field(self.original_number, "原题题号")
+        describe_field(self.tags, "题目标签", "多个标签使用逗号分隔")
         form.addRow("标题", self.title_edit)
         form.addRow("科目", self.subject)
         form.addRow("章节", self.chapter)
@@ -501,6 +520,8 @@ class ProblemForm(QWidget):
         content.add_title("题目内容")
         self.question = self._text_area("题干 Markdown / 文本", 150)
         self.latex = self._text_area("公式 LaTeX（可留空）", 78)
+        describe_field(self.question, "题干")
+        describe_field(self.latex, "题干 LaTeX")
         content.body.addWidget(QLabel("题干"))
         content.body.addWidget(self.question)
         content.body.addWidget(QLabel("LaTeX"))
@@ -515,6 +536,10 @@ class ProblemForm(QWidget):
         self.correct_answer = self._text_area("正确答案", 90)
         self.solution = self._text_area("完整解析", 130)
         self.notes = self._text_area("备注", 80)
+        describe_field(self.user_answer, "我的作答")
+        describe_field(self.correct_answer, "正确答案")
+        describe_field(self.solution, "题目解析")
+        describe_field(self.notes, "题目备注")
         for label, editor in (
             ("我的作答", self.user_answer),
             ("正确答案", self.correct_answer),
@@ -552,6 +577,23 @@ class ProblemForm(QWidget):
         )
         self.reload_catalog()
         self._connect_change_signals()
+        set_tab_order_chain(
+            self.title_edit,
+            self.subject,
+            self.chapter,
+            self.problem_type,
+            self.priority,
+            self.source_book,
+            self.source_year,
+            self.original_number,
+            self.tags,
+            self.question,
+            self.latex,
+            self.user_answer,
+            self.correct_answer,
+            self.solution,
+            self.notes,
+        )
 
     def _connect_change_signals(self) -> None:
         def notify(*_args) -> None:
@@ -883,11 +925,7 @@ class IntakePage(QWidget):
         back_tooltip: str = "返回工作台",
     ) -> PageHeader:
         header = PageHeader(title_text, hint_text)
-        back = QPushButton("◀", header)
-        back.setObjectName("IconButton")
-        back.setToolTip(back_tooltip)
-        back.setAccessibleName(back_tooltip)
-        back.setFixedSize(32, 32)
+        back = IconButton("chevron-left", back_tooltip, header)
         back.clicked.connect(back_slot)
         header.add_leading(back)
         return header
@@ -899,6 +937,10 @@ class IntakePage(QWidget):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
         return page, layout
+
+    @staticmethod
+    def _ai_step_bar(current_step: int) -> WorkflowStepBar:
+        return WorkflowStepBar(("上传图片", "后台处理", "确认结果"), current_step)
 
     def _build_manual(self) -> QWidget:
         page, layout = self._page()
@@ -955,7 +997,10 @@ class IntakePage(QWidget):
                 self.dashboard_requested.emit,
             )
         )
+        self.ai_upload_steps = self._ai_step_bar(0)
+        layout.addWidget(self.ai_upload_steps)
         upload = CardFrame()
+        upload.setObjectName("IntakePrimarySurface")
         upload.add_title("1. 添加图片")
         upload.add_hint(
             "每张图片可以识别一道或多道候选题；AI 会拆分后逐题进入确认流程。"
@@ -969,6 +1014,17 @@ class IntakePage(QWidget):
         upload_content.addWidget(self.ai_upload_preview, stretch=2)
         self.ai_file_list = QListWidget()
         self.ai_file_list.setObjectName("UploadFileList")
+        self.ai_file_list.setAccessibleName("待识别图片")
+        self.ai_file_list.setAccessibleDescription("使用方向键浏览已选择的图片")
+        self.ai_file_list.setMouseTracking(True)
+        self.ai_file_list.setItemDelegate(
+            SoftItemDelegate(
+                self.ai_file_list,
+                radius=10,
+                horizontal_margin=4,
+                vertical_margin=4,
+            )
+        )
         self.ai_file_list.setViewMode(QListView.ViewMode.IconMode)
         self.ai_file_list.setResizeMode(QListView.ResizeMode.Adjust)
         self.ai_file_list.setMovement(QListView.Movement.Static)
@@ -993,9 +1049,11 @@ class IntakePage(QWidget):
         layout.addWidget(upload)
 
         mode = CardFrame()
+        mode.setObjectName("IntakeSecondarySurface")
         mode.add_title("2. 选择识别方式")
         mode.add_hint("自动模式保持逐图识别；多图一题会按上传顺序将全部图片作为同一次视觉请求发送。")
         self.ai_recognition_mode = QComboBox()
+        describe_field(self.ai_recognition_mode, "AI 识别方式")
         self.ai_recognition_mode.addItem("自动（逐图识别，仅提示结构建议）", "auto")
         self.ai_recognition_mode.addItem("一图一题", "one_to_one")
         self.ai_recognition_mode.addItem("一图多题", "one_to_many")
@@ -1004,9 +1062,11 @@ class IntakePage(QWidget):
         layout.addWidget(mode)
 
         prompt = CardFrame()
+        prompt.setObjectName("IntakeSecondarySurface")
         prompt.add_title("3. 告诉 AI 如何定位题目")
         prompt.add_hint("这是本批图片的补充说明；程序仍会强制结构化输出和字段安全规则。")
         self.ai_instruction = QTextEdit()
+        describe_field(self.ai_instruction, "AI 题目定位说明")
         self.ai_instruction.setPlaceholderText(
             "例如：画红圈的是目标错题；蓝色手写内容是我的作答；不要提取页脚答案。"
         )
@@ -1024,6 +1084,9 @@ class IntakePage(QWidget):
 
         start_row = QHBoxLayout()
         self.ai_use_cache = QCheckBox("使用历史识别缓存")
+        self.ai_use_cache.setAccessibleDescription(
+            "关闭后重新请求 AI，并更新相同图片的识别缓存"
+        )
         self.ai_use_cache.setChecked(True)
         self.ai_use_cache.setToolTip("关闭后将重新请求 AI，并用新结果更新同一图片的缓存")
         self.ai_cache_hint = QLabel()
@@ -1037,9 +1100,16 @@ class IntakePage(QWidget):
         self.ai_config_hint.setObjectName("PageHint")
         start_row.addWidget(self.ai_config_hint)
         start_row.addStretch(1)
-        start = primary_button("开始识别")
-        start.clicked.connect(self._start_ai)
-        start_row.addWidget(start)
+        self.ai_start_button = primary_button("开始识别")
+        self.ai_start_button.clicked.connect(self._start_ai)
+        start_row.addWidget(self.ai_start_button)
+        set_tab_order_chain(
+            self.ai_file_list,
+            self.ai_recognition_mode,
+            self.ai_instruction,
+            self.ai_use_cache,
+            self.ai_start_button,
+        )
         layout.addLayout(start_row)
         return page
 
@@ -1052,7 +1122,10 @@ class IntakePage(QWidget):
                 self.dashboard_requested.emit,
             )
         )
+        self.ai_processing_steps_bar = self._ai_step_bar(1)
+        layout.addWidget(self.ai_processing_steps_bar)
         card = CardFrame()
+        card.setObjectName("IntakeStatusSurface")
         card.add_title("正在整理图片")
         self.processing_status = card.add_hint("正在准备任务…")
         self.progress_bar = QProgressBar()
@@ -1095,6 +1168,8 @@ class IntakePage(QWidget):
                 self.dashboard_requested.emit,
             )
         )
+        self.ai_confirmation_steps = self._ai_step_bar(2)
+        layout.addWidget(self.ai_confirmation_steps)
         self.ai_result_tabs = QTabWidget()
         self.ai_result_tabs.setObjectName("AIResultTabs")
 
@@ -1123,23 +1198,40 @@ class IntakePage(QWidget):
             self._build_image_tools_tab(), "原图范围与重识别"
         )
         self.ai_result_tabs.currentChanged.connect(self._on_ai_result_tab_changed)
-        layout.addWidget(self.ai_result_tabs, stretch=1)
+        confirmation_surface = QFrame()
+        confirmation_surface.setObjectName("IntakeConfirmationSurface")
+        confirmation_layout = QVBoxLayout(confirmation_surface)
+        confirmation_layout.setContentsMargins(8, 8, 8, 8)
+        confirmation_layout.addWidget(self.ai_result_tabs)
+        self.ai_confirmation_surface = confirmation_surface
+        layout.addWidget(confirmation_surface, stretch=1)
 
-        actions = QHBoxLayout()
-        previous = QPushButton("上一题")
-        previous.clicked.connect(lambda: self._move_candidate(-1))
-        next_button = QPushButton("下一题")
-        next_button.clicked.connect(lambda: self._move_candidate(1))
-        skip = danger_button("删除错误候选")
-        skip.clicked.connect(self._reject_candidate)
-        confirm = primary_button("确认入库")
-        confirm.clicked.connect(self._commit_candidate)
-        actions.addWidget(previous)
-        actions.addWidget(next_button)
+        action_bar = QFrame()
+        action_bar.setObjectName("IntakeActionBar")
+        actions = QHBoxLayout(action_bar)
+        actions.setContentsMargins(12, 8, 12, 8)
+        self.ai_previous_button = QPushButton("上一题")
+        self.ai_previous_button.clicked.connect(lambda: self._move_candidate(-1))
+        self.ai_next_button = QPushButton("下一题")
+        self.ai_next_button.clicked.connect(lambda: self._move_candidate(1))
+        self.ai_reject_button = danger_button("删除错误候选")
+        self.ai_reject_button.clicked.connect(self._reject_candidate)
+        self.ai_confirm_button = primary_button("确认入库")
+        self.ai_confirm_button.clicked.connect(self._commit_candidate)
+        actions.addWidget(self.ai_previous_button)
+        actions.addWidget(self.ai_next_button)
         actions.addStretch(1)
-        actions.addWidget(skip)
-        actions.addWidget(confirm)
-        layout.addLayout(actions)
+        actions.addWidget(self.ai_reject_button)
+        actions.addWidget(self.ai_confirm_button)
+        self.ai_confirmation_action_bar = action_bar
+        layout.addWidget(action_bar)
+        set_tab_order_chain(
+            self.ai_form.notes,
+            self.ai_previous_button,
+            self.ai_next_button,
+            self.ai_reject_button,
+            self.ai_confirm_button,
+        )
         return page
 
     def _build_image_tools_tab(self) -> QScrollArea:
@@ -1163,6 +1255,7 @@ class IntakePage(QWidget):
         image_tools_layout.addWidget(source_title)
         self.source_image_list = QListWidget()
         self.source_image_list.setObjectName("CandidateSourceImages")
+        self.source_image_list.setAccessibleName("候选题来源图片")
         self.source_image_list.setFixedHeight(72)
         image_tools_layout.addWidget(self.source_image_list)
         source_actions = QHBoxLayout()
@@ -1249,6 +1342,7 @@ class IntakePage(QWidget):
         instruction.add_title("定位关键词")
         instruction.add_hint("可选。例如：蓝色手写区域、最后一行计算结果。")
         self.answer_keywords = QTextEdit()
+        describe_field(self.answer_keywords, "作答图片定位关键词")
         self.answer_keywords.setPlaceholderText("补充图片中需要提取的作答位置或特征")
         self.answer_keywords.setMaximumHeight(88)
         instruction.body.addWidget(self.answer_keywords)
@@ -1258,6 +1352,7 @@ class IntakePage(QWidget):
         result.add_title("识别结果")
         self.answer_recognition_status = result.add_hint("选择图片后开始识别。")
         self.answer_recognition_result = QTextEdit()
+        describe_field(self.answer_recognition_result, "作答识别结果")
         self.answer_recognition_result.setPlaceholderText("AI 识别结果会显示在这里，可直接修改。")
         self.answer_recognition_result.setMinimumHeight(150)
         result.body.addWidget(self.answer_recognition_result)
@@ -1273,6 +1368,12 @@ class IntakePage(QWidget):
         actions.addWidget(self.answer_recognize_button)
         actions.addWidget(self.answer_apply_button)
         layout.addLayout(actions)
+        set_tab_order_chain(
+            self.answer_keywords,
+            self.answer_recognize_button,
+            self.answer_recognition_result,
+            self.answer_apply_button,
+        )
         return page
 
     def _open_answer_capture(self) -> None:

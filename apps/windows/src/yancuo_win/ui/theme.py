@@ -14,6 +14,13 @@ THEME_MODES = {"system", "light", "dark"}
 @dataclass(frozen=True)
 class ThemeTokens:
     name: str
+    canvas: str
+    shell: str
+    surface: str
+    surface_subtle: str
+    divider: str
+    border_strong: str
+    focus_ring: str
     bg: str
     sidebar: str
     card: str
@@ -43,12 +50,36 @@ class ThemeTokens:
     fallback_text: str
 
 
+@dataclass(frozen=True)
+class UiMetrics:
+    """Shared geometry for the soft desktop component language."""
+
+    radius_control: int = 8
+    radius_item: int = 10
+    radius_surface: int = 12
+    radius_workspace: int = 14
+    radius_floating: int = 16
+    control_height: int = 36
+    compact_height: int = 32
+    workspace_gutter: int = 10
+
+
+UI_METRICS = UiMetrics()
+
+
 LIGHT_THEME = ThemeTokens(
     name="light",
-    bg="#F5F6F8",
-    sidebar="#F7F8FA",
+    canvas="#F3F6FA",
+    shell="#F8FAFD",
+    surface="#FFFFFF",
+    surface_subtle="#F7F9FC",
+    divider="#EEF1F5",
+    border_strong="#CCD5E3",
+    focus_ring="#7EA6FF",
+    bg="#F3F6FA",
+    sidebar="#F8FAFD",
     card="#FFFFFF",
-    border="#E8EAED",
+    border="#E2E7EF",
     text="#1F2329",
     muted="#646A73",
     primary="#3370FF",
@@ -58,7 +89,7 @@ LIGHT_THEME = ThemeTokens(
     danger_bg="#FEF0F0",
     danger_border="#F8B9B7",
     nav_text="#FFFFFF",
-    list_hover="#F5F6F7",
+    list_hover="#F2F5FA",
     list_selected="#E8F0FF",
     input_disabled="#F0F2F5",
     upload_bg="#F8FAFD",
@@ -76,9 +107,16 @@ LIGHT_THEME = ThemeTokens(
 
 DARK_THEME = ThemeTokens(
     name="dark",
+    canvas="#11151C",
+    shell="#171D26",
+    surface="#1D2530",
+    surface_subtle="#19212B",
+    divider="#293341",
+    border_strong="#435167",
+    focus_ring="#7EA6FF",
     bg="#11151C",
-    sidebar="#171C24",
-    card="#1E2530",
+    sidebar="#171D26",
+    card="#1D2530",
     border="#303A49",
     text="#E8EDF5",
     muted="#9AA6B7",
@@ -143,6 +181,7 @@ def current_theme_name(app: QApplication | None = None) -> str:
 
 def app_stylesheet(theme: str = "light") -> str:
     t = theme_tokens(theme)
+    m = UI_METRICS
     return f"""
     QWidget {{
         color: {t.text};
@@ -169,17 +208,17 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 6px 8px;
     }}
     QMenu {{
-        background: {t.card};
+        background: {t.surface};
         color: {t.text};
-        border: 1px solid {t.border};
-        border-radius: 8px;
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
         padding: 6px;
     }}
     QMenu::item {{
         min-width: 144px;
         padding: 8px 24px 8px 12px;
         margin: 1px 0;
-        border-radius: 6px;
+        border-radius: {m.radius_control}px;
     }}
     QMenu::item:selected {{
         background: {t.list_selected};
@@ -196,8 +235,8 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
 
     QFrame#AppSidebar {{
-        background: {t.sidebar};
-        border-right: 1px solid {t.border};
+        background: {t.shell};
+        border-right: 1px solid {t.divider};
     }}
     QFrame#SidebarToggleRail {{
         background: {t.bg};
@@ -246,12 +285,90 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
 
     QFrame#PageRoot, QWidget#PageRoot {{
-        background: {t.bg};
+        background: {t.canvas};
     }}
     QFrame#CardFrame {{
         background: {t.card};
         border: 1px solid {t.border};
-        border-radius: 8px;
+        border-radius: {m.radius_surface}px;
+    }}
+    QWidget#SettingsPage, QWidget#SettingsContent {{
+        background: transparent;
+    }}
+    QScrollArea#SettingsScroll {{
+        background: transparent;
+        border: none;
+    }}
+    QFrame#CardFrame[surfaceRole="settings"],
+    QFrame#CardFrame[surfaceRole="data"] {{
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+    }}
+    QFrame#DialogSummarySurface, QFrame#DialogToolbar,
+    QFrame#DialogActionBar {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+    }}
+    QSplitter#DialogWorkspace {{
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_workspace}px;
+    }}
+    QSplitter#DialogWorkspace::handle {{
+        background: transparent;
+        width: {m.workspace_gutter}px;
+    }}
+    QFrame#DialogSidePane {{
+        background: {t.surface_subtle};
+        border: none;
+        border-radius: {m.radius_surface}px;
+        padding: 12px;
+    }}
+    QFrame#DialogDetailPane, QFrame#DialogContentSurface {{
+        background: {t.surface};
+        border: none;
+        border-radius: {m.radius_surface}px;
+        padding: 12px;
+    }}
+    QListWidget#DialogItemList {{
+        background: transparent;
+        border: none;
+        outline: none;
+        selection-background-color: transparent;
+        selection-color: {t.text};
+    }}
+    QListWidget#DialogItemList::item {{
+        padding: 6px 10px;
+        margin: 1px 0;
+        border-radius: 0;
+    }}
+    QListWidget#DialogItemList::item:hover,
+    QListWidget#DialogItemList::item:selected {{
+        background: transparent;
+        color: {t.text};
+    }}
+    QListWidget#MainNav:focus, QListWidget#FilterNav:focus,
+    QListWidget#ProblemList:focus, QTreeWidget#KnowledgeTree:focus,
+    QListWidget#NoteCollectionList:focus, QListWidget#NoteList:focus,
+    QListWidget#ReviewSourceList:focus, QListWidget#ReviewWaitingList:focus,
+    QTreeWidget#PlanFolderTree:focus, QListWidget#PlanSourceList:focus,
+    QListWidget#PlanQueueList:focus, QListWidget#DialogItemList:focus {{
+        border: 1px solid {t.focus_ring};
+    }}
+    QTextEdit#DialogTextSurface {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_control}px;
+    }}
+    QScrollArea#ImageViewerCanvas {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+    }}
+    QLabel#SourceImage {{
+        background: transparent;
     }}
     QLabel#PageTitle {{
         font-size: 20px;
@@ -313,29 +430,94 @@ def app_stylesheet(theme: str = "light") -> str:
         border: 1px solid {t.border};
         border-radius: 10px;
     }}
+    QFrame#WorkflowStepBar {{
+        min-height: 34px;
+        max-height: 34px;
+        background: {t.surface_subtle};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+    }}
+    QLabel#WorkflowStep {{
+        min-width: 92px;
+        padding: 4px 10px;
+        border-radius: {m.radius_control}px;
+        color: {t.muted};
+        font-size: 12px;
+    }}
+    QLabel#WorkflowStep[state="completed"] {{
+        color: {t.primary};
+    }}
+    QLabel#WorkflowStep[state="current"] {{
+        color: {t.primary};
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        font-weight: 600;
+    }}
+    QFrame#WorkflowStepConnector {{
+        min-width: 24px;
+        max-height: 1px;
+        background: {t.divider};
+        border: none;
+    }}
+    QFrame#WorkflowStepConnector[state="completed"] {{
+        background: {t.focus_ring};
+    }}
+    QFrame#IntakePrimarySurface, QFrame#IntakeStatusSurface,
+    QFrame#IntakeConfirmationSurface {{
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_workspace}px;
+    }}
+    QFrame#IntakeSecondarySurface {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+    }}
+    QFrame#IntakeActionBar {{
+        min-height: 48px;
+        max-height: 48px;
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+    }}
+    QTabWidget#AIResultTabs::pane {{
+        background: {t.surface};
+        border: none;
+        border-radius: {m.radius_surface}px;
+    }}
     QFrame#SearchToolbar {{
-        background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 10px;
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+    }}
+    QFrame#LibraryViewSwitch {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
     }}
     QFrame#LibraryWorkspace {{
-        background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 8px;
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_workspace}px;
     }}
     QSplitter#LibraryWorkspaceSplitter::handle {{
-        background: {t.border};
-        width: 1px;
+        background: transparent;
+        width: {m.workspace_gutter}px;
     }}
-    QWidget#LibraryNavigationPanel, QWidget#LibraryListPanel {{
-        background: {t.card};
+    QFrame#LibraryNavigationPanel {{
+        background: {t.surface_subtle};
         border: none;
+        border-radius: {m.radius_surface}px;
+    }}
+    QFrame#LibraryListPanel {{
+        background: {t.surface};
+        border: none;
+        border-radius: {m.radius_surface}px;
     }}
     QFrame#LibraryPanelHeader {{
         min-height: 48px;
-        background: {t.card};
+        background: transparent;
         border: none;
-        border-bottom: 1px solid {t.border};
     }}
     QLabel#PanelTitle {{
         color: {t.text};
@@ -349,29 +531,20 @@ def app_stylesheet(theme: str = "light") -> str:
     QFrame#LibraryPanelFooter {{
         min-height: 56px;
         max-height: 56px;
-        background: {t.card};
+        background: transparent;
         border: none;
-        border-top: 1px solid {t.border};
+        border-top: 1px solid {t.divider};
     }}
     QListWidget#ProblemList, QListWidget#FilterNav, QTreeWidget#KnowledgeTree {{
-        background: {t.card};
+        background: transparent;
         border: none;
         border-radius: 0;
         outline: none;
-        padding: 6px;
+        padding: 4px;
     }}
-    QListWidget#ProblemList::item {{
-        min-height: 58px;
-        padding: 8px 10px;
-        margin: 1px 0;
-        border-radius: 6px;
-    }}
-    QListWidget#ProblemList::item:hover {{ background: {t.list_hover}; }}
-    QListWidget#ProblemList::item:selected {{ background: {t.list_selected}; color: {t.text}; }}
     QWidget#InlineQuestionItem {{
         background: transparent;
         border: none;
-        border-bottom: 1px solid {t.border};
         border-radius: 0;
     }}
     QLabel#QuestionItemTitle {{ color: {t.text}; font-size: 15px; font-weight: 600; }}
@@ -393,9 +566,9 @@ def app_stylesheet(theme: str = "light") -> str:
         font-size: 12px;
     }}
     QFrame#QuestionActionBar {{
-        background: {t.card};
+        background: transparent;
         border: none;
-        border-top: 1px solid {t.border};
+        border-top: 1px solid {t.divider};
     }}
     QPushButton#SearchModeButton {{
         min-height: 20px;
@@ -403,40 +576,37 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 5px 12px;
     }}
     QPushButton#LibraryViewButton {{
-        min-height: 36px;
+        min-height: 28px;
         border: none;
-        border-bottom: 2px solid transparent;
-        border-radius: 0;
+        border-radius: {m.radius_control}px;
+        padding: 4px 14px;
     }}
     QPushButton#LibraryViewButton:checked {{
         color: {t.primary};
-        background: transparent;
-        border-bottom-color: {t.primary};
+        background: {t.surface};
+        border: 1px solid {t.divider};
         font-weight: 600;
     }}
-    QSplitter#ReviewPlanWorkspace::handle {{
-        background: {t.border};
-        width: 1px;
-    }}
+    QSplitter#ReviewPlanWorkspace::handle,
     QSplitter#ReviewPlanBrowseWorkspace::handle {{
-        background: {t.border};
-        width: 1px;
+        background: transparent;
+        width: {m.workspace_gutter}px;
     }}
     QSplitter#ReviewPlanWorkspace {{
-        background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 8px;
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_workspace}px;
     }}
-    QWidget#PlanDirectoryPane, QWidget#PlanQueuePane {{
-        background: {t.card};
+    QFrame#PlanDirectoryPane, QFrame#PlanQueuePane {{
+        background: {t.surface_subtle};
         border: none;
-        border-radius: 0;
+        border-radius: {m.radius_surface}px;
         padding: 12px;
     }}
-    QWidget#PlanContentPane {{
-        background: {t.card};
+    QFrame#PlanContentPane {{
+        background: {t.surface};
         border: none;
-        border-radius: 0;
+        border-radius: {m.radius_surface}px;
         padding: 12px;
     }}
     QTreeWidget#PlanFolderTree, QListWidget#PlanSourceList, QListWidget#PlanQueueList {{
@@ -454,80 +624,148 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
     QTreeWidget#PlanFolderTree::item:hover, QListWidget#PlanSourceList::item:hover,
     QListWidget#PlanQueueList::item:hover {{
-        background: {t.list_hover};
+        background: transparent;
     }}
     QTreeWidget#PlanFolderTree::item:selected, QListWidget#PlanSourceList::item:selected,
     QListWidget#PlanQueueList::item:selected {{
-        background: {t.list_selected};
+        background: transparent;
         color: {t.text};
+    }}
+    QListWidget#ReviewSourceList, QListWidget#ReviewWaitingList {{
+        background: transparent;
+        border: none;
+        outline: none;
+        selection-background-color: transparent;
+    }}
+    QListWidget#ReviewSourceList::item:hover,
+    QListWidget#ReviewWaitingList::item:hover,
+    QListWidget#ReviewSourceList::item:selected,
+    QListWidget#ReviewWaitingList::item:selected {{
+        background: transparent;
+        color: {t.text};
+    }}
+    QFrame#ReviewActionCard, QFrame#ReviewPlanSurface,
+    QFrame#ReviewGradeSurface {{
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+    }}
+    QLabel#ReviewOverview, QLabel#ReviewSessionOverview {{
+        background: {t.surface};
+        color: {t.text};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+        padding: 14px 18px;
+        font-size: 15px;
+        font-weight: 600;
     }}
 
     QSplitter#NoteWorkspace::handle {{
-        background: {t.border};
-        width: 1px;
+        background: transparent;
+        width: {m.workspace_gutter}px;
     }}
     QSplitter#NoteWorkspace {{
-        background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 8px;
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_workspace}px;
     }}
-    QFrame#NoteLibraryPane, QStackedWidget#NoteDetailPane {{
-        background: {t.card};
+    QFrame#NoteSpacePane, QFrame#NoteLibraryPane {{
+        background: {t.surface_subtle};
         border: none;
-        border-radius: 0;
+        border-radius: {m.radius_surface}px;
+    }}
+    QStackedWidget#NoteDetailPane {{
+        background: {t.surface};
+        border: none;
+        border-radius: {m.radius_surface}px;
     }}
     QFrame#NoteEmptyPane {{
-        background: {t.card};
+        background: {t.surface};
         border: none;
-        border-radius: 0;
+        border-radius: {m.radius_surface}px;
     }}
-    QListWidget#NoteList, QListWidget#NoteBlockList {{
+    QFrame#ReadingCanvas {{
+        background: {t.surface_subtle};
+        border: none;
+        border-radius: {m.radius_surface}px;
+    }}
+    QFrame#ReadingCanvasSheet {{
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+    }}
+    QFrame#ReadingCanvas QScrollBar:horizontal {{
+        height: 0;
+        margin: 0;
+    }}
+    QListWidget#NoteCollectionList, QListWidget#NoteList,
+    QListWidget#NoteBlockList {{
         background: transparent;
         border: none;
         outline: none;
         padding: 4px 0;
+        selection-background-color: transparent;
+        selection-color: {t.text};
+    }}
+    QListWidget#NoteCollectionList::item {{
+        min-height: 36px;
+        padding: 6px 10px;
+        margin: 1px 0;
+        border-radius: 0;
     }}
     QListWidget#NoteList::item {{
-        min-height: 48px;
+        min-height: 54px;
         padding: 8px 10px;
         margin: 1px 0;
-        border-radius: 6px;
+        border-radius: 0;
     }}
     QListWidget#NoteBlockList::item {{
         min-height: 34px;
         padding: 6px 8px;
         margin: 1px 0;
-        border-radius: 6px;
+        border-radius: 0;
     }}
-    QListWidget#NoteList::item:hover, QListWidget#NoteBlockList::item:hover {{
-        background: {t.list_hover};
+    QListWidget#NoteCollectionList::item:hover, QListWidget#NoteList::item:hover,
+    QListWidget#NoteBlockList::item:hover {{
+        background: transparent;
     }}
+    QListWidget#NoteCollectionList::item:selected,
     QListWidget#NoteList::item:selected, QListWidget#NoteBlockList::item:selected {{
-        background: {t.list_selected};
+        background: transparent;
         color: {t.text};
     }}
 
     QListWidget#FilterNav, QListWidget#ProblemList, QTreeWidget#KnowledgeTree {{
-        background: {t.card};
+        background: transparent;
         border: none;
         border-radius: 0;
         outline: none;
-        padding: 0;
+        padding: 4px;
+        selection-background-color: transparent;
+        selection-color: {t.text};
+    }}
+    QTreeWidget#KnowledgeTree {{
+        show-decoration-selected: 0;
     }}
     QListWidget#FilterNav::item, QTreeWidget#KnowledgeTree::item {{
-        height: 34px;
-        padding: 8px 12px;
-        margin: 0;
+        min-height: 36px;
+        padding: 6px 12px;
+        margin: 1px 0;
         border-radius: 0;
+    }}
+    QTreeWidget#KnowledgeTree::branch,
+    QTreeWidget#KnowledgeTree::branch:selected,
+    QTreeWidget#KnowledgeTree::branch:hover {{
+        background: transparent;
     }}
     QListWidget#ProblemList::item {{ min-height: 0; padding: 0; margin: 0; border-radius: 0; }}
     QListWidget#FilterNav::item:hover, QListWidget#ProblemList::item:hover,
     QTreeWidget#KnowledgeTree::item:hover {{
-        background: {t.list_hover};
+        background: transparent;
     }}
     QListWidget#FilterNav::item:selected, QListWidget#ProblemList::item:selected,
     QTreeWidget#KnowledgeTree::item:selected {{
-        background: {t.list_selected};
+        background: transparent;
         color: {t.text};
         font-weight: 600;
     }}
@@ -556,16 +794,16 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
 
     QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {{
-        background: {t.card};
+        background: {t.surface};
         color: {t.text};
         border: 1px solid {t.border};
-        border-radius: 8px;
+        border-radius: {m.radius_control}px;
         padding: 6px 10px;
         min-height: 22px;
         selection-background-color: {t.list_selected};
     }}
     QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
-        border: 1px solid {t.primary};
+        border: 1px solid {t.focus_ring};
     }}
     QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
     QSpinBox:disabled, QComboBox:disabled {{
@@ -597,36 +835,36 @@ def app_stylesheet(theme: str = "light") -> str:
         font-weight: 500;
     }}
     QLineEdit#SearchEdit {{
-        background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 10px;
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_item}px;
         padding: 8px 14px;
         min-height: 20px;
     }}
     QComboBox#SearchScopeCombo {{
-        background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 6px;
+        background: {t.surface_subtle};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_control}px;
         padding: 5px 8px;
         min-height: 20px;
     }}
     QLineEdit#SearchInput {{
-        background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 6px;
+        background: {t.surface};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_control}px;
         padding: 5px 8px;
         min-height: 20px;
         max-height: 20px;
     }}
     QLineEdit#SearchInput:focus {{
-        border-color: {t.primary};
+        border-color: {t.focus_ring};
     }}
 
     QPushButton {{
-        background: {t.card};
+        background: {t.surface};
         color: {t.text};
         border: 1px solid {t.border};
-        border-radius: 6px;
+        border-radius: {m.radius_control}px;
         padding: 6px 12px;
         min-height: 20px;
     }}
@@ -802,7 +1040,7 @@ def app_stylesheet(theme: str = "light") -> str:
     QDialog {{
         background: {t.card};
         border: 1px solid {t.border};
-        border-radius: 8px;
+        border-radius: {m.radius_floating}px;
     }}
     """
 
