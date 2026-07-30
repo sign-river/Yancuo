@@ -154,6 +154,9 @@ class IntakeProgress:
     timing_samples: int = 0
     retry_count: int = 0
     cache_hits: int = 0
+    provider_token_usage: dict[str, int] = field(default_factory=dict)
+    provider_token_samples: int = 0
+    provider_server_timing: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -889,6 +892,9 @@ class ProblemIntakeService:
             timing_samples=int(diagnostics["timing_samples"]),
             retry_count=int(diagnostics["retry_count"]),
             cache_hits=int(diagnostics["cache_hits"]),
+            provider_token_usage=dict(diagnostics["provider_token_usage"]),
+            provider_token_samples=int(diagnostics["provider_token_samples"]),
+            provider_server_timing=list(diagnostics["provider_server_timing"]),
         )
 
     def list_resumable_ai_batches(self) -> list[ResumableIntakeBatch]:

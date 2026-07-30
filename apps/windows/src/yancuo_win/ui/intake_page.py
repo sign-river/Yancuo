@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
@@ -1818,12 +1819,16 @@ class IntakePage(QWidget):
             f"完成 {progress.done} / {progress.total} · 失败 {progress.failed}"
         )
         timing_labels = (
+            ("queue_wait", "任务排队"),
             ("preflight", "本地预检查"),
+            ("cache_lookup", "缓存查找"),
             ("image_encode", "图片读取与编码"),
             ("request", "AI 请求与等待"),
             ("response_parse", "响应 JSON 解析"),
             ("validation", "字段校验"),
             ("candidate_write", "候选写入"),
+            ("classification_match", "分类目录匹配"),
+            ("ui_wait", "界面信号等待"),
             ("provider_total", "AI 提供商总计"),
             ("total", "单图总计"),
         )
@@ -1918,13 +1923,33 @@ class IntakePage(QWidget):
         if job_id != self.ai_job_id:
             return
         self.progress_timer.stop()
-        self._poll_progress()
+        received_at = perf_counter()
+        service_finished_at = (
+            self.ai_worker.service_finished_at
+            if self.ai_worker is not None
+            else None
+        )
+        ui_wait_ms = (
+            max(0.0, (received_at - service_finished_at) * 1000)
+            if service_finished_at is not None
+            else 0.0
+        )
         try:
+            classification_started = perf_counter()
             self.ai_candidates = [
                 item
                 for item in self.intake.list_candidates(job_id)
                 if item.status in {"pending", "conflict"}
             ]
+            classification_match_ms = (
+                perf_counter() - classification_started
+            ) * 1000
+            self.intake.ai.record_ui_delivery_timings(
+                job_id,
+                ui_wait_ms=ui_wait_ms,
+                classification_match_ms=classification_match_ms,
+            )
+            self._poll_progress()
             failures = self.intake.failed_items(job_id)
         except DomainError as exc:
             self._on_ai_failed(job_id, str(exc))

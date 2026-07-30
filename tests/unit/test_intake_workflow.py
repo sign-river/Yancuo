@@ -144,7 +144,9 @@ def test_ai_intake_stays_job_scoped_and_commits_candidate(
     assert progress.stage == "completed"
     assert progress.timing_samples == 1
     assert {
+        "queue_wait",
         "preflight",
+        "cache_lookup",
         "provider_total",
         "validation",
         "candidate_write",

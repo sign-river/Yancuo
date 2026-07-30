@@ -211,6 +211,14 @@ def test_failed_ai_item_can_retry_in_same_job_without_duplicate_problem(
     assert completed_diagnostics["stage"] == "completed"
     assert completed_diagnostics["timing_samples"] == 1
     assert completed_diagnostics["timings_ms"]["total"] >= 0
+    ai.record_ui_delivery_timings(
+        job.id,
+        ui_wait_ms=1.25,
+        classification_match_ms=2.75,
+    )
+    delivered_diagnostics = ai.get_job_diagnostics(job.id)
+    assert delivered_diagnostics["timings_ms"]["ui_wait"] == pytest.approx(1.2)
+    assert delivered_diagnostics["timings_ms"]["classification_match"] == pytest.approx(2.8)
     assert services.count_problems() == original_count
     assert len(ai.list_review_items_for_job(job.id)) == 1
 

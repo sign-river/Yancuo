@@ -13,8 +13,13 @@ from yancuo_win.domain.rules import DomainError
 
 
 class _Response:
-    def __init__(self, payload: dict) -> None:
+    def __init__(
+        self,
+        payload: dict,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.payload = payload
+        self.headers = headers or {}
 
     def __enter__(self):
         return self
@@ -121,8 +126,16 @@ def test_structure_from_image_sends_multimodal_chat_completion(
                         }
                     }
                 ],
-                "usage": {"total_tokens": 10},
-            }
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 3,
+                    "total_tokens": 10,
+                },
+            },
+            {
+                "Server-Timing": "model;dur=42",
+                "OpenAI-Processing-Ms": "42",
+            },
         )
 
     monkeypatch.setattr(
@@ -148,6 +161,15 @@ def test_structure_from_image_sends_multimodal_chat_completion(
     assert result.model == "vision-model"
     assert {"image_encode", "request", "response_parse"} <= result.timings_ms.keys()
     assert result.diagnostics["request_attempts"] == 1
+    assert result.diagnostics["token_usage"] == {
+        "prompt_tokens": 7,
+        "completion_tokens": 3,
+        "total_tokens": 10,
+    }
+    assert result.diagnostics["server_timing"] == {
+        "server-timing": "model;dur=42",
+        "openai-processing-ms": "42",
+    }
 
 
 def test_structure_from_image_accepts_multi_problem_envelope(

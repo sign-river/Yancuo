@@ -562,19 +562,37 @@ class AIService:
                 s.scalars(
                     select(AuditLog).where(
                         AuditLog.action.in_(
-                            {"ai_item_done", "ai_item_failed", "ai_item_cache_hit"}
+                            {
+                                "ai_item_done",
+                                "ai_item_failed",
+                                "ai_item_cache_hit",
+                                "ai_job_ui_delivered",
+                            }
                         ),
-                        AuditLog.entity_type == "ai_job_item",
-                        AuditLog.entity_id.in_(item_ids),
+                        (
+                            (
+                                (AuditLog.entity_type == "ai_job_item")
+                                & AuditLog.entity_id.in_(item_ids)
+                            )
+                            | (
+                                (AuditLog.entity_type == "ai_job")
+                                & (AuditLog.entity_id == job_id)
+                            )
+                        ),
                     )
                 ).all()
                 if item_ids
                 else []
             )
             totals: dict[str, float] = {}
+            client_totals: dict[str, float] = {}
+            client_samples = 0
             samples = 0
             retry_count = 0
             cache_hits = 0
+            token_usage: dict[str, int] = {}
+            token_samples = 0
+            server_timing: list[dict[str, str]] = []
             for log in logs:
                 try:
                     detail = json.loads(log.detail_json)
@@ -583,11 +601,35 @@ class AIService:
                 if log.action == "ai_item_cache_hit":
                     cache_hits += 1
                     continue
+                if log.action == "ai_job_ui_delivered":
+                    timings = detail.get("timings_ms")
+                    if isinstance(timings, dict):
+                        client_samples += 1
+                        for key, value in timings.items():
+                            if isinstance(value, (int, float)):
+                                client_totals[str(key)] = (
+                                    client_totals.get(str(key), 0.0) + float(value)
+                                )
+                    continue
                 provider_diagnostics = detail.get("provider_diagnostics")
                 if isinstance(provider_diagnostics, dict):
                     attempts = provider_diagnostics.get("request_attempts")
                     if isinstance(attempts, int):
                         retry_count += max(0, attempts - 1)
+                    usage = provider_diagnostics.get("token_usage")
+                    if isinstance(usage, dict):
+                        token_samples += 1
+                        for key, value in usage.items():
+                            if isinstance(value, int) and not isinstance(value, bool):
+                                token_usage[str(key)] = token_usage.get(str(key), 0) + value
+                    timing = provider_diagnostics.get("server_timing")
+                    if isinstance(timing, dict):
+                        server_timing.append(
+                            {
+                                str(key): str(value)
+                                for key, value in timing.items()
+                            }
+                        )
                 timings = detail.get("timings_ms")
                 if log.action != "ai_item_done" or not isinstance(timings, dict):
                     continue
@@ -599,6 +641,13 @@ class AIService:
                 key: round(value / samples, 1)
                 for key, value in totals.items()
             } if samples else {}
+            if client_samples:
+                averages.update(
+                    {
+                        key: round(value / client_samples, 1)
+                        for key, value in client_totals.items()
+                    }
+                )
             return {
                 "stage": stage,
                 "stage_label": label,
@@ -606,7 +655,40 @@ class AIService:
                 "timing_samples": samples,
                 "retry_count": retry_count,
                 "cache_hits": cache_hits,
+                "provider_token_usage": token_usage,
+                "provider_token_samples": token_samples,
+                "provider_server_timing": server_timing,
             }
+
+    def record_ui_delivery_timings(
+        self,
+        job_id: str,
+        *,
+        ui_wait_ms: float,
+        classification_match_ms: float,
+    ) -> None:
+        """Persist client-side delivery stages after the worker signal is received."""
+
+        values = {
+            "ui_wait": max(0.0, float(ui_wait_ms)),
+            "classification_match": max(0.0, float(classification_match_ms)),
+        }
+        with self.session() as s:
+            if s.get(AiJob, job_id) is None:
+                raise DomainError("任务不存在")
+            self._audit(
+                s,
+                "ai_job_ui_delivered",
+                "ai_job",
+                job_id,
+                {
+                    "timings_ms": {
+                        key: round(value, 1)
+                        for key, value in values.items()
+                    }
+                },
+            )
+            s.commit()
 
     def create_intake_structure_job(
         self,
@@ -844,6 +926,13 @@ class AIService:
             item = s.get(AiJobItem, item_id)
             if not job or not item:
                 return
+            queued_at = item.updated_at or item.created_at
+            if queued_at.tzinfo is None:
+                queued_at = queued_at.replace(tzinfo=timezone.utc)
+            timings_ms["queue_wait"] = max(
+                0.0,
+                (datetime.now(timezone.utc) - queued_at).total_seconds() * 1000,
+            )
             intake_session: IntakeSession | None = None
             problem: Problem | None = None
             intake_assets: list[IntakeAsset] = []
@@ -931,6 +1020,7 @@ class AIService:
                 source_fingerprint = hashlib.sha256(
                     "\n".join(value.sha256 for value in intake_assets).encode("ascii")
                 ).hexdigest()
+                cache_started = perf_counter()
                 cache_key = recognition_cache_key(
                     asset_sha256=source_fingerprint,
                     prompt_body=prompt_body,
@@ -945,6 +1035,9 @@ class AIService:
                     if cached and use_recognition_cache
                     else None
                 )
+                timings_ms["cache_lookup"] = (
+                    perf_counter() - cache_started
+                ) * 1000
                 if not self.runtime.settings.privacy.send_original_images_to_ai:
                     raise DomainError("隐私设置禁止向 AI 发送原图")
                 cached_result = _structured_result_from_cache(
@@ -954,7 +1047,6 @@ class AIService:
                 if cached_result is not None:
                     active_stage = "cache"
                     result = cached_result
-                    timings_ms["cache_hit"] = 1.0
                     self._audit(
                         s,
                         "ai_item_cache_hit",

@@ -56,6 +56,7 @@ class OpenAICompatibleProvider(AIProvider):
         self.api_key_env = api_key_env
         self.credential_key = credential_key or "yancuo_ai_api_key"
         self._last_request_attempts = 0
+        self._last_server_timing: dict[str, str] = {}
 
     def _api_key(self) -> str:
         if self.api_key_env:
@@ -105,6 +106,7 @@ class OpenAICompatibleProvider(AIProvider):
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         body: Any = None
         self._last_request_attempts = 0
+        self._last_server_timing = {}
         for attempt in range(1, _MAX_REQUEST_ATTEMPTS + 1):
             self._last_request_attempts = attempt
             request = urllib.request.Request(
@@ -119,6 +121,16 @@ class OpenAICompatibleProvider(AIProvider):
             )
             try:
                 with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                    headers = getattr(response, "headers", None)
+                    if headers is not None:
+                        for header in (
+                            "Server-Timing",
+                            "OpenAI-Processing-Ms",
+                            "X-Request-Duration-Ms",
+                        ):
+                            value = headers.get(header)
+                            if value:
+                                self._last_server_timing[header.lower()] = str(value)
                     body = json.loads(response.read().decode("utf-8"))
                 break
             except urllib.error.HTTPError as exc:
@@ -151,6 +163,25 @@ class OpenAICompatibleProvider(AIProvider):
         if not isinstance(body, dict):
             raise DomainError("AI 响应格式无效")
         return body
+
+    def _response_diagnostics(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Return privacy-safe request metadata exposed by compatible providers."""
+
+        diagnostics: dict[str, Any] = {
+            "request_attempts": self._last_request_attempts,
+        }
+        usage = body.get("usage")
+        if isinstance(usage, dict):
+            token_usage: dict[str, int] = {}
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                value = usage.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    token_usage[key] = value
+            if token_usage:
+                diagnostics["token_usage"] = token_usage
+        if self._last_server_timing:
+            diagnostics["server_timing"] = dict(self._last_server_timing)
+        return diagnostics
 
     def structure_from_image(
         self,
@@ -271,7 +302,7 @@ class OpenAICompatibleProvider(AIProvider):
                 "response_parse": response_parse_ms,
             },
             diagnostics={
-                "request_attempts": self._last_request_attempts,
+                **self._response_diagnostics(body),
                 "structure_suggestion": suggestion,
             },
         )
@@ -310,7 +341,7 @@ class OpenAICompatibleProvider(AIProvider):
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             cost_estimate=round(total_tokens * 0.00002, 6),
-            diagnostics={"request_attempts": self._last_request_attempts},
+            diagnostics=self._response_diagnostics(body),
         )
 
     def complete_chat(
@@ -344,7 +375,7 @@ class OpenAICompatibleProvider(AIProvider):
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             cost_estimate=round(total_tokens * 0.00002, 6),
-            diagnostics={"request_attempts": self._last_request_attempts},
+            diagnostics=self._response_diagnostics(body),
         )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QThread, Signal
@@ -24,6 +25,7 @@ class AIJobWorker(QThread):
         self.ai = ai
         self.job_id = job_id
         self._cancel = False
+        self.service_finished_at: float | None = None
 
     def cancel(self) -> None:
         self._cancel = True
@@ -32,6 +34,7 @@ class AIJobWorker(QThread):
         try:
             self.progress.emit(f"running:{self.job_id}")
             self.ai.run_job(self.job_id, should_cancel=lambda: self._cancel)
+            self.service_finished_at = perf_counter()
             self.finished_ok.emit(self.job_id)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(self.job_id, str(exc))
