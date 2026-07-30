@@ -228,6 +228,9 @@ def app_stylesheet(theme: str = "light") -> str:
         color: {t.muted};
         background: transparent;
     }}
+    QMenu::item[danger="true"] {{
+        color: {t.danger};
+    }}
     QMenu::separator {{
         height: 1px;
         background: {t.border};
@@ -1027,6 +1030,40 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.card};
         border: 1px solid {t.border};
         border-radius: 8px;
+    }}
+    QFrame#StateNotice {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_control}px;
+    }}
+    QFrame#StateNotice[state="loading"] {{
+        background: {t.progress_bg};
+        border-color: {t.focus_ring};
+    }}
+    QFrame#StateNotice[state="success"] {{
+        background: {t.chip_bg};
+        border-color: {t.focus_ring};
+    }}
+    QFrame#StateNotice[state="error"] {{
+        background: {t.danger_bg};
+        border-color: {t.danger_border};
+    }}
+    QFrame#StateNotice[state="error"] QLabel {{
+        color: {t.danger};
+    }}
+    QFrame#StateNotice[state="disabled"] {{
+        background: {t.input_disabled};
+        border-color: {t.border};
+    }}
+    QFrame#StateNotice[state="disabled"] QLabel {{
+        color: {t.muted};
+    }}
+    QFrame#StateNotice[state="permission"] {{
+        background: {t.fallback_bg};
+        border-color: {t.hover_border};
+    }}
+    QFrame#StateNotice[state="permission"] QLabel {{
+        color: {t.fallback_text};
     }}
     QFrame#SkeletonLineLong, QFrame#SkeletonLineShort {{
         background: {t.input_disabled};

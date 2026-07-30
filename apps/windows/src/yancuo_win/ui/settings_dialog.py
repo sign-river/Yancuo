@@ -45,6 +45,7 @@ from yancuo_win.tasks.model_worker import AIModelListWorker
 from yancuo_win.ui.widgets import (
     CardFrame,
     PageHeader,
+    StateNotice,
     button_row,
     describe_field,
     primary_button,
@@ -172,9 +173,10 @@ class ServiceSettingsPage(QWidget):
             "从 API 获取或手动输入支持图片的模型 ID"
         )
         ai_form.addRow("图片模型 ID", self.ai_model)
-        self.ai_model_status = QLabel("可从 API 获取账户可用模型；请自行确认支持图片输入。")
-        self.ai_model_status.setObjectName("MutedLabel")
-        self.ai_model_status.setWordWrap(True)
+        self.ai_model_status = StateNotice(
+            "可从 API 获取账户可用模型；请自行确认支持图片输入。",
+            "info",
+        )
         ai_form.addRow("", self.ai_model_status)
 
         self._ai_cred_key = (
@@ -266,6 +268,8 @@ class ServiceSettingsPage(QWidget):
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.token_edit.setPlaceholderText("粘贴新令牌后点保存")
         cloud_form.addRow("新令牌", self.token_edit)
+        self.cloud_permission_notice = StateNotice()
+        cloud_form.addRow("", self.cloud_permission_notice)
         cloud_card.body.addLayout(cloud_form)
 
         self.save_cloud_token_button = primary_button("保存云令牌")
@@ -439,7 +443,10 @@ class ServiceSettingsPage(QWidget):
 
         self.fetch_ai_models.setEnabled(False)
         self.fetch_ai_models.setText("正在获取…")
-        self.ai_model_status.setText("正在从 Faro API 获取模型列表…")
+        self.ai_model_status.set_state(
+            "正在从 Faro API 获取模型列表…",
+            "loading",
+        )
         worker = AIModelListWorker(provider, timeout_seconds=20, parent=self)
         worker.finished_ok.connect(self._on_ai_models_loaded)
         worker.failed.connect(self._on_ai_models_failed)
@@ -468,17 +475,22 @@ class ServiceSettingsPage(QWidget):
         self.ai_model.blockSignals(False)
 
         if choices:
-            self.ai_model_status.setText(
+            self.ai_model_status.set_state(
                 f"已获取 {len(choices)} 个可用模型。列表不标注视觉能力，"
-                "请选择确认支持图片输入的模型。"
+                "请选择确认支持图片输入的模型。",
+                "success",
             )
         else:
-            self.ai_model_status.setText(
-                "API 身份验证成功，但没有返回模型；仍可手动输入模型 ID。"
+            self.ai_model_status.set_state(
+                "API 身份验证成功，但没有返回模型；仍可手动输入模型 ID。",
+                "disabled",
             )
 
     def _on_ai_models_failed(self, error: str) -> None:
-        self.ai_model_status.setText("获取失败；仍可手动输入模型 ID。")
+        self.ai_model_status.set_state(
+            "获取失败；仍可手动输入模型 ID。",
+            "error",
+        )
         QMessageBox.warning(self, "获取模型失败", error)
 
     def _on_ai_model_worker_finished(self) -> None:
@@ -505,14 +517,34 @@ class ServiceSettingsPage(QWidget):
             self.token_label.setText("GitLink 令牌")
             self.token_status.setText(mask_secret(get_secret(key) if key else None))
             self.token_edit.setEnabled(True)
+            self._set_cloud_permission_state(key)
         elif name == "github":
             self.token_label.setText("GitHub PAT")
             self.token_status.setText(mask_secret(get_secret(key) if key else None))
             self.token_edit.setEnabled(True)
+            self._set_cloud_permission_state(key)
         else:
             self.token_label.setText("令牌（本地文件夹无需）")
             self.token_status.setText("—")
             self.token_edit.setEnabled(False)
+            self.token_edit.setToolTip("本地文件夹提供商不使用云端令牌")
+            self.cloud_permission_notice.set_state(
+                "本地文件夹提供商不需要云端令牌。",
+                "disabled",
+            )
+
+    def _set_cloud_permission_state(self, key: str | None) -> None:
+        self.token_edit.setToolTip("")
+        if key and get_secret(key):
+            self.cloud_permission_notice.set_state(
+                "云令牌已保存在操作系统凭据中。",
+                "success",
+            )
+        else:
+            self.cloud_permission_notice.set_state(
+                "尚未保存云令牌；连接测试和远端操作当前不可用。",
+                "permission",
+            )
 
     def _on_provider_changed(self) -> None:
         self._refresh_token_ui()
@@ -535,6 +567,7 @@ class ServiceSettingsPage(QWidget):
             set_secret(key, token)
             self.token_edit.clear()
             self.token_status.setText(mask_secret(get_secret(key)))
+            self._set_cloud_permission_state(key)
             self.status_message.emit("云令牌已保存到系统凭据")
         except DomainError as exc:
             QMessageBox.warning(self, "失败", str(exc))
@@ -545,6 +578,7 @@ class ServiceSettingsPage(QWidget):
             return
         delete_secret(key)
         self.token_status.setText(mask_secret(None))
+        self._set_cloud_permission_state(key)
         self.status_message.emit("云令牌已从系统凭据中清除")
 
     def _apply_session_provider(self, *, notify: bool = True) -> None:

@@ -17,7 +17,7 @@
 
 - Windows 数据库：`schema_version=19`
 - 跨端字段语义：`data_format_version=1`
-- Windows 最近完整单元测试：`309 passed`
+- Windows 最近完整单元测试：`317 passed`
 - 路线图 A—K 已完成
 - 本地题库、笔记、复习、AI 录题、普通/受限 AI 搜索已经可用
 - `.ebpack` 完整快照、LocalFolder 增量同步和 GitHub Operation 批次已经交付

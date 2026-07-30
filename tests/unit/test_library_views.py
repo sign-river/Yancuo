@@ -768,3 +768,29 @@ def test_mock_provider_hint_and_task_selection_are_non_blocking(
     dialog._run_selected()
     assert dialog.summary.text() == "请先选择一个后台任务"
     dialog.close()
+
+
+def test_settings_expose_loading_failure_disabled_and_permission_states(
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai_settings = window.ai_settings_page
+    ai_settings._on_ai_models_loaded(["vision-model"])
+    assert ai_settings.ai_model_status.property("state") == "success"
+    assert "1 个可用模型" in ai_settings.ai_model_status.text()
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args, **_kwargs: None)
+    ai_settings._on_ai_models_failed("network unavailable")
+    assert ai_settings.ai_model_status.property("state") == "error"
+
+    monkeypatch.setattr(settings_dialog_module, "get_secret", lambda _key: None)
+    cloud_settings = window.cloud_settings_page
+    cloud_settings.provider.setCurrentIndex(
+        cloud_settings.provider.findData("github")
+    )
+    assert cloud_settings.cloud_permission_notice.property("state") == "permission"
+    assert "当前不可用" in cloud_settings.cloud_permission_notice.text()
+    cloud_settings.provider.setCurrentIndex(
+        cloud_settings.provider.findData("local_folder")
+    )
+    assert cloud_settings.cloud_permission_notice.property("state") == "disabled"
+    assert not cloud_settings.token_edit.isEnabled()

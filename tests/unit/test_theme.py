@@ -110,6 +110,31 @@ def test_form_helpers_expose_labels_and_predictable_focus_order() -> None:
     app.processEvents()
 
 
+@pytest.mark.parametrize(
+    ("variant", "accessible_name"),
+    [
+        ("loading", "正在加载"),
+        ("success", "操作成功"),
+        ("error", "操作失败"),
+        ("disabled", "功能不可用"),
+        ("permission", "需要配置或权限"),
+    ],
+)
+def test_state_notice_exposes_semantic_state(
+    variant: str,
+    accessible_name: str,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    notice = widgets_module.StateNotice("状态说明", variant)
+
+    assert notice.property("state") == variant
+    assert notice.text() == "状态说明"
+    assert notice.accessibleName() == accessible_name
+    assert notice.accessibleDescription() == "状态说明"
+    notice.close()
+    app.processEvents()
+
+
 def test_explicit_theme_ignores_system_color_scheme() -> None:
     assert resolve_theme_mode("light", Qt.ColorScheme.Dark) == "light"
     assert resolve_theme_mode("dark", Qt.ColorScheme.Light) == "dark"
@@ -137,6 +162,22 @@ def test_stylesheet_covers_dark_tabs_inputs_and_cards() -> None:
     assert LIGHT_THEME.bg not in rendered
 
 
+@pytest.mark.parametrize(
+    ("mode", "tokens"),
+    [("light", LIGHT_THEME), ("dark", DARK_THEME)],
+)
+def test_semantic_state_notices_use_each_theme_palette(mode, tokens) -> None:
+    rendered = app_stylesheet(mode)
+
+    assert 'QFrame#StateNotice[state="loading"]' in rendered
+    assert 'QFrame#StateNotice[state="error"]' in rendered
+    assert 'QFrame#StateNotice[state="disabled"]' in rendered
+    assert 'QFrame#StateNotice[state="permission"]' in rendered
+    assert tokens.danger_bg in rendered
+    assert tokens.input_disabled in rendered
+    assert tokens.fallback_bg in rendered
+
+
 def test_soft_visual_tokens_and_library_surfaces_are_rendered() -> None:
     rendered = app_stylesheet("light")
 
@@ -157,3 +198,7 @@ def test_soft_visual_tokens_and_library_surfaces_are_rendered() -> None:
     assert "QScrollArea#ImageViewerCanvas" in rendered
     assert "QListWidget#MainNav:focus" in rendered
     assert "QTreeWidget#KnowledgeTree::branch:selected" in rendered
+    assert 'QMenu::item[danger="true"]' in rendered
+    assert 'QFrame#StateNotice[state="loading"]' in rendered
+    assert 'QFrame#StateNotice[state="error"]' in rendered
+    assert 'QFrame#StateNotice[state="permission"]' in rendered

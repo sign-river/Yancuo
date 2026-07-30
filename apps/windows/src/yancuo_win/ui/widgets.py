@@ -248,12 +248,62 @@ class StatusTag(QLabel):
         self.style().polish(self)
 
 
+class StateNotice(QFrame):
+    """Theme-aware inline loading, failure, disabled and permission state."""
+
+    _accessible_names = {
+        "info": "信息",
+        "loading": "正在加载",
+        "success": "操作成功",
+        "error": "操作失败",
+        "disabled": "功能不可用",
+        "permission": "需要配置或权限",
+    }
+
+    def __init__(
+        self,
+        text: str = "",
+        variant: str = "info",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("StateNotice")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 9, 12, 9)
+        self.label = QLabel()
+        self.label.setWordWrap(True)
+        layout.addWidget(self.label)
+        self.set_state(text, variant)
+
+    def set_state(self, text: str, variant: str = "info") -> None:
+        if variant not in self._accessible_names:
+            raise ValueError(f"unsupported state notice variant: {variant}")
+        self.setProperty("state", variant)
+        self.label.setText(text)
+        self.setAccessibleName(self._accessible_names[variant])
+        self.setAccessibleDescription(text)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self.set_state(text, str(self.property("state") or "info"))
+
+    def text(self) -> str:
+        return self.label.text()
+
+    def clear(self) -> None:
+        self.label.clear()
+        self.setAccessibleDescription("")
+
+
 class LoadingSkeleton(QFrame):
     """Neutral loading placeholder; callers choose the amount of expected content."""
 
     def __init__(self, rows: int = 3, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("LoadingSkeleton")
+        self.setAccessibleName("正在加载")
+        self.setAccessibleDescription("内容正在加载，请稍候")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
@@ -276,6 +326,8 @@ class ErrorState(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setAccessibleName(title)
+        self.setAccessibleDescription(description)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 32, 20, 32)
         layout.setSpacing(8)
@@ -287,11 +339,12 @@ class ErrorState(QWidget):
         body.setObjectName("MutedLabel")
         body.setAlignment(Qt.AlignmentFlag.AlignCenter)
         body.setWordWrap(True)
-        retry = default_button("重新加载")
-        retry.clicked.connect(self.retry_requested)
+        self.retry_button = default_button("重新加载")
+        self.retry_button.setAccessibleDescription("重新加载刚才失败的内容")
+        self.retry_button.clicked.connect(self.retry_requested)
         layout.addWidget(heading)
         layout.addWidget(body)
-        layout.addWidget(retry, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.retry_button, alignment=Qt.AlignmentFlag.AlignCenter)
 
 
 class ToastMessage(QFrame):

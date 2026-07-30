@@ -3626,7 +3626,6 @@ class MainWindow(QMainWindow):
 
     def _build_catalog_action_menu(self, actions: tuple[CatalogAction, ...]) -> QMenu:
         menu = QMenu(self)
-        menu.setStyleSheet('QMenu::item[danger="true"] { color: #F54A45; }')
         for spec in actions:
             if spec.separator_before:
                 menu.addSeparator()
