@@ -21,12 +21,16 @@ from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
+from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import SoftItemDelegate
 
 
 class _ReaderStub(QWidget):
     def set_fit_content_height(self, *_args, **_kwargs) -> None:
         pass
+
+    def set_adaptive_content_height(self, maximum_height, **_kwargs) -> None:
+        self.adaptive_height_limit = maximum_height
 
     def set_zoom_scale(self, *_args, **_kwargs) -> None:
         pass
@@ -432,6 +436,25 @@ def test_question_preview_expands_inline_and_remains_single(window: MainWindow) 
     collapsed = window.problem_list.itemWidget(window.problem_list.item(1))
     assert collapsed is not None
     assert not collapsed.findChildren(QLabel, "InlinePreviewTitle")
+
+
+def test_formula_content_surfaces_use_bounded_adaptive_height(
+    window: MainWindow,
+) -> None:
+    first = window.problem_list.item(0)
+    window._toggle_question_expansion(first)
+    expanded = window.problem_list.itemWidget(window.problem_list.item(0))
+    assert expanded is not None
+    inline_reader = expanded.findChild(MathContentView)
+    assert inline_reader is not None
+    assert inline_reader._content_height_limit == 420
+
+    assert window.problem_detail_page.reader.adaptive_height_limit == 560
+    assert window.intake_page.ai_result_preview.adaptive_height_limit == 520
+    assert {
+        preview.adaptive_height_limit
+        for _label, preview in window.intake_page.ai_form._field_previews.values()
+    } == {320}
 
 
 def test_due_navigation_returns_to_processing_center(window: MainWindow) -> None:

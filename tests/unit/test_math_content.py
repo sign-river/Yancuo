@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, QObject, Signal
+from PySide6.QtCore import QByteArray, QObject, QSizeF, Signal, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 
 import yancuo_win.ui.math_content as math_content_module
@@ -75,6 +75,17 @@ class _PdfViewStub(QWidget):
         self.current_document = document
 
 
+class _SizingDocument:
+    def __init__(self, page_size: QSizeF) -> None:
+        self.page_size = page_size
+
+    def pageCount(self) -> int:  # noqa: N802
+        return 1
+
+    def pagePointSize(self, _page_number: int) -> QSizeF:  # noqa: N802
+        return self.page_size
+
+
 def test_render_math_text_converts_inline_and_display_latex_to_mathml() -> None:
     rendered = render_math_text(
         r"已知 \[\lim_{x\to\pi}\frac{\sqrt{\sin\frac{x}{2}}-1}{A(x-\pi)^k}=1\]，"
@@ -125,6 +136,42 @@ def test_reader_swaps_in_only_fully_rendered_documents(monkeypatch) -> None:
     assert pdf_view.current_document is reader._document
     assert pdf_view.isVisible()
     reader.close()
+
+
+def test_adaptive_reader_fits_short_content_and_scrolls_long_content() -> None:
+    app = QApplication.instance() or QApplication([])
+    reader = MathContentView()
+    reader.resize(794, 600)
+    reader.set_zoom_scale(1.0)
+    reader.set_adaptive_content_height(300, minimum_height=80)
+
+    reader._document = _SizingDocument(QSizeF(794, 120))  # type: ignore[assignment]
+    reader._update_content_height()
+    assert 115 <= reader.height() <= 125
+    assert (
+        reader._view.verticalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+
+    reader._document = _SizingDocument(QSizeF(794, 1200))  # type: ignore[assignment]
+    reader._content_height = None
+    reader._update_content_height()
+    assert reader.height() == 300
+    assert (
+        reader._view.verticalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    reader.close()
+    app.processEvents()
+
+
+def test_content_sized_problem_document_does_not_force_viewport_height() -> None:
+    rendered = build_problem_html(
+        {"title": "短题", "question_markdown": "求 $x+1$。"},
+        fit_content=True,
+    )
+
+    assert "min-height: 100%" not in rendered
 
 
 def test_render_math_text_escapes_non_math_user_content() -> None:

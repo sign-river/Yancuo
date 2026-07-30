@@ -147,6 +147,7 @@ class ProblemDetailPage(QWidget):
         root.addLayout(actions)
 
         self.reader = MathContentView()
+        self.reader.set_adaptive_content_height(560)
         root.addWidget(self.reader, stretch=1)
 
         self.chat_card = CardFrame()

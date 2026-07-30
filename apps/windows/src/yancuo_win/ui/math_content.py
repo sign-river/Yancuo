@@ -21,6 +21,7 @@ from yancuo_win.ui.theme import current_theme_name, get_theme_manager, theme_tok
 
 _PREVIEW_ZOOM_SCALE = 0.96
 _PREVIEW_VIEWS: weakref.WeakSet["MathContentView"] = weakref.WeakSet()
+_PDF_CSS_WIDTH = 794
 
 
 def preview_zoom_scale() -> float:
@@ -510,6 +511,8 @@ class MathContentView(QWidget):
         self._render_scheduled = False
         self._fit_content_height = False
         self._content_sized_pdf = False
+        self._content_height_limit: int | None = None
+        self._minimum_content_height = 80
         self._compact = False
         self._zoom_scale = preview_zoom_scale()
         self._content_height: int | None = None
@@ -557,6 +560,7 @@ class MathContentView(QWidget):
 
         self._content_sized_pdf = enabled
         self._fit_content_height = enabled and expand_widget
+        self._content_height_limit = None
         if enabled:
             policy = (
                 QSizePolicy.Policy.Fixed
@@ -575,6 +579,32 @@ class MathContentView(QWidget):
         )
         self._view.setVerticalScrollBarPolicy(policy)
         self._view.setHorizontalScrollBarPolicy(policy)
+
+    def set_adaptive_content_height(
+        self,
+        maximum_height: int = 480,
+        *,
+        minimum_height: int = 80,
+    ) -> None:
+        """Fit short content and scroll inside the reader once it grows long."""
+
+        self._content_sized_pdf = True
+        self._fit_content_height = True
+        self._minimum_content_height = max(1, int(minimum_height))
+        self._content_height_limit = max(
+            self._minimum_content_height,
+            int(maximum_height),
+        )
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._view.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._view.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
 
     def set_compact(self, enabled: bool = True) -> None:
         """Use the denser reader scale for constrained workflow screens."""
@@ -617,14 +647,10 @@ class MathContentView(QWidget):
             self._renderer.deleteLater()
         if self._fit_content_height:
             self._content_height = None
-            self.setFixedHeight(1)
+            if self._document is None:
+                self.setFixedHeight(self._minimum_content_height)
 
         page = QWebEnginePage(self)
-        set_viewport_size = getattr(page, "setViewportSize", None)
-        if callable(set_viewport_size):
-            # Keep Chromium's default 600px viewport from becoming blank PDF
-            # space when we measure a content-sized reader document.
-            set_viewport_size(QSize(794, 1))
         page.setBackgroundColor(QColor(theme_tokens(current_theme_name()).bg))
         page.loadFinished.connect(
             lambda ok, target=page, token=generation: self._html_loaded(
@@ -646,7 +672,15 @@ class MathContentView(QWidget):
             return
         if self._content_sized_pdf:
             page.runJavaScript(
-                "Math.ceil(document.body.scrollHeight)",
+                f"""(() => {{
+                    const width = {_PDF_CSS_WIDTH};
+                    document.documentElement.style.width = `${{width}}px`;
+                    document.body.style.width = `${{width}}px`;
+                    return Math.ceil(Math.max(
+                        document.body.scrollHeight,
+                        document.body.getBoundingClientRect().height
+                    ));
+                }})()""",
                 lambda height, target=page, token=generation: self._print_content_pdf(
                     target, token, height
                 ),
@@ -756,7 +790,18 @@ class MathContentView(QWidget):
             page_size = self._document.pagePointSize(page_number)
             if page_size.width() > 0:
                 height += width * page_size.height() / page_size.width()
-        new_height = max(1, round(height))
+        natural_height = max(self._minimum_content_height, round(height))
+        new_height = (
+            min(natural_height, self._content_height_limit)
+            if self._content_height_limit is not None
+            else natural_height
+        )
+        overflow = natural_height > new_height
+        self._view.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if overflow
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         if new_height == self._content_height:
             return
         self._content_height = new_height
@@ -835,7 +880,7 @@ class MathContentView(QWidget):
             include_answers=self._last_render["include_answers"],
             show_header=self._last_render["show_header"],
             show_answer_notice=self._last_render["show_answer_notice"],
-            fit_content=self._fit_content_height,
+            fit_content=self._content_sized_pdf,
             compact=self._last_render["compact"] or self._compact,
             theme=current_theme_name(),
         )

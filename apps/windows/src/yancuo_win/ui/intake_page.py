@@ -642,7 +642,7 @@ class ProblemForm(QWidget):
         label = QLabel(title)
         label.setObjectName("MutedLabel")
         preview = MathContentView()
-        preview.set_fit_content_height(True)
+        preview.set_adaptive_content_height(320)
         label.hide()
         preview.hide()
         self._field_previews[key] = (label, preview)
@@ -1178,7 +1178,7 @@ class IntakePage(QWidget):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         self.ai_result_preview = MathContentView()
         self.ai_result_preview.setMinimumWidth(520)
-        self.ai_result_preview.set_fit_content_height(True, expand_widget=False)
+        self.ai_result_preview.set_adaptive_content_height(520)
         preview_layout.addWidget(self.ai_result_preview, stretch=1)
         self.ai_result_tabs.addTab(preview_host, "阅读预览")
 

@@ -190,7 +190,7 @@ class _InlineQuestionItem(QWidget):
 
         reader = MathContentView()
         reader.setObjectName("InlineQuestionPreview")
-        reader.set_fit_content_height()
+        reader.set_adaptive_content_height(420)
         reader.content_height_changed.connect(self.updateGeometry)
         question_markdown = problem.question_markdown or ""
         if problem.question_latex and problem.question_latex not in question_markdown:
