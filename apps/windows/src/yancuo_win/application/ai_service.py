@@ -62,6 +62,47 @@ def _structured_result_from_cache(
 
     if not payload:
         return None
+    if (
+        payload.get("format") == "yancuo-recognition-cache"
+        and payload.get("format_version") == 2
+    ):
+        cached_candidates = payload.get("candidates")
+        if not isinstance(cached_candidates, list) or not cached_candidates:
+            return None
+        candidates: list[StructuredCandidate] = []
+        for value in cached_candidates:
+            if not isinstance(value, dict):
+                return None
+            fields = value.get("fields")
+            uncertain = value.get("uncertain_fields", [])
+            region = value.get("region", {})
+            if (
+                not isinstance(fields, dict)
+                or not fields
+                or not isinstance(uncertain, list)
+                or not isinstance(region, dict)
+            ):
+                return None
+            candidates.append(
+                StructuredCandidate(
+                    fields=dict(fields),
+                    uncertain_fields=[
+                        dict(item) for item in uncertain if isinstance(item, dict)
+                    ],
+                    region=region,
+                )
+            )
+        diagnostics = payload.get("diagnostics", {})
+        return StructuredResult(
+            fields=dict(candidates[0].fields),
+            uncertain_fields=list(candidates[0].uncertain_fields),
+            candidates=candidates,
+            raw_text=raw_response,
+            diagnostics=(
+                dict(diagnostics) if isinstance(diagnostics, dict) else {}
+            ),
+        )
+
     cached_problems = payload.get("problems")
     if cached_problems is not None:
         if not isinstance(cached_problems, list) or not cached_problems:
@@ -90,6 +131,35 @@ def _structured_result_from_cache(
         candidates=[StructuredCandidate(fields=fields, region=region)],
         raw_text=raw_response,
     )
+
+
+def _recognition_cache_payload(
+    proposals: list[
+        tuple[dict[str, Any], list[dict[str, Any]], dict[str, float]]
+    ],
+    result: StructuredResult,
+) -> dict[str, object]:
+    """Persist every normalized value needed to replay candidate creation."""
+
+    diagnostics: dict[str, object] = {}
+    suggestion = _structure_suggestion(
+        result.diagnostics.get("structure_suggestion")
+    )
+    if suggestion is not None:
+        diagnostics["structure_suggestion"] = suggestion
+    return {
+        "format": "yancuo-recognition-cache",
+        "format_version": 2,
+        "candidates": [
+            {
+                "fields": fields,
+                "uncertain_fields": uncertain,
+                "region": region,
+            }
+            for fields, uncertain, region in proposals
+        ],
+        "diagnostics": diagnostics,
+    }
 
 
 def _structure_suggestion(value: object) -> dict[str, object] | None:
@@ -1136,7 +1206,10 @@ class AIService:
                             model=job.model,
                             allowed_fields=sorted(allowed),
                         ),
-                        structured_json=item.structured_json,
+                        structured_json=json.dumps(
+                            _recognition_cache_payload(proposals, result),
+                            ensure_ascii=False,
+                        ),
                         raw_response=item.raw_response,
                         source_job_item_id=item.id,
                     )

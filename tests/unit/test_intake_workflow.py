@@ -402,6 +402,128 @@ def test_recognition_cache_summary_and_clear_do_not_touch_intake_data(
     assert len(intake.list_candidates(started.job_id)) == 1
 
 
+def test_recognition_cache_replays_catalog_fields_proposals_and_uncertainty(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = intake.app.create_subject("高等数学")
+    chapter = intake.app.create_chapter(subject.id, "函数与极限")
+    image = tmp_path / "taxonomy-cache.jpg"
+    image.write_bytes(b"\xff\xd8\xfftaxonomy-cache")
+
+    class TaxonomyProvider:
+        calls = 0
+
+        def validate_configuration(self) -> None:
+            return None
+
+        def structure_from_image(self, **_kwargs: object) -> StructuredResult:
+            self.calls += 1
+            return StructuredResult(
+                fields={"title": "已有章节题"},
+                candidates=[
+                    StructuredCandidate(
+                        fields={
+                            "title": "已有章节题",
+                            "question_markdown": "求函数极限",
+                            "subject_id": subject.id,
+                            "chapter_id": chapter.id,
+                        },
+                        uncertain_fields=[
+                            {
+                                "field": "question_markdown",
+                                "reason": "题干末尾略模糊",
+                            }
+                        ],
+                        region={
+                            "x": 0.0,
+                            "y": 0.0,
+                            "width": 1.0,
+                            "height": 0.45,
+                        },
+                    ),
+                    StructuredCandidate(
+                        fields={
+                            "title": "新章节建议题",
+                            "question_markdown": "讨论数列收敛",
+                            "subject_id": subject.id,
+                            "taxonomy_proposal": {
+                                "subject_name": subject.name,
+                                "parent_chapter_id": None,
+                                "chapter_name": "数列极限",
+                                "reason": "题目属于数列收敛性",
+                                "confidence": 0.88,
+                            },
+                        },
+                        region={
+                            "x": 0.0,
+                            "y": 0.5,
+                            "width": 1.0,
+                            "height": 0.45,
+                        },
+                    ),
+                ],
+                diagnostics={
+                    "structure_suggestion": {
+                        "layout_kind": "independent",
+                        "subquestion_count": 2,
+                        "confidence": 0.95,
+                        "rationale": "上下两道独立题",
+                        "signals": ["两个题号"],
+                    }
+                },
+            )
+
+    provider = TaxonomyProvider()
+    monkeypatch.setattr(
+        "yancuo_win.application.intake_service.get_provider",
+        lambda _settings: provider,
+    )
+    monkeypatch.setattr(
+        "yancuo_win.application.ai_service.get_provider",
+        lambda _settings: provider,
+    )
+
+    first = intake.start_ai([image])
+    intake.ai.run_job(first.job_id)
+    first_candidates = intake.list_candidates(first.job_id)
+    first_projection = [
+        (candidate.fields, candidate.uncertain, candidate.region)
+        for candidate in first_candidates
+    ]
+
+    second = intake.start_ai([image])
+    intake.ai.run_job(second.job_id)
+    second_projection = [
+        (candidate.fields, candidate.uncertain, candidate.region)
+        for candidate in intake.list_candidates(second.job_id)
+    ]
+
+    assert provider.calls == 1
+    assert intake.progress(second.job_id).cache_hits == 1
+    assert second_projection == first_projection
+    assert second_projection[0][0]["subject_id"] == subject.id
+    assert second_projection[0][0]["chapter_id"] == chapter.id
+    assert second_projection[1][0]["taxonomy_proposal"]["chapter_name"] == "数列极限"
+    assert "题干末尾略模糊" in second_projection[0][1][0]["reason"]
+    assert intake.structure_suggestions(second.job_id)[0].subquestion_count == 2
+
+    intake.app.delete_chapter(chapter.id)
+    third = intake.start_ai([image])
+    intake.ai.run_job(third.job_id)
+    rematched = intake.list_candidates(third.job_id)[0]
+    assert provider.calls == 2
+    assert intake.progress(third.job_id).cache_hits == 0
+    assert rematched.fields["subject_id"] == subject.id
+    assert "chapter_id" not in rematched.fields
+    assert any(
+        item.get("field") == "chapter_id"
+        and "不属于当前科目" in str(item.get("reason"))
+        for item in rematched.uncertain
+    )
+
+
 def test_ai_taxonomy_proposal_creates_checked_nested_category(
     intake: ProblemIntakeService, tmp_path: Path
 ) -> None:

@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from yancuo_win.ai.base import StructuredCandidate, StructuredResult
-from yancuo_win.application.ai_service import AIService
+from yancuo_win.application.ai_service import (
+    AIService,
+    _recognition_cache_payload,
+    _structured_result_from_cache,
+)
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
@@ -38,6 +42,57 @@ def ai(runtime) -> AIService:
 def test_schema_v2_tables(runtime) -> None:
     assert get_schema_version(runtime.engine) == SCHEMA_VERSION
     assert verify_core_tables(runtime.engine) == []
+
+
+def test_recognition_cache_envelope_preserves_candidate_context() -> None:
+    result = StructuredResult(
+        fields={"title": "第一题"},
+        candidates=[
+            StructuredCandidate(
+                fields={
+                    "title": "第一题",
+                    "subject_id": "sub_math",
+                    "chapter_id": "ch_limit",
+                },
+                uncertain_fields=[
+                    {"field": "chapter_id", "reason": "章节边界需确认"}
+                ],
+                region={"x": 0.0, "y": 0.0, "width": 1.0, "height": 0.5},
+            )
+        ],
+        diagnostics={
+            "structure_suggestion": {
+                "layout_kind": "single",
+                "subquestion_count": 1,
+                "confidence": 0.9,
+                "rationale": "单题",
+                "signals": ["单一区域"],
+            },
+            "provider_private_detail": "must not persist",
+        },
+    )
+    proposals = [
+        (
+            dict(result.candidates[0].fields),
+            list(result.candidates[0].uncertain_fields),
+            dict(result.candidates[0].region),
+        )
+    ]
+
+    restored = _structured_result_from_cache(
+        _recognition_cache_payload(proposals, result),
+        '{"raw":"kept separately"}',
+    )
+
+    assert restored is not None
+    assert restored.candidates[0].fields == result.candidates[0].fields
+    assert (
+        restored.candidates[0].uncertain_fields
+        == result.candidates[0].uncertain_fields
+    )
+    assert restored.candidates[0].region == result.candidates[0].region
+    assert restored.diagnostics["structure_suggestion"]["confidence"] == 0.9
+    assert "provider_private_detail" not in restored.diagnostics
 
 
 def test_mock_recognize_review_accept_reject_undo(
