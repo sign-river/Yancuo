@@ -122,13 +122,40 @@ class ProblemChatService:
             conversation = session.get(ProblemConversation, conversation_id)
             if conversation is None:
                 raise DomainError("对话不存在")
-            sequence = int(session.scalar(select(func.max(ProblemMessage.sequence)).where(ProblemMessage.conversation_id == conversation_id)) or 0) + 1
-            user_message_id = new_id("message")
-            user_message = ProblemMessage(
-                id=user_message_id, conversation_id=conversation_id, sequence=sequence,
-                role="user", content_markdown=content, status="pending",
+            latest = session.scalar(
+                select(ProblemMessage)
+                .where(ProblemMessage.conversation_id == conversation_id)
+                .order_by(ProblemMessage.sequence.desc())
+                .limit(1)
             )
-            session.add(user_message)
+            if (
+                latest is not None
+                and latest.role == "user"
+                and latest.status == "failed"
+                and latest.content_markdown == content
+            ):
+                user_message = latest
+                user_message.status = "pending"
+                user_message.error_message = ""
+            else:
+                sequence = int(
+                    session.scalar(
+                        select(func.max(ProblemMessage.sequence)).where(
+                            ProblemMessage.conversation_id == conversation_id
+                        )
+                    )
+                    or 0
+                ) + 1
+                user_message = ProblemMessage(
+                    id=new_id("message"),
+                    conversation_id=conversation_id,
+                    sequence=sequence,
+                    role="user",
+                    content_markdown=content,
+                    status="pending",
+                )
+                session.add(user_message)
+            user_message_id = user_message.id
             conversation.updated_at = utcnow()
             session.commit()
 
@@ -186,7 +213,10 @@ class ProblemChatService:
             }
         ]
         for message in conversation.messages:
-            if message.status == "complete" or message.role == "user":
+            include = (
+                message.role == "user" and message.status in {"complete", "pending"}
+            ) or (message.role == "assistant" and message.status == "complete")
+            if include:
                 messages.append({"role": message.role, "content": message.content_markdown})
         if conversation.include_original_image and provider.capabilities.supports_chat_images:
             image_content = self._original_image_context(conversation.problem_id)
@@ -199,26 +229,41 @@ class ProblemChatService:
         )
 
     def _original_image_context(self, problem_id: str) -> list[dict[str, Any]]:
-        """Read at most one original only after explicit per-conversation consent."""
+        """Read originals in a deterministic order after explicit consent."""
 
         with self._session() as session:
-            asset = session.scalar(
+            assets = list(
+                session.scalars(
                 select(Asset)
-                .where(Asset.problem_id == problem_id)
-                .order_by(Asset.sort_order)
+                    .where(
+                        Asset.problem_id == problem_id,
+                        Asset.role == "original",
+                    )
+                    .order_by(Asset.created_at.asc(), Asset.id.asc())
+                ).all()
             )
-            if asset is None:
+            if not assets:
                 return []
-            relative_path = asset.relative_path
-            mime_type = asset.mime_type or "image/jpeg"
-        path = ObjectStore(self.runtime.paths.asset_objects_dir).resolve(relative_path)
-        if not path.is_file() or path.stat().st_size == 0:
-            return []
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        return [
+            sources = [
+                (asset.relative_path, asset.mime_type or "image/jpeg")
+                for asset in assets
+            ]
+        store = ObjectStore(self.runtime.paths.asset_objects_dir)
+        content: list[dict[str, Any]] = [
             {"type": "text", "text": "用户已明确授权附带当前题目的原图。"},
-            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}},
         ]
+        for relative_path, mime_type in sources:
+            path = store.resolve(relative_path)
+            if not path.is_file() or path.stat().st_size == 0:
+                continue
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+                }
+            )
+        return content if len(content) > 1 else []
 
     def export_conversation_markdown(self, conversation_id: str, dest: Path) -> Path:
         conversation = self.get_conversation(conversation_id)
