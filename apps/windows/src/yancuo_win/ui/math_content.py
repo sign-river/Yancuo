@@ -531,6 +531,17 @@ class MathContentView(QWidget):
         if manager is not None:
             manager.theme_changed.connect(self._on_theme_changed)
 
+    def set_accessible_content(self, name: str, description: str = "") -> None:
+        """Expose the native PDF reader as one named keyboard focus target."""
+
+        self.setAccessibleName(name)
+        self._view.setAccessibleName(name)
+        if description:
+            self.setAccessibleDescription(description)
+            self._view.setAccessibleDescription(description)
+        self.setFocusProxy(self._view)
+        self._view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
     def _apply_canvas_background(self, theme: str | None = None) -> None:
         background = QColor(theme_tokens(theme or current_theme_name()).bg)
         palette = self._view.palette()

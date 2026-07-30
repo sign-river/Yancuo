@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAccessible
+from PySide6.QtTest import QSignalSpy, QTest
+from PySide6.QtWidgets import QApplication, QWidget
+
+import yancuo_win.ui.problem_detail as problem_detail_module
+from yancuo_win.data.models import Problem
+from yancuo_win.ui.widgets import OperationResultDialog
+
+
+class _ReaderStub(QWidget):
+    def set_adaptive_content_height(self, _maximum_height: int) -> None:
+        return None
+
+    def set_accessible_content(self, name: str, description: str = "") -> None:
+        self.setAccessibleName(name)
+        self.setAccessibleDescription(description)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def set_problem(self, *_args, **_kwargs) -> None:
+        return None
+
+    def set_message(self, *_args, **_kwargs) -> None:
+        return None
+
+
+def _application() -> QApplication:
+    return QApplication.instance() or QApplication([])
+
+
+def test_operation_result_exposes_summary_details_and_recovery_focus() -> None:
+    app = _application()
+    dialog = OperationResultDialog(
+        "导入失败",
+        "工作区未能导入。",
+        details="manifest.json 缺失",
+        is_error=True,
+        retry_text="重新尝试",
+    )
+    dialog.show()
+    app.processEvents()
+
+    interface = QAccessible.queryAccessibleInterface(dialog)
+    assert interface is not None
+    assert interface.text(QAccessible.Text.Name) == "导入失败"
+    assert dialog.summary_label.accessibleName() == "操作结果摘要"
+    assert dialog.details_view.accessibleName() == "操作结果详情"
+    assert dialog.details_view.isReadOnly()
+    assert dialog.retry_button is not None
+    assert dialog.retry_button.nextInFocusChain() is dialog.close_button
+
+    dialog.retry_button.click()
+    assert dialog.result() == OperationResultDialog.RetryCode
+
+
+def test_problem_detail_keyboard_path_and_accessible_names(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app = _application()
+    monkeypatch.setattr(problem_detail_module, "MathContentView", _ReaderStub)
+    page = problem_detail_module.ProblemDetailPage()
+    image = tmp_path / "question.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\naccessible-detail")
+    problem = Problem(
+        id="problem_accessibility",
+        title="可访问性题目",
+        status="active",
+        priority=3,
+        review_count=0,
+        tags=[],
+    )
+    page.set_problem(problem, image_path=image)
+    page.show()
+    app.processEvents()
+
+    assert page.back_button.accessibleName() == "返回题库"
+    assert "Alt+Left" in page.back_button.accessibleDescription()
+    assert page.reader.accessibleName() == "题目正文与解析"
+    assert page.chat_input.accessibleName() == "AI 讨论问题"
+    assert page.back_button.nextInFocusChain() is page.view_image_button
+
+    spy = QSignalSpy(page.back_requested)
+    QTest.keyClick(page, Qt.Key.Key_Left, Qt.KeyboardModifier.AltModifier)
+    assert spy.count() == 1
+    page.close()

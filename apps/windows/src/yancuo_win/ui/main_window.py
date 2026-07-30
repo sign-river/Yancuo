@@ -80,6 +80,7 @@ from yancuo_win.ui.widgets import (
     CardFrame,
     ConfirmDialog,
     IconButton,
+    OperationResultDialog,
     PageHeader,
     SearchInput,
     SoftItemDelegate,
@@ -518,6 +519,26 @@ class MainWindow(QMainWindow):
     def _show_status_toast(self, message: str) -> None:
         self.statusBar().showMessage(message, 3500)
         self._show_toast(message)
+
+    def _show_operation_result(
+        self,
+        title: str,
+        summary: str,
+        *,
+        details: str = "",
+        retry: Callable[[], None] | None = None,
+        is_error: bool = False,
+    ) -> None:
+        dialog = OperationResultDialog(
+            title,
+            summary,
+            details=details,
+            is_error=is_error,
+            retry_text="重新尝试" if retry is not None else "",
+            parent=self,
+        )
+        if dialog.exec() == OperationResultDialog.RetryCode and retry is not None:
+            QTimer.singleShot(0, retry)
 
     def _build_shortcuts(self) -> None:
         shortcuts = (
@@ -1537,13 +1558,23 @@ class MainWindow(QMainWindow):
             ):
                 return
             result = self.cloud.restore_profile_to(selected["profile_id"], Path(target))
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "云端资料已恢复",
-                f"{result['target_root']}\n请设置 YANCUO_DATA_ROOT 后重启。",
+                "所选云端资料已恢复到独立目录，当前资料没有被覆盖。",
+                details=(
+                    f"资料：{selected['profile_id']}\n"
+                    f"恢复位置：{result['target_root']}\n"
+                    "下一步：设置 YANCUO_DATA_ROOT 后重启。"
+                ),
             )
         except DomainError as exc:
-            QMessageBox.warning(self, "恢复失败", str(exc))
+            self._show_operation_result(
+                "云端资料恢复失败",
+                "所选资料未能恢复。",
+                details=str(exc),
+                retry=self._restore_cloud_profile,
+                is_error=True,
+            )
 
     def _preview_cloud_profile_merge(self) -> None:
         try:
@@ -1571,9 +1602,23 @@ class MainWindow(QMainWindow):
                     f"{table}: 远端新增 {item['new_remote']}，相同 {item['identical']}，冲突 {item['conflicts']}"
                 )
             lines.append("未写入当前资料。" if not preview["has_conflicts"] else "存在冲突，不能自动合并。")
-            QMessageBox.information(self, "资料合并预检", "\n".join(lines))
+            self._show_operation_result(
+                "资料合并预检",
+                (
+                    "预检完成，未写入当前资料。"
+                    if not preview["has_conflicts"]
+                    else "预检发现冲突，当前资料未被修改。"
+                ),
+                details="\n".join(lines),
+            )
         except DomainError as exc:
-            QMessageBox.warning(self, "预检失败", str(exc))
+            self._show_operation_result(
+                "资料合并预检失败",
+                "无法比较本地与云端资料。",
+                details=str(exc),
+                retry=self._preview_cloud_profile_merge,
+                is_error=True,
+            )
 
     def _merge_cloud_profile(self) -> None:
         """Run the deliberately explicit profile merge confirmation flow."""
@@ -1650,16 +1695,25 @@ class MainWindow(QMainWindow):
             )
             self._refresh_account_page()
             self._inspect_cloud_profiles()
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "资料合并完成",
-                f"主资料：{result['primary_profile_id']}\n"
-                f"新增记录：{result['inserted_rows']}\n"
-                f"采用云端字段：{result['remote_fields_applied']}\n"
-                "请在确认结果后手动执行下一次云备份。",
+                (
+                    f"已合并 {result['inserted_rows']} 条新增记录，"
+                    f"采用 {result['remote_fields_applied']} 个云端字段。"
+                ),
+                details=(
+                    f"主资料：{result['primary_profile_id']}\n"
+                    "下一步：确认结果后手动执行下一次云备份。"
+                ),
             )
         except DomainError as exc:
-            QMessageBox.warning(self, "资料合并失败", str(exc))
+            self._show_operation_result(
+                "资料合并失败",
+                "本地资料没有完成合并。",
+                details=str(exc),
+                retry=self._merge_cloud_profile,
+                is_error=True,
+            )
 
     def _goto_due_in_library(self) -> None:
         self._show_library()
@@ -2943,11 +2997,10 @@ class MainWindow(QMainWindow):
         try:
             result = self.services.import_images([Path(f) for f in files])
             tip = result.get("duplicate_tip") or ""
-            QMessageBox.information(
-                self,
-                "导入完成",
-                f"新建 {len(result['created'])} 题，跳过重复 {len(result['skipped'])} 个"
-                + (f"\n{tip}" if tip else ""),
+            self._show_operation_result(
+                "图片导入完成",
+                f"新建 {len(result['created'])} 道题，跳过重复 {len(result['skipped'])} 个。",
+                details=tip,
             )
             self.refresh_nav()
             for problem_id in result["created"]:
@@ -2955,7 +3008,13 @@ class MainWindow(QMainWindow):
             self._update_status()
             self._refresh_focus_pages()
         except DomainError as exc:
-            QMessageBox.warning(self, "导入失败", str(exc))
+            self._show_operation_result(
+                "图片导入失败",
+                "所选图片未能完成导入。",
+                details=str(exc),
+                retry=self._import_images,
+                is_error=True,
+            )
 
     def _import_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
@@ -2963,10 +3022,9 @@ class MainWindow(QMainWindow):
             return
         try:
             result = self.services.import_folder(Path(folder))
-            QMessageBox.information(
-                self,
-                "导入完成",
-                f"新建 {len(result['created'])} 题，跳过重复 {len(result['skipped'])} 个",
+            self._show_operation_result(
+                "文件夹导入完成",
+                f"新建 {len(result['created'])} 道题，跳过重复 {len(result['skipped'])} 个。",
             )
             self.refresh_nav()
             for problem_id in result["created"]:
@@ -2974,7 +3032,13 @@ class MainWindow(QMainWindow):
             self._update_status()
             self._refresh_focus_pages()
         except DomainError as exc:
-            QMessageBox.warning(self, "导入失败", str(exc))
+            self._show_operation_result(
+                "文件夹导入失败",
+                "所选文件夹未能完成导入。",
+                details=str(exc),
+                retry=self._import_folder,
+                is_error=True,
+            )
 
     def _export_word(self) -> None:
         ids = self._selected_ids()
@@ -2996,16 +3060,36 @@ class MainWindow(QMainWindow):
             return
         try:
             dest = self.services.export_problems_docx(ids, Path(path))
-            QMessageBox.information(self, "导出完成", str(dest))
+            self._show_operation_result(
+                "Word 导出完成",
+                "题目文档已生成。",
+                details=f"保存位置：{dest}",
+            )
         except DomainError as exc:
-            QMessageBox.warning(self, "导出失败", str(exc))
+            self._show_operation_result(
+                "Word 导出失败",
+                "题目文档未能生成。",
+                details=str(exc),
+                retry=self._export_word,
+                is_error=True,
+            )
 
     def _backup(self) -> None:
         try:
             dest = self.services.create_backup()
-            QMessageBox.information(self, "备份完成", str(dest))
+            self._show_operation_result(
+                "备份完成",
+                "本机备份已生成。",
+                details=f"保存位置：{dest}",
+            )
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "备份失败", str(exc))
+            self._show_operation_result(
+                "备份失败",
+                "本机备份未能生成。",
+                details=str(exc),
+                retry=self._backup,
+                is_error=True,
+            )
 
     def _export_ebpack(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -3018,9 +3102,19 @@ class MainWindow(QMainWindow):
             return
         try:
             dest = self.ebpack.export_ebpack(Path(path))
-            QMessageBox.information(self, "导出完成", str(dest))
+            self._show_operation_result(
+                "完整备份包导出完成",
+                "ebpack 已生成。",
+                details=f"保存位置：{dest}",
+            )
         except DomainError as exc:
-            QMessageBox.warning(self, "导出失败", str(exc))
+            self._show_operation_result(
+                "完整备份包导出失败",
+                "ebpack 未能生成。",
+                details=str(exc),
+                retry=self._export_ebpack,
+                is_error=True,
+            )
 
     def _import_ebpack(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -3038,15 +3132,23 @@ class MainWindow(QMainWindow):
             return
         try:
             result = self.ebpack.restore_ebpack(Path(path), Path(target))
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "恢复完成",
-                f"已恢复到：{result['target_root']}\n"
-                f"schema v{result['schema_version']}\n"
-                "请将 YANCUO_DATA_ROOT 指向该目录后重启。",
+                "备份包已恢复到独立目录，当前资料没有被覆盖。",
+                details=(
+                    f"恢复位置：{result['target_root']}\n"
+                    f"数据库版本：schema v{result['schema_version']}\n"
+                    "下一步：将 YANCUO_DATA_ROOT 指向该目录后重启。"
+                ),
             )
         except DomainError as exc:
-            QMessageBox.warning(self, "恢复失败", str(exc))
+            self._show_operation_result(
+                "恢复失败",
+                "完整备份包未能恢复。",
+                details=str(exc),
+                retry=self._import_ebpack,
+                is_error=True,
+            )
 
     def _export_gmshare(self) -> None:
         ids: list[str] = []
@@ -3068,14 +3170,22 @@ class MainWindow(QMainWindow):
                 dest=Path(path),
                 title="研错库分享",
             )
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "分享包已导出",
-                f"{result.path}\n题目 {result.problem_count}，图片 {result.asset_count}\n"
-                "已默认排除手写作答、私人备注与复习史。",
+                f"已导出 {result.problem_count} 道题和 {result.asset_count} 张图片。",
+                details=(
+                    f"保存位置：{result.path}\n"
+                    "隐私处理：已排除手写作答、私人备注与复习史。"
+                ),
             )
         except DomainError as exc:
-            QMessageBox.warning(self, "导出失败", str(exc))
+            self._show_operation_result(
+                "分享包导出失败",
+                "脱敏分享包未能生成。",
+                details=str(exc),
+                retry=self._export_gmshare,
+                is_error=True,
+            )
 
     def _import_gmshare(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -3088,15 +3198,20 @@ class MainWindow(QMainWindow):
             return
         try:
             result = self.gmshare.import_share(Path(path))
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "导入完成",
-                f"新建 {result.created}，跳过重复 {result.skipped_duplicates}\n"
-                f"package={result.package_id}",
+                f"新建 {result.created} 道题，跳过重复 {result.skipped_duplicates} 道。",
+                details=f"分享包标识：{result.package_id}",
             )
             self.refresh_problems()
         except DomainError as exc:
-            QMessageBox.warning(self, "导入失败", str(exc))
+            self._show_operation_result(
+                "分享包导入失败",
+                "分享包未能导入。",
+                details=str(exc),
+                retry=self._import_gmshare,
+                is_error=True,
+            )
 
     def _cloud_backup(self) -> None:
         try:
@@ -3105,14 +3220,23 @@ class MainWindow(QMainWindow):
             )
             self.cloud.ensure_repository()
             result = self.cloud.upload_backup()
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "云备份完成",
-                f"tag={result['tag']}\nsha256={result['sha256'][:16]}…\n"
-                "已先上传不可变完整快照，再更新当前资料指针（非实时同步）。",
+                "不可变完整快照已上传，并已更新当前资料指针。",
+                details=(
+                    f"备份标签：{result['tag']}\n"
+                    f"SHA-256：{result['sha256'][:16]}…\n"
+                    "说明：这是备份操作，不是实时同步。"
+                ),
             )
         except DomainError as exc:
-            QMessageBox.warning(self, "云备份失败", str(exc))
+            self._show_operation_result(
+                "云备份失败",
+                "当前资料未能完成云备份。",
+                details=str(exc),
+                retry=self._cloud_backup,
+                is_error=True,
+            )
 
     def _cloud_restore(self) -> None:
         target = QFileDialog.getExistingDirectory(
@@ -3145,14 +3269,23 @@ class MainWindow(QMainWindow):
             ):
                 return
             result = self.cloud.restore_latest_to(Path(target))
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "云恢复完成",
-                f"{result['target_root']}\n请设置 YANCUO_DATA_ROOT 后重启。\n"
-                f"（当前 latest={latest['tag'] if latest else '未知'}）",
+                "云端快照已恢复到独立目录，当前资料没有被覆盖。",
+                details=(
+                    f"恢复位置：{result['target_root']}\n"
+                    f"快照：{latest['tag'] if latest else '未知'}\n"
+                    "下一步：设置 YANCUO_DATA_ROOT 后重启。"
+                ),
             )
         except DomainError as exc:
-            QMessageBox.warning(self, "云恢复失败", str(exc))
+            self._show_operation_result(
+                "云恢复失败",
+                "云端快照未能恢复。",
+                details=str(exc),
+                retry=self._cloud_restore,
+                is_error=True,
+            )
 
     def _sync_push(self) -> None:
         try:
@@ -3160,13 +3293,19 @@ class MainWindow(QMainWindow):
                 self.runtime, get_cloud_provider(self.runtime.settings)
             )
             result = self.sync.push_operations()
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "推送增量",
-                f"已推送 {result['pushed']} 条 Operation（非实时同步；需 local_folder）。",
+                f"已推送 {result['pushed']} 条增量记录。",
+                details="说明：这是手动增量同步，不是实时同步；当前通道需要 local_folder。",
             )
         except DomainError as exc:
-            QMessageBox.warning(self, "推送失败", str(exc))
+            self._show_operation_result(
+                "推送失败",
+                "增量记录未能推送。",
+                details=str(exc),
+                retry=self._sync_push,
+                is_error=True,
+            )
 
     def _sync_pull(self) -> None:
         try:
@@ -3183,12 +3322,25 @@ class MainWindow(QMainWindow):
                 msg += f"合并前快照：{result['snapshot']}\n"
             if result.get("review_session_id"):
                 msg += "请在工作台打开「待确认变更」处理同步冲突。"
-            QMessageBox.information(self, "拉取合并", msg)
+            self._show_operation_result(
+                "拉取合并完成",
+                (
+                    f"已应用 {result['applied']} 条记录，"
+                    f"发现 {result['conflicts']} 个冲突字段。"
+                ),
+                details=msg,
+            )
             if result.get("review_session_id"):
                 ReviewDialog(self.ai, self.services, self).exec()
             self.refresh_all()
         except DomainError as exc:
-            QMessageBox.warning(self, "拉取失败", str(exc))
+            self._show_operation_result(
+                "拉取合并失败",
+                "云端增量未能拉取或合并。",
+                details=str(exc),
+                retry=self._sync_pull,
+                is_error=True,
+            )
 
     def _restore_backup(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -3203,13 +3355,22 @@ class MainWindow(QMainWindow):
             return
         try:
             root = self.services.restore_backup(Path(path), Path(target))
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "恢复完成",
-                f"已恢复到：{root}\n请将 YANCUO_DATA_ROOT 指向该目录后重启。",
+                "旧版 zip 已恢复到独立目录，当前资料没有被覆盖。",
+                details=(
+                    f"恢复位置：{root}\n"
+                    "下一步：将 YANCUO_DATA_ROOT 指向该目录后重启。"
+                ),
             )
         except DomainError as exc:
-            QMessageBox.warning(self, "恢复失败", str(exc))
+            self._show_operation_result(
+                "恢复失败",
+                "旧版 zip 未能恢复。",
+                details=str(exc),
+                retry=self._restore_backup,
+                is_error=True,
+            )
 
     def _open_settings(self) -> None:
         self._show_navigation_page(_PAGE_SETTINGS)
@@ -3286,13 +3447,22 @@ class MainWindow(QMainWindow):
             return
         try:
             dest = self.workspace.export_workspace(ids)
-            QMessageBox.information(
-                self,
+            self._show_operation_result(
                 "导出完成",
-                f"{dest}\n\n请只编辑工作区内的 Markdown/JSON，不要直接改数据库。",
+                "外部编辑工作区已生成。",
+                details=(
+                    f"工作区位置：{dest}\n"
+                    "请只编辑工作区内的 Markdown/JSON，不要直接修改数据库。"
+                ),
             )
         except DomainError as exc:
-            QMessageBox.warning(self, "导出失败", str(exc))
+            self._show_operation_result(
+                "工作区导出失败",
+                "外部编辑工作区未能生成。",
+                details=str(exc),
+                retry=self._export_workspace,
+                is_error=True,
+            )
 
     def _import_workspace(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -3311,10 +3481,23 @@ class MainWindow(QMainWindow):
             )
             if result["errors"]:
                 msg += "\n\n部分失败：\n" + "\n".join(result["errors"][:10])
-            QMessageBox.information(self, "导入完成", msg)
+            self._show_operation_result(
+                "工作区导入完成",
+                (
+                    f"已生成 {len(result['items'])} 个待审核变更，"
+                    f"其中 {len(result['conflicts'])} 个冲突。"
+                ),
+                details=msg,
+            )
             self._open_review()
         except DomainError as exc:
-            QMessageBox.warning(self, "导入失败", str(exc))
+            self._show_operation_result(
+                "工作区导入失败",
+                "外部编辑结果未能导入。",
+                details=str(exc),
+                retry=self._import_workspace,
+                is_error=True,
+            )
 
     def _today_review(self) -> None:
         self._show_navigation_page(_PAGE_REVIEW)

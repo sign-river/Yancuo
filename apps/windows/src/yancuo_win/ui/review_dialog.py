@@ -30,6 +30,7 @@ from yancuo_win.ui.widgets import (
     danger_button,
     default_button,
     primary_button,
+    set_tab_order_chain,
 )
 
 
@@ -60,6 +61,7 @@ class ReviewDialog(QDialog):
         self.list = QListWidget()
         self.list.setObjectName("DialogItemList")
         self.list.setAccessibleName("待确认变更列表")
+        self.list.setAccessibleDescription("使用方向键选择一项，右侧会显示来源、字段差异和不确定项")
         self.list.setUniformItemSizes(True)
         self.list.setMouseTracking(True)
         self.list.setItemDelegate(
@@ -76,6 +78,7 @@ class ReviewDialog(QDialog):
         right.addWidget(meta_title)
         self.meta = QLabel("")
         self.meta.setWordWrap(True)
+        self.meta.setAccessibleName("变更来源与题目信息")
         right.addWidget(self.meta)
         diff_title = QLabel("字段差异")
         diff_title.setObjectName("SectionTitle")
@@ -83,6 +86,8 @@ class ReviewDialog(QDialog):
         self.diff_view = QTextEdit()
         self.diff_view.setObjectName("DialogTextSurface")
         self.diff_view.setReadOnly(True)
+        self.diff_view.setAccessibleName("字段差异")
+        self.diff_view.setAccessibleDescription("只读内容，可使用方向键浏览并复制")
         right.addWidget(self.diff_view)
         uncertain_title = QLabel("不确定字段")
         uncertain_title.setObjectName("SectionTitle")
@@ -90,6 +95,8 @@ class ReviewDialog(QDialog):
         self.uncertain = QTextEdit()
         self.uncertain.setObjectName("DialogTextSurface")
         self.uncertain.setReadOnly(True)
+        self.uncertain.setAccessibleName("不确定字段")
+        self.uncertain.setAccessibleDescription("只读内容，可使用方向键浏览并复制")
         self.uncertain.setMaximumHeight(120)
         right.addWidget(self.uncertain)
 
@@ -104,15 +111,20 @@ class ReviewDialog(QDialog):
         row = QHBoxLayout(actions)
         row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(8)
-        accept = primary_button("接受变更")
-        accept.clicked.connect(self._accept)
-        force = danger_button("强制采用外部")
-        force.clicked.connect(self._force_accept)
-        reject = default_button("保留本地内容")
-        reject.clicked.connect(self._reject)
-        refresh = default_button("刷新")
-        refresh.clicked.connect(self.refresh)
-        for btn in (accept, force, reject, refresh):
+        self.accept_button = primary_button("接受变更")
+        self.accept_button.clicked.connect(self._accept)
+        self.force_button = danger_button("强制采用外部")
+        self.force_button.clicked.connect(self._force_accept)
+        self.reject_button = default_button("保留本地内容")
+        self.reject_button.clicked.connect(self._reject)
+        self.refresh_button = default_button("刷新")
+        self.refresh_button.clicked.connect(self.refresh)
+        for btn in (
+            self.accept_button,
+            self.force_button,
+            self.reject_button,
+            self.refresh_button,
+        ):
             row.addWidget(btn)
         row.addStretch(1)
         layout.addWidget(actions)
@@ -132,6 +144,17 @@ class ReviewDialog(QDialog):
         close_button.clicked.connect(self.accept)
         layout.addWidget(buttons)
         self.toast = ToastMessage(self)
+        self.close_button = close_button
+        set_tab_order_chain(
+            self.list,
+            self.diff_view,
+            self.uncertain,
+            self.accept_button,
+            self.force_button,
+            self.reject_button,
+            self.refresh_button,
+            self.close_button,
+        )
         self.refresh()
 
     def refresh(self) -> None:

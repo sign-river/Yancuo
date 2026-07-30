@@ -26,6 +26,10 @@ from yancuo_win.ui.widgets import SoftItemDelegate
 
 
 class _ReaderStub(QWidget):
+    def set_accessible_content(self, name, description="") -> None:
+        self.setAccessibleName(name)
+        self.setAccessibleDescription(description)
+
     def set_fit_content_height(self, *_args, **_kwargs) -> None:
         pass
 

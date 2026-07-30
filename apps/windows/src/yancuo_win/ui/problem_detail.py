@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
@@ -28,8 +28,10 @@ from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
     CardFrame,
     PageHeader,
+    describe_field,
     ghost_button,
     primary_button,
+    set_tab_order_chain,
 )
 
 
@@ -99,8 +101,10 @@ class ProblemDetailPage(QWidget):
 
         self.back_button = ghost_button("返回题库")
         self.back_button.clicked.connect(self.back_requested.emit)
-        edit = primary_button("编辑题目")
-        edit.clicked.connect(self._request_edit)
+        describe_field(self.back_button, "返回题库", "返回上一页，快捷键 Alt+Left")
+        self.back_button.setToolTip("返回题库 (Alt+Left)")
+        self.edit_button = primary_button("编辑题目")
+        self.edit_button.clicked.connect(self._request_edit)
         self.view_image_button = ghost_button("查看原图")
         self.view_image_button.clicked.connect(self._view_original_image)
         self.chat_button = ghost_button("AI 讨论")
@@ -113,16 +117,16 @@ class ProblemDetailPage(QWidget):
         header.add_leading(self.back_button)
         header.add_action(self.view_image_button)
         header.add_action(self.chat_button)
-        header.add_action(edit)
+        header.add_action(self.edit_button)
         root.addWidget(header)
 
         actions = QHBoxLayout()
-        previous = ghost_button("上一题")
-        previous.clicked.connect(self.previous_requested.emit)
-        next_button = ghost_button("下一题")
-        next_button.clicked.connect(self.next_requested.emit)
-        actions.addWidget(previous)
-        actions.addWidget(next_button)
+        self.previous_button = ghost_button("上一题")
+        self.previous_button.clicked.connect(self.previous_requested.emit)
+        self.next_button = ghost_button("下一题")
+        self.next_button.clicked.connect(self.next_requested.emit)
+        actions.addWidget(self.previous_button)
+        actions.addWidget(self.next_button)
         actions.addSpacing(12)
         self.review_button = QPushButton("加入复习计划")
         self.review_button.clicked.connect(self._request_review)
@@ -148,12 +152,17 @@ class ProblemDetailPage(QWidget):
 
         self.reader = MathContentView()
         self.reader.set_adaptive_content_height(560)
+        self.reader.set_accessible_content(
+            "题目正文与解析",
+            "只读题目内容；可使用方向键或翻页键浏览长内容",
+        )
         root.addWidget(self.reader, stretch=1)
 
         self.chat_card = CardFrame()
         self.chat_card.add_title("AI 讨论")
         chat_toolbar = QHBoxLayout()
         self.conversation_combo = QComboBox()
+        describe_field(self.conversation_combo, "AI 讨论会话", "选择已保存的题目讨论")
         self.conversation_combo.currentIndexChanged.connect(self._load_conversation)
         new_chat = QPushButton("新对话")
         new_chat.clicked.connect(self._new_conversation)
@@ -172,10 +181,15 @@ class ProblemDetailPage(QWidget):
         self.chat_card.body.addLayout(chat_toolbar)
         self.chat_history = MathContentView()
         self.chat_history.setMinimumHeight(180)
+        self.chat_history.set_accessible_content(
+            "AI 讨论记录",
+            "只读对话历史；可使用方向键浏览",
+        )
         self.chat_card.body.addWidget(self.chat_history)
         prompt_row = QHBoxLayout()
         self.chat_input = QLineEdit()
         self.chat_input.setPlaceholderText("向当前题目提问")
+        describe_field(self.chat_input, "AI 讨论问题", "输入后按回车发送")
         self.chat_input.returnPressed.connect(self._send_chat)
         self.send_chat_button = primary_button("发送")
         self.send_chat_button.clicked.connect(self._send_chat)
@@ -184,9 +198,31 @@ class ProblemDetailPage(QWidget):
         self.chat_card.body.addLayout(prompt_row)
         self.chat_card.setVisible(False)
         root.addWidget(self.chat_card)
+        self.back_shortcut = QShortcut(QKeySequence("Alt+Left"), self)
+        self.back_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.back_shortcut.activated.connect(self.back_requested.emit)
+        set_tab_order_chain(
+            self.back_button,
+            self.view_image_button,
+            self.chat_button,
+            self.edit_button,
+            self.previous_button,
+            self.next_button,
+            self.review_button,
+            self.favorite_button,
+            self.archive_button,
+            self.trash_button,
+            self.restore_button,
+            self.reader,
+            self.conversation_combo,
+            self.include_original_checkbox,
+            self.chat_input,
+            self.send_chat_button,
+        )
 
     def set_back_text(self, text: str) -> None:
         self.back_button.setText(text)
+        self.back_button.setAccessibleName(text)
 
     def set_problem(
         self,

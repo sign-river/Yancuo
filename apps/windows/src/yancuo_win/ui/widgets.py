@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -391,6 +392,75 @@ class ConfirmDialog(QDialog):
         confirm_text: str = "确认",
     ) -> bool:
         return cls(title, message, confirm_text, parent).exec() == QDialog.DialogCode.Accepted
+
+
+class OperationResultDialog(QDialog):
+    """Accessible result surface for import, export, restore and sync operations."""
+
+    RetryCode = 2
+
+    def __init__(
+        self,
+        title: str,
+        summary: str,
+        *,
+        details: str = "",
+        is_error: bool = False,
+        retry_text: str = "",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("OperationResultDialog")
+        self.setWindowTitle(title)
+        self.setAccessibleName(title)
+        self.setAccessibleDescription(summary)
+        self.setModal(True)
+        self.setMinimumSize(460, 260 if details else 200)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+        heading = QLabel(title)
+        heading.setObjectName("SectionTitle")
+        layout.addWidget(heading)
+        self.summary_label = QLabel(summary)
+        self.summary_label.setObjectName("ErrorLabel" if is_error else "MutedLabel")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setAccessibleName("操作结果摘要")
+        layout.addWidget(self.summary_label)
+
+        self.details_view = QTextEdit()
+        self.details_view.setObjectName("DialogTextSurface")
+        self.details_view.setReadOnly(True)
+        self.details_view.setPlainText(details)
+        self.details_view.setAccessibleName("操作结果详情")
+        self.details_view.setAccessibleDescription("只读详情，可使用方向键浏览并复制")
+        self.details_view.setVisible(bool(details))
+        layout.addWidget(self.details_view, stretch=1)
+
+        buttons = QDialogButtonBox()
+        self.retry_button: QPushButton | None = None
+        if retry_text:
+            self.retry_button = buttons.addButton(
+                retry_text,
+                QDialogButtonBox.ButtonRole.ActionRole,
+            )
+            self.retry_button.setAccessibleName(retry_text)
+            self.retry_button.setAccessibleDescription("关闭结果窗口并重新执行刚才的操作")
+            self.retry_button.clicked.connect(lambda: self.done(self.RetryCode))
+        self.close_button = buttons.addButton(
+            "关闭",
+            QDialogButtonBox.ButtonRole.AcceptRole,
+        )
+        self.close_button.setAccessibleName("关闭操作结果")
+        self.close_button.setDefault(True)
+        self.close_button.clicked.connect(self.accept)
+        layout.addWidget(buttons)
+        if self.retry_button is not None:
+            set_tab_order_chain(self.retry_button, self.close_button)
+            self.retry_button.setFocus()
+        else:
+            self.close_button.setFocus()
 
 
 class PageHeader(QWidget):
