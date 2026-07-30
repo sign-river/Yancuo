@@ -105,10 +105,12 @@ class TaskCenterDialog(QDialog):
     def _run_selected(self) -> None:
         items = self.list.selectedItems()
         if not items:
-            QMessageBox.information(self, "提示", "请选择任务")
+            self.summary.setText("请先选择一个后台任务")
+            self.summary.setAccessibleDescription("请先选择一个后台任务")
             return
         if self._worker and self._worker.isRunning():
-            QMessageBox.information(self, "提示", "已有任务在运行")
+            self.summary.setText("已有任务在运行，请等待完成或先取消")
+            self.summary.setAccessibleDescription("已有任务在运行，请等待完成或先取消")
             return
         job_id = items[0].data(256)
         self._worker = AIJobWorker(self.ai, job_id, self)

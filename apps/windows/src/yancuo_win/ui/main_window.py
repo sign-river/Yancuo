@@ -1530,7 +1530,7 @@ class MainWindow(QMainWindow):
             )
             profiles = self.cloud.discover_profiles()
             if not profiles:
-                QMessageBox.information(self, "云端资料", "云端尚无可恢复的资料快照")
+                self._show_status_toast("云端尚无可恢复的资料快照")
                 return
             labels = [
                 f"{item['profile_id']} · {item.get('tag', '无快照')}"
@@ -1587,7 +1587,7 @@ class MainWindow(QMainWindow):
                 if item["profile_id"] != self.runtime.identity.profile_id
             ]
             if not profiles:
-                QMessageBox.information(self, "资料合并预检", "没有其他云端资料可比较")
+                self._show_status_toast("没有其他云端资料可比较")
                 return
             labels = [f"{item['profile_id']} · {item.get('tag', '无快照')}" for item in profiles]
             choice, accepted = QInputDialog.getItem(
@@ -1633,7 +1633,7 @@ class MainWindow(QMainWindow):
                 if item["profile_id"] != self.runtime.identity.profile_id
             ]
             if not profiles:
-                QMessageBox.information(self, "资料合并", "没有其他云端资料可合并")
+                self._show_status_toast("没有其他云端资料可合并")
                 return
             labels = [f"{item['profile_id']} · {item.get('tag', '无快照')}" for item in profiles]
             choice, accepted = QInputDialog.getItem(
@@ -2720,7 +2720,7 @@ class MainWindow(QMainWindow):
     def _require_one(self) -> str | None:
         ids = self._selected_ids()
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择一道题")
+            self._show_status_toast("请先选择一道题")
             return None
         return ids[0]
 
@@ -2747,7 +2747,7 @@ class MainWindow(QMainWindow):
     def _open_problem_detail(self, problem_id: str) -> None:
         problem = self.services.get_problem(problem_id)
         if not problem:
-            QMessageBox.information(self, "无法打开", "题目不存在或已被删除。")
+            self._show_status_toast("题目不存在或已被删除")
             return
 
         image_path: Path | None = None
@@ -2943,7 +2943,7 @@ class MainWindow(QMainWindow):
     def _trash_selected(self) -> None:
         ids = self._selected_ids()
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择题目")
+            self._show_status_toast("请先选择题目")
             return
         if self.runtime.settings.application.confirm_before_delete:
             if (
@@ -2982,7 +2982,7 @@ class MainWindow(QMainWindow):
         except DomainError as exc:
             QMessageBox.warning(self, "清空失败", str(exc))
             return
-        QMessageBox.information(self, "完成", f"已永久删除 {n} 道题")
+        self._show_status_toast(f"已永久删除 {n} 道题")
         self.refresh_all()
 
     def _import_images(self) -> None:
@@ -3048,7 +3048,7 @@ class MainWindow(QMainWindow):
                 for i in range(self.problem_list.count())
             ]
         if not ids:
-            QMessageBox.information(self, "提示", "没有可导出的题目")
+            self._show_status_toast("没有可导出的题目")
             return
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -3256,7 +3256,7 @@ class MainWindow(QMainWindow):
                 for b in backups[:20]
             )
             if not backups:
-                QMessageBox.information(self, "云恢复", "没有可恢复的备份")
+                self._show_status_toast("云端没有可恢复的备份")
                 return
             if (
                 QMessageBox.question(
@@ -3398,10 +3398,10 @@ class MainWindow(QMainWindow):
     def _ai_recognize(self) -> None:
         ids = self._selected_ids()
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择带原图的题目")
+            self._show_status_toast("请先选择带原图的题目")
             return
         if self._ai_worker and self._ai_worker.isRunning():
-            QMessageBox.information(self, "提示", "已有 AI 任务在后台运行")
+            self._show_status_toast("已有 AI 任务在后台运行")
             return
         try:
             job = self.ai.create_structure_job(ids)
@@ -3443,7 +3443,7 @@ class MainWindow(QMainWindow):
     def _export_workspace(self) -> None:
         ids = self._selected_ids()
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择要导出的题目")
+            self._show_status_toast("请先选择要导出的题目")
             return
         try:
             dest = self.workspace.export_workspace(ids)
@@ -3506,7 +3506,7 @@ class MainWindow(QMainWindow):
     def _schedule_review(self) -> None:
         ids = self._selected_ids()
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择题目")
+            self._show_status_toast("请先选择题目")
             return
         try:
             for pid in ids:
@@ -3528,7 +3528,7 @@ class MainWindow(QMainWindow):
     def _batch_priority(self) -> None:
         ids = self._selected_ids()
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择题目")
+            self._show_status_toast("请先选择题目")
             return
         value, ok = QInputDialog.getInt(self, "批量优先级", "优先级 1–5：", 3, 1, 5)
         if not ok:
@@ -3894,7 +3894,7 @@ class MainWindow(QMainWindow):
     def _move_selected_category(self) -> None:
         ids = self._selected_ids()
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择题目")
+            self._show_status_toast("请先选择题目")
             return
         choices = self.services.list_category_choices()
         labels = ["（未指定科目）", *(choice.label for choice in choices)]

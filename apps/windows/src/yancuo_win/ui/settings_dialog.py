@@ -396,7 +396,7 @@ class ServiceSettingsPage(QWidget):
     def _test_ai_connection(self) -> None:
         name = self.ai_provider.currentData()
         if name == "mock":
-            QMessageBox.information(self, "Mock", "Mock 不访问网络，请选择 Faro API。")
+            self.status_message.emit("Mock 不访问网络；连接测试请先选择 Faro API")
             return
         model = self.ai_model.currentText().strip()
         try:
@@ -419,16 +419,14 @@ class ServiceSettingsPage(QWidget):
                 f"请从模型广场重新复制 ID。当前返回示例：{sample}",
             )
             return
-        QMessageBox.information(
-            self,
-            "Faro 连接成功",
-            f"已通过 Faro 身份验证，并在模型列表中找到“{model}”。",
+        self.status_message.emit(
+            f"Faro 连接成功，已在模型列表中找到“{model}”"
         )
 
     def _fetch_ai_models(self) -> None:
         name = self.ai_provider.currentData()
         if name == "mock":
-            QMessageBox.information(self, "Mock", "Mock 不访问网络，也没有远端模型列表。")
+            self.status_message.emit("Mock 不访问网络，也没有远端模型列表")
             return
         if self._ai_model_worker is not None:
             return
@@ -527,7 +525,7 @@ class ServiceSettingsPage(QWidget):
     def _save_token(self) -> None:
         key = self._credential_key_for_provider()
         if not key:
-            QMessageBox.information(self, "提示", "当前提供商不需要令牌")
+            self.status_message.emit("当前提供商不需要令牌")
             return
         token = self.token_edit.text().strip()
         if not token:

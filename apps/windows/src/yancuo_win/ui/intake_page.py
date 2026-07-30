@@ -1405,7 +1405,8 @@ class IntakePage(QWidget):
 
     def _start_answer_recognition(self) -> None:
         if self.answer_image is None:
-            QMessageBox.information(self, "请选择图片", "请先选择包含作答的图片。")
+            self.answer_recognition_status.setText("请先选择包含作答的图片。")
+            self.status_message.emit("请先选择包含作答的图片")
             return
         if (
             self.answer_recognition_worker
@@ -1452,7 +1453,8 @@ class IntakePage(QWidget):
     def _apply_answer_recognition(self) -> None:
         answer = self.answer_recognition_result.toPlainText().strip()
         if not answer:
-            QMessageBox.information(self, "没有可填入的内容", "请先识别或填写作答内容。")
+            self.answer_recognition_status.setText("请先识别或填写作答内容。")
+            self.status_message.emit("没有可填入的作答内容")
             return
         self.ai_form.user_answer.setPlainText(answer)
         self._queue_ai_preview()
@@ -2092,7 +2094,7 @@ class IntakePage(QWidget):
         try:
             self.intake.split_candidate_recognition_unit(candidate.review_item_id)
         except DomainError as exc:
-            QMessageBox.information(self, "无法拆分识别单元", str(exc))
+            QMessageBox.warning(self, "无法拆分识别单元", str(exc))
             return
         self._reload_region_candidate(candidate.review_item_id)
         self.status_message.emit("来源图片已拆为独立识别单元；当前候选内容保持不变")
@@ -2149,11 +2151,10 @@ class IntakePage(QWidget):
             return
         candidate = self.ai_candidates[self.candidate_index]
         if not candidate.region:
-            QMessageBox.information(
-                self,
-                "请先框选题目",
-                "请在左侧原图上绘制一个小于整图的题目区域，再重新识别。",
+            self.region_label.setText(
+                "请先在左侧原图上绘制一个小于整图的题目区域，再重新识别。"
             )
+            self.status_message.emit("请先框选题目区域")
             return
         self.rerecognize_region.setEnabled(False)
         self.rerecognize_region.setText("正在重新识别…")

@@ -9,7 +9,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QMessageBox, QWidget
 
 import yancuo_win.ui.intake_page as intake_page_module
 import yancuo_win.ui.note_page as note_page_module
@@ -22,6 +22,7 @@ from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
 from yancuo_win.ui.math_content import MathContentView
+from yancuo_win.ui.task_center import TaskCenterDialog
 from yancuo_win.ui.widgets import SoftItemDelegate
 
 
@@ -722,3 +723,48 @@ def test_ai_search_failure_keeps_query_and_offline_fallback(
     window.local_search_button.click()
     assert window.local_search_button.isChecked()
     assert "完全离线" in window.search_privacy_hint.text()
+
+
+def test_low_risk_selection_and_intake_hints_do_not_open_message_box(
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda *_args, **_kwargs: pytest.fail("低风险提示不应打开阻塞消息框"),
+    )
+    window.problem_list.clearSelection()
+    assert window._require_one() is None
+    assert window.toast.label.text() == "请先选择一道题"
+
+    messages: list[str] = []
+    window.intake_page.status_message.connect(messages.append)
+    window.intake_page.answer_image = None
+    window.intake_page._start_answer_recognition()
+    assert window.intake_page.answer_recognition_status.text() == "请先选择包含作答的图片。"
+    window.intake_page.answer_recognition_result.clear()
+    window.intake_page._apply_answer_recognition()
+    assert messages[-2:] == ["请先选择包含作答的图片", "没有可填入的作答内容"]
+
+
+def test_mock_provider_hint_and_task_selection_are_non_blocking(
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda *_args, **_kwargs: pytest.fail("低风险提示不应打开阻塞消息框"),
+    )
+    settings = window.ai_settings_page
+    settings.ai_provider.setCurrentIndex(settings.ai_provider.findData("mock"))
+    messages: list[str] = []
+    settings.status_message.connect(messages.append)
+    settings._test_ai_connection()
+    assert messages[-1] == "Mock 不访问网络；连接测试请先选择 Faro API"
+
+    dialog = TaskCenterDialog(window.ai)
+    dialog._run_selected()
+    assert dialog.summary.text() == "请先选择一个后台任务"
+    dialog.close()
