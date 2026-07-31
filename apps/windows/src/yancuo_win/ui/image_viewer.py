@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
@@ -27,12 +28,23 @@ class ImageViewerDialog(QDialog):
         parent=None,
         *,
         source_regions: Iterable[Mapping[str, float]] = (),
+        image_paths: Iterable[Path] = (),
+        image_index: int = 0,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("ImageViewerDialog")
         self._source = pixmap
         self._scale = 1.0
         self._source_regions = self._normalize_regions(source_regions)
+        self._image_paths = tuple(Path(path) for path in image_paths)
+        self._image_index = min(
+            max(0, image_index), max(0, len(self._image_paths) - 1)
+        )
+        self.current_image_path = (
+            self._image_paths[self._image_index]
+            if self._image_paths
+            else None
+        )
         self.setWindowTitle("查看原始图片")
         self.resize(1000, 760)
 
@@ -45,6 +57,11 @@ class ImageViewerDialog(QDialog):
         controls = QHBoxLayout(toolbar)
         controls.setContentsMargins(12, 8, 12, 8)
         controls.setSpacing(8)
+        self.previous_button = default_button("上一张")
+        self.previous_button.clicked.connect(lambda: self._move_image(-1))
+        self.next_button = default_button("下一张")
+        self.next_button.clicked.connect(lambda: self._move_image(1))
+        self.image_position_label = QLabel()
         zoom_out = default_button("缩小")
         zoom_out.clicked.connect(lambda: self._zoom(0.8))
         reset = default_button("重置缩放")
@@ -54,8 +71,16 @@ class ImageViewerDialog(QDialog):
         fit = default_button("适应窗口")
         fit.clicked.connect(self._fit)
         self.scale_label = QLabel("")
-        for button in (zoom_out, reset, zoom_in, fit):
+        for button in (
+            self.previous_button,
+            self.next_button,
+            zoom_out,
+            reset,
+            zoom_in,
+            fit,
+        ):
             controls.addWidget(button)
+        controls.addWidget(self.image_position_label)
         controls.addWidget(self.scale_label)
         if self._source_regions:
             source_hint = QLabel("蓝框为内容块在原图中的来源区域")
@@ -73,6 +98,7 @@ class ImageViewerDialog(QDialog):
         self.scroll.setWidget(self.image)
         self.scroll.setWidgetResizable(False)
         root.addWidget(self.scroll, stretch=1)
+        self._update_image_navigation()
         self._render()
 
     def showEvent(self, event) -> None:  # noqa: ANN001, N802
@@ -96,6 +122,28 @@ class ImageViewerDialog(QDialog):
                 1.0,
             )
         self._render()
+
+    def _move_image(self, delta: int) -> None:
+        if not self._image_paths:
+            return
+        next_index = self._image_index + delta
+        if not 0 <= next_index < len(self._image_paths):
+            return
+        source = QPixmap(str(self._image_paths[next_index]))
+        if source.isNull():
+            return
+        self._image_index = next_index
+        self.current_image_path = self._image_paths[next_index]
+        self._source = source
+        self._scale = 1.0
+        self._update_image_navigation()
+        self._fit()
+
+    def _update_image_navigation(self) -> None:
+        count = len(self._image_paths)
+        self.previous_button.setEnabled(count > 1 and self._image_index > 0)
+        self.next_button.setEnabled(count > 1 and self._image_index < count - 1)
+        self.image_position_label.setText(f"{self._image_index + 1} / {count}" if count else "")
 
     def _render(self) -> None:
         size = self._source.size() * self._scale

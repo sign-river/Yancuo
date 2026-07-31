@@ -14,7 +14,10 @@ from sqlalchemy import func, select
 
 from yancuo_win.ai.base import StructuredCandidate, StructuredResult
 from yancuo_win.application.bootstrap import bootstrap_runtime
-from yancuo_win.application.intake_service import ProblemIntakeService
+from yancuo_win.application.intake_service import (
+    ProblemIntakeService,
+    RegionRecognitionProposal,
+)
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.models import (
     AiJob,
@@ -31,7 +34,7 @@ from yancuo_win.data.models import (
     Version,
 )
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.ui.intake_page import ProblemForm
+from yancuo_win.ui.intake_page import ProblemForm, _RegionRecognitionCompareDialog
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
 
 
@@ -292,6 +295,54 @@ def test_problem_form_exposes_field_names_and_focus_order(
     assert form.chapter.hasFocus()
     form.close()
     app.processEvents()
+
+
+def test_problem_form_answer_capture_uses_responsive_svg_action(
+    intake: ProblemIntakeService,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    form = ProblemForm(intake, show_render_previews=True)
+    form.resize(760, 700)
+    form.show()
+    app.processEvents()
+
+    capture = form.answer_capture_button
+    assert capture is not None
+    assert capture.text() == "从图片识别作答"
+    assert capture.accessibleName() == "从图片识别我的作答"
+    assert capture.toolTip() == "从图片识别我的作答"
+    assert not capture.icon().isNull()
+
+    form.resize(480, 700)
+    app.processEvents()
+    assert capture.text() == ""
+    assert capture.objectName() == "IconButton"
+    assert capture.size() == capture.minimumSize() == capture.maximumSize()
+    form.close()
+
+
+def test_region_rerecognition_comparison_scales_each_column_to_fit() -> None:
+    app = QApplication.instance() or QApplication([])
+    proposal = RegionRecognitionProposal(
+        proposal_id="proposal",
+        candidate_id="candidate",
+        old_fields={"title": "原结果"},
+        new_fields={"title": "新结果"},
+        uncertain=[],
+        region={},
+    )
+    dialog = _RegionRecognitionCompareDialog(proposal)
+    dialog.resize(760, 700)
+    dialog.show()
+    app.processEvents()
+
+    assert dialog.old_view._zoom_scale == dialog.new_view._zoom_scale
+    assert dialog.old_view._zoom_scale == 0.5
+
+    dialog.resize(1366, 700)
+    app.processEvents()
+    assert 0.5 < dialog.old_view._zoom_scale <= 0.9
+    dialog.close()
 
 
 def test_problem_editor_exposes_complete_accessible_form(

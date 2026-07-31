@@ -7,7 +7,6 @@ dialog to finish recording a new problem.
 
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
 from time import perf_counter
@@ -17,6 +16,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QBoxLayout,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -52,6 +52,8 @@ from yancuo_win.tasks.worker import (
     RegionRecognitionWorker,
     UserAnswerRecognitionWorker,
 )
+from yancuo_win.ui.icons import bind_icon
+from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
     CardFrame,
@@ -375,6 +377,28 @@ class ImagePreviewLabel(QLabel):
         )
 
 
+class ClickableImagePreviewLabel(ImagePreviewLabel):
+    """Compact image thumbnail that opens its source only on explicit click."""
+
+    clicked = Signal()
+
+    def __init__(self, empty_text: str, parent=None) -> None:
+        super().__init__(empty_text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("点击查看大图")
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
+        if (
+            not self.editable
+            and not self.source.isNull()
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class _RegionRecognitionCompareDialog(QDialog):
     def __init__(
         self,
@@ -401,6 +425,7 @@ class _RegionRecognitionCompareDialog(QDialog):
         old_card = CardFrame()
         old_card.add_title("原结果")
         old_view = MathContentView()
+        self.old_view = old_view
         old_view.set_problem(
             proposal.old_fields,
             tag_names=proposal.old_fields.get("tags", []),
@@ -416,6 +441,7 @@ class _RegionRecognitionCompareDialog(QDialog):
                 f"AI 报告 {len(proposal.uncertain)} 项不确定内容，请重点核对。"
             )
         new_view = MathContentView()
+        self.new_view = new_view
         new_view.set_problem(
             proposal.new_fields,
             tag_names=proposal.new_fields.get("tags", []),
@@ -434,6 +460,24 @@ class _RegionRecognitionCompareDialog(QDialog):
         actions.addWidget(keep_old)
         actions.addWidget(adopt)
         root.addLayout(actions)
+        self._queue_comparison_scale()
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        self._queue_comparison_scale()
+
+    def _queue_comparison_scale(self) -> None:
+        QTimer.singleShot(0, self._apply_comparison_scale)
+
+    def _apply_comparison_scale(self) -> None:
+        panel_width = min(self.old_view.width(), self.new_view.width())
+        if panel_width <= 1:
+            return
+        # 680px is the comfortable single-column reading width.  A comparison
+        # has half that space, so scale only these two readers down as needed.
+        scale = max(0.5, min(0.9, panel_width / 680))
+        self.old_view.set_zoom_scale(scale)
+        self.new_view.set_zoom_scale(scale)
 
     def _adopt(self) -> None:
         self.apply_new = True
@@ -459,6 +503,7 @@ class ProblemForm(QWidget):
         self.clear_user_answer_on_load = clear_user_answer_on_load
         self.show_render_previews = show_render_previews
         self._field_previews: dict[str, tuple[QLabel, MathContentView]] = {}
+        self.answer_capture_button: QPushButton | None = None
         self._text_area_resize_timer = QTimer(self)
         self._text_area_resize_timer.setSingleShot(True)
         self._text_area_resize_timer.timeout.connect(
@@ -551,12 +596,13 @@ class ProblemForm(QWidget):
                 answer_label = QHBoxLayout()
                 answer_label.addWidget(QLabel(label))
                 answer_label.addStretch(1)
-                capture = QPushButton("📷")
-                capture.setObjectName("IconButton")
+                capture = ghost_button("从图片识别作答")
+                capture.setObjectName("AnswerCaptureButton")
                 capture.setToolTip("从图片识别我的作答")
                 capture.setAccessibleName("从图片识别我的作答")
-                capture.setFixedSize(32, 32)
+                bind_icon(capture, "camera")
                 capture.clicked.connect(self.answer_capture_requested.emit)
+                self.answer_capture_button = capture
                 answer_label.addWidget(capture)
                 answer.body.addLayout(answer_label)
             else:
@@ -590,11 +636,13 @@ class ProblemForm(QWidget):
             self.tags,
             self.question,
             self.latex,
+            self.answer_capture_button,
             self.user_answer,
             self.correct_answer,
             self.solution,
             self.notes,
         )
+        self._update_answer_capture_button_mode()
 
     def _connect_change_signals(self) -> None:
         def notify(*_args) -> None:
@@ -701,7 +749,21 @@ class ProblemForm(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
+        self._update_answer_capture_button_mode()
         self._queue_text_area_resize()
+
+    def _update_answer_capture_button_mode(self) -> None:
+        button = self.answer_capture_button
+        if button is None:
+            return
+        compact = self.width() < 520
+        button.setText("" if compact else "从图片识别作答")
+        button.setObjectName("IconButton" if compact else "AnswerCaptureButton")
+        if compact:
+            button.setFixedSize(32, 32)
+        else:
+            button.setMinimumSize(0, 0)
+            button.setMaximumSize(16777215, 16777215)
 
     def reload_catalog(self) -> None:
         current = self.subject.currentData()
@@ -877,6 +939,8 @@ class IntakePage(QWidget):
         self.region_worker: RegionRecognitionWorker | None = None
         self.answer_recognition_worker: UserAnswerRecognitionWorker | None = None
         self.answer_image: Path | None = None
+        self._ai_image_viewer: ImageViewerDialog | None = None
+        self._answer_image_viewer: ImageViewerDialog | None = None
         self.ai_candidates: list[IntakeCandidate] = []
         self.candidate_index = 0
         self.last_problem_id: str | None = None
@@ -902,6 +966,7 @@ class IntakePage(QWidget):
         self.stack.addWidget(self._build_done())
         self.stack.addWidget(self._build_answer_capture())
         root.addWidget(self.stack)
+        self._apply_image_intake_layout()
 
         self.progress_timer = QTimer(self)
         self.progress_timer.setInterval(500)
@@ -1008,11 +1073,20 @@ class IntakePage(QWidget):
         )
         upload_content_host = QWidget()
         upload_content = QHBoxLayout(upload_content_host)
+        self.ai_upload_content_layout = upload_content
         upload_content.setContentsMargins(0, 0, 0, 0)
-        upload_content_host.setMinimumHeight(280)
-        self.ai_upload_preview = ImagePreviewLabel("选择图片后将在这里预览")
-        self.ai_upload_preview.setMaximumHeight(280)
-        upload_content.addWidget(self.ai_upload_preview, stretch=2)
+        upload_content.setSpacing(12)
+        upload_content_host.setMinimumHeight(190)
+        file_actions = QVBoxLayout()
+        file_actions.setSpacing(8)
+        add = primary_button("选择图片")
+        add.clicked.connect(self._add_ai_files)
+        remove = QPushButton("移除选中")
+        remove.clicked.connect(self._remove_ai_files)
+        file_actions.addWidget(add)
+        file_actions.addWidget(remove)
+        file_actions.addStretch(1)
+        upload_content.addLayout(file_actions)
         self.ai_file_list = QListWidget()
         self.ai_file_list.setObjectName("UploadFileList")
         self.ai_file_list.setAccessibleName("待识别图片")
@@ -1027,26 +1101,25 @@ class IntakePage(QWidget):
             )
         )
         self.ai_file_list.setViewMode(QListView.ViewMode.IconMode)
+        self.ai_file_list.setFlow(QListView.Flow.LeftToRight)
+        self.ai_file_list.setWrapping(False)
         self.ai_file_list.setResizeMode(QListView.ResizeMode.Adjust)
         self.ai_file_list.setMovement(QListView.Movement.Static)
         self.ai_file_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
-        self.ai_file_list.setIconSize(QSize(128, 88))
-        self.ai_file_list.setGridSize(QSize(154, 122))
-        self.ai_file_list.setMinimumSize(QSize(330, 260))
-        self.ai_file_list.currentRowChanged.connect(self._show_ai_file_preview)
+        self.ai_file_list.setIconSize(QSize(144, 104))
+        self.ai_file_list.setGridSize(QSize(170, 138))
+        self.ai_file_list.setFixedHeight(156)
+        self.ai_file_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.ai_file_list.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.ai_file_list.itemClicked.connect(self._toggle_ai_file_viewer)
         upload_content.addWidget(self.ai_file_list, stretch=1)
         upload.body.addWidget(upload_content_host)
-        file_actions = QHBoxLayout()
-        add = primary_button("选择图片")
-        add.clicked.connect(self._add_ai_files)
-        remove = QPushButton("移除选中")
-        remove.clicked.connect(self._remove_ai_files)
-        file_actions.addWidget(add)
-        file_actions.addWidget(remove)
-        file_actions.addStretch(1)
-        upload.body.addLayout(file_actions)
         layout.addWidget(upload)
 
         mode = CardFrame()
@@ -1278,10 +1351,6 @@ class IntakePage(QWidget):
         self.region_label = QLabel("")
         self.region_label.setObjectName("PageHint")
         image_tools_layout.addWidget(self.region_label)
-        region_hint = QLabel("空白处重画，框内移动，拖动控制柄微调。调整后仅保存区域，不会自动调用 AI。")
-        region_hint.setObjectName("PageHint")
-        region_hint.setWordWrap(True)
-        image_tools_layout.addWidget(region_hint)
         region_secondary_actions = QHBoxLayout()
         reset_region = QPushButton("恢复整图")
         reset_region.clicked.connect(self._reset_candidate_region)
@@ -1295,17 +1364,22 @@ class IntakePage(QWidget):
         )
         region_secondary_actions.addWidget(reset_region)
         region_secondary_actions.addWidget(self.undo_region_recognition)
+        region_secondary_actions.addWidget(self.rerecognize_region)
         region_secondary_actions.addStretch(1)
         image_tools_layout.addLayout(region_secondary_actions)
-        image_tools_layout.addWidget(self.rerecognize_region)
 
-        uncertain_title = QLabel("AI 核对提示")
-        uncertain_title.setObjectName("SectionTitle")
-        image_tools_layout.addWidget(uncertain_title)
+        self.uncertain_title = QLabel("AI 核对")
+        self.uncertain_title.setObjectName("SectionTitle")
+        self.uncertain_title.hide()
+        image_tools_layout.addWidget(self.uncertain_title)
         self.uncertain_label = QLabel("")
         self.uncertain_label.setWordWrap(True)
         self.uncertain_label.setObjectName("PageHint")
+        self.uncertain_label.hide()
         image_tools_layout.addWidget(self.uncertain_label)
+        self.uncertain_actions = QVBoxLayout()
+        self.uncertain_actions.setSpacing(4)
+        image_tools_layout.addLayout(self.uncertain_actions)
         image_tools_layout.addStretch(1)
         return self._scroll(image_tools)
 
@@ -1323,20 +1397,25 @@ class IntakePage(QWidget):
         source = CardFrame()
         source.add_title("作答图片")
         answer_image_row = QHBoxLayout()
-        self.answer_image_preview = ImagePreviewLabel("选择作答图片后将在这里预览")
-        self.answer_image_preview.setMaximumHeight(300)
-        answer_image_row.addWidget(self.answer_image_preview, stretch=2)
+        self.answer_image_row_layout = answer_image_row
+        answer_image_row.setSpacing(12)
+        answer_actions = QVBoxLayout()
+        choose = primary_button("选择图片")
+        choose.clicked.connect(self._choose_answer_image)
+        answer_actions.addWidget(choose)
         self.answer_image_name = QLabel("尚未选择图片")
         self.answer_image_name.setObjectName("MutedLabel")
         self.answer_image_name.setWordWrap(True)
-        answer_image_row.addWidget(self.answer_image_name, stretch=1)
+        answer_actions.addWidget(self.answer_image_name)
+        answer_actions.addStretch(1)
+        answer_image_row.addLayout(answer_actions)
+        self.answer_image_preview = ClickableImagePreviewLabel(
+            "选择作答图片后将在这里预览"
+        )
+        self.answer_image_preview.setFixedSize(240, 160)
+        self.answer_image_preview.clicked.connect(self._toggle_answer_image_viewer)
+        answer_image_row.addWidget(self.answer_image_preview)
         source.body.addLayout(answer_image_row)
-        image_actions = QHBoxLayout()
-        choose = primary_button("选择图片")
-        choose.clicked.connect(self._choose_answer_image)
-        image_actions.addWidget(choose)
-        image_actions.addStretch(1)
-        source.body.addLayout(image_actions)
         layout.addWidget(source)
 
         instruction = CardFrame()
@@ -1382,6 +1461,20 @@ class IntakePage(QWidget):
         self.answer_recognition_result.clear()
         self.answer_apply_button.setEnabled(False)
         self.stack.setCurrentIndex(_PAGE_AI_ANSWER_CAPTURE)
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        self._apply_image_intake_layout()
+
+    def _apply_image_intake_layout(self) -> None:
+        narrow = self.width() < 860
+        direction = (
+            QBoxLayout.Direction.TopToBottom
+            if narrow
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self.ai_upload_content_layout.setDirection(direction)
+        self.answer_image_row_layout.setDirection(direction)
 
     def _return_to_ai_edit(self) -> None:
         self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
@@ -1756,13 +1849,55 @@ class IntakePage(QWidget):
                 min(rows[-1] if rows else 0, self.ai_file_list.count() - 1)
             )
         else:
-            self.ai_upload_preview.clear_preview()
+            self._close_ai_image_viewer()
 
-    def _show_ai_file_preview(self, row: int) -> None:
-        if 0 <= row < len(self.ai_files):
-            if self.ai_upload_preview.set_path(self.ai_files[row]):
-                return
-        self.ai_upload_preview.clear_preview()
+    def _toggle_ai_file_viewer(self, item: QListWidgetItem) -> None:
+        row = self.ai_file_list.row(item)
+        if not 0 <= row < len(self.ai_files):
+            return
+        path = self.ai_files[row]
+        if (
+            self._ai_image_viewer is not None
+            and self._ai_image_viewer.isVisible()
+            and self._ai_image_viewer.current_image_path == path
+        ):
+            self._close_ai_image_viewer()
+            return
+        self._close_ai_image_viewer()
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return
+        viewer = ImageViewerDialog(
+            pixmap,
+            self,
+            image_paths=self.ai_files,
+            image_index=row,
+        )
+        viewer.finished.connect(lambda *_args: setattr(self, "_ai_image_viewer", None))
+        self._ai_image_viewer = viewer
+        viewer.show()
+
+    def _close_ai_image_viewer(self) -> None:
+        if self._ai_image_viewer is not None:
+            self._ai_image_viewer.close()
+            self._ai_image_viewer = None
+
+    def _toggle_answer_image_viewer(self) -> None:
+        if self.answer_image is None:
+            return
+        if self._answer_image_viewer is not None and self._answer_image_viewer.isVisible():
+            self._answer_image_viewer.close()
+            self._answer_image_viewer = None
+            return
+        pixmap = QPixmap(str(self.answer_image))
+        if pixmap.isNull():
+            return
+        viewer = ImageViewerDialog(pixmap, self)
+        viewer.finished.connect(
+            lambda *_args: setattr(self, "_answer_image_viewer", None)
+        )
+        self._answer_image_viewer = viewer
+        viewer.show()
 
     def _append_instruction(self, text: str) -> None:
         current = self.ai_instruction.toPlainText().strip()
@@ -2024,16 +2159,76 @@ class IntakePage(QWidget):
             )
         )
         if candidate.uncertain:
-            self.uncertain_label.setText(
-                "AI 不确定字段：\n"
-                + json.dumps(candidate.uncertain, ensure_ascii=False, indent=2)
-            )
+            self.uncertain_title.show()
+            lines = ["请在“编辑字段”中重点核对以下内容："]
+            self._clear_uncertain_actions()
+            for item in candidate.uncertain:
+                field = str(item.get("field") or item.get("name") or "字段")
+                reason = str(item.get("reason") or item.get("message") or "需要确认")
+                confidence = item.get("confidence")
+                confidence_text = (
+                    f"（置信度 {float(confidence):.0%}）"
+                    if isinstance(confidence, (int, float))
+                    else ""
+                )
+                lines.append(f"• {field}：{reason}{confidence_text}")
+                action = ghost_button(f"核对 {self._uncertain_field_label(field)}")
+                action.clicked.connect(
+                    lambda _checked=False, target=field: self._focus_uncertain_field(
+                        target
+                    )
+                )
+                self.uncertain_actions.addWidget(action)
+            self.uncertain_label.setText("\n".join(lines))
             self.uncertain_label.setObjectName("WarningLabel")
+            self.uncertain_label.show()
         else:
-            self.uncertain_label.setText("未报告不确定字段")
-            self.uncertain_label.setObjectName("")
+            self.uncertain_title.hide()
+            self.uncertain_label.hide()
+            self.uncertain_label.setText("")
+            self.uncertain_label.setObjectName("PageHint")
+            self._clear_uncertain_actions()
         self.uncertain_label.style().unpolish(self.uncertain_label)
         self.uncertain_label.style().polish(self.uncertain_label)
+
+    def _clear_uncertain_actions(self) -> None:
+        while self.uncertain_actions.count():
+            item = self.uncertain_actions.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    @staticmethod
+    def _uncertain_field_label(field: str) -> str:
+        return {
+            "title": "题目标题",
+            "subject_id": "科目",
+            "chapter_id": "章节",
+            "question_markdown": "题干",
+            "question_latex": "LaTeX",
+            "user_answer": "我的作答",
+            "correct_answer": "正确答案",
+            "solution_markdown": "解析",
+            "notes": "备注",
+            "tags": "标签",
+        }.get(field, field)
+
+    def _focus_uncertain_field(self, field: str) -> None:
+        editor = {
+            "title": self.ai_form.title_edit,
+            "subject_id": self.ai_form.subject,
+            "chapter_id": self.ai_form.chapter,
+            "question_markdown": self.ai_form.question,
+            "question_latex": self.ai_form.latex,
+            "user_answer": self.ai_form.user_answer,
+            "correct_answer": self.ai_form.correct_answer,
+            "solution_markdown": self.ai_form.solution,
+            "notes": self.ai_form.notes,
+            "tags": self.ai_form.tags,
+        }.get(field)
+        self.ai_result_tabs.setCurrentIndex(1)
+        if editor is not None:
+            editor.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _queue_ai_preview(self) -> None:
         self.preview_timer.start()
@@ -2101,14 +2296,16 @@ class IntakePage(QWidget):
 
     def _show_region_label(self, region: dict[str, float]) -> None:
         if region:
-            text = (
-                "当前题目区域："
+            text = "已选择题目区域"
+            detail = (
                 f"x {region['x']:.1%} · y {region['y']:.1%} · "
                 f"宽 {region['width']:.1%} · 高 {region['height']:.1%}"
             )
         else:
-            text = "当前题目区域：整张原图"
+            text = "当前使用整张原图"
+            detail = "未设置局部题目区域"
         self.region_label.setText(text)
+        self.region_label.setToolTip(detail)
 
     def _save_drawn_region(self, region: dict[str, float]) -> None:
         if not self.ai_candidates:
@@ -2283,7 +2480,7 @@ class IntakePage(QWidget):
                 self.ai_job_id = None
                 self.ai_files.clear()
                 self.ai_file_list.clear()
-                self.ai_upload_preview.clear_preview()
+                self._close_ai_image_viewer()
                 self.ai_instruction.clear()
                 self._show_done(
                     f"“{problem.title or 'AI 识别题目'}”已进入正式题库。"
@@ -2344,7 +2541,7 @@ class IntakePage(QWidget):
         self.ai_candidates.clear()
         self.ai_files.clear()
         self.ai_file_list.clear()
-        self.ai_upload_preview.clear_preview()
+        self._close_ai_image_viewer()
         self.ai_instruction.clear()
         self.show_ai_upload()
 

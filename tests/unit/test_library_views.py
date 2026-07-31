@@ -9,7 +9,15 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QLineEdit, QMessageBox, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QBoxLayout,
+    QFrame,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QWidget,
+)
 
 import yancuo_win.ui.intake_page as intake_page_module
 import yancuo_win.ui.note_page as note_page_module
@@ -219,6 +227,14 @@ def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
     window._apply_sidebar_visibility()
     app.processEvents()
     assert window.minimumWidth() == 760
+    assert (
+        window.intake_page.ai_upload_content_layout.direction()
+        == QBoxLayout.Direction.TopToBottom
+    )
+    assert (
+        window.intake_page.answer_image_row_layout.direction()
+        == QBoxLayout.Direction.TopToBottom
+    )
     assert window.sidebar.isHidden()
     assert not window.library_navigation_panel.isHidden()
 

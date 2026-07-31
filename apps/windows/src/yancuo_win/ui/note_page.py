@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -293,7 +294,7 @@ class NoteDraftPreviewPage(QWidget):
         self.confirmed_note_ids: tuple[str, ...] = ()
         self._refreshing_groups = False
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 12)
+        root.setContentsMargins(20, 20, 20, 16)
         root.setSpacing(12)
         header = PageHeader("确认 AI 笔记", "检查内容块与分类后再保存到笔记库。")
         back = ghost_button("返回 AI 录入")
@@ -676,6 +677,32 @@ class NotePage(QWidget):
         header.add_action(self.new_note_button)
         library_root.addWidget(header)
 
+        search_toolbar = QFrame()
+        search_toolbar.setObjectName("SearchToolbar")
+        search_toolbar.setFixedHeight(44)
+        search_row = QHBoxLayout(search_toolbar)
+        search_row.setContentsMargins(8, 4, 8, 4)
+        search_row.setSpacing(8)
+        self.note_search_mode = QComboBox()
+        self.note_search_mode.setObjectName("SearchScopeCombo")
+        describe_field(self.note_search_mode, "笔记搜索方式")
+        self.note_search_mode.addItem("普通搜索", "local")
+        self.note_search_mode.addItem("AI 搜索", "ai")
+        self.note_search_mode.currentIndexChanged.connect(self._submit_note_search)
+        self.note_search_mode.setFixedHeight(36)
+        search_row.addWidget(self.note_search_mode)
+        self.note_search_edit = SearchInput("搜索标题、内容、标签或合集")
+        self.note_search_edit.setFixedHeight(36)
+        describe_field(
+            self.note_search_edit,
+            "搜索笔记",
+            "搜索标题、内容、标签或合集，按回车执行搜索",
+        )
+        self.note_search_edit.textChanged.connect(self.reload)
+        self.note_search_edit.returnPressed.connect(self._submit_note_search)
+        search_row.addWidget(self.note_search_edit, stretch=1)
+        library_root.addWidget(search_toolbar)
+
         split = QSplitter(Qt.Orientation.Horizontal)
         self.workspace = split
         split.setObjectName("NoteWorkspace")
@@ -739,8 +766,8 @@ class NotePage(QWidget):
         middle = CardFrame()
         middle.setObjectName("NoteLibraryPane")
         self.note_library_pane = middle
-        middle.setMinimumWidth(280)
-        middle.setMaximumWidth(400)
+        middle.setMinimumWidth(320)
+        middle.setMaximumWidth(480)
         self.space_toggle_button = ghost_button("空间与合集")
         self.space_toggle_button.clicked.connect(self._show_narrow_space)
         self.space_toggle_button.hide()
@@ -754,21 +781,6 @@ class NotePage(QWidget):
         list_header.addStretch(1)
         list_header.addWidget(self.note_count_label)
         middle.body.addLayout(list_header)
-        self.note_search_edit = SearchInput("搜索标题、内容、标签或合集")
-        describe_field(
-            self.note_search_edit,
-            "搜索笔记",
-            "搜索标题、内容、标签或合集，按回车执行搜索",
-        )
-        self.note_search_edit.textChanged.connect(self.reload)
-        self.note_search_edit.returnPressed.connect(self._submit_note_search)
-        middle.body.addWidget(self.note_search_edit)
-        self.note_search_mode = QComboBox()
-        describe_field(self.note_search_mode, "笔记搜索方式")
-        self.note_search_mode.addItem("普通搜索", "local")
-        self.note_search_mode.addItem("AI 搜索", "ai")
-        self.note_search_mode.currentIndexChanged.connect(self._submit_note_search)
-        middle.body.addWidget(self.note_search_mode)
         self.note_list_hint = QLabel("")
         self.note_list_hint.setObjectName("MutedLabel")
         self.note_list_hint.setWordWrap(True)
@@ -815,9 +827,9 @@ class NotePage(QWidget):
         self.detail_stack.addWidget(self._build_detail())
         split.addWidget(self.detail_stack)
         split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 1)
+        split.setStretchFactor(1, 2)
         split.setStretchFactor(2, 4)
-        split.setSizes([220, 320, 900])
+        split.setSizes([220, 380, 820])
         library_root.addWidget(split, stretch=1)
         self.page_stack.addWidget(self.library_page)
         self.manual_create_page = self._build_manual_create_page()
@@ -963,11 +975,33 @@ class NotePage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        header = QHBoxLayout()
+        detail_header = QFrame()
+        detail_header.setObjectName("NoteDetailHeader")
+        header = QHBoxLayout(detail_header)
+        header.setContentsMargins(8, 4, 8, 4)
+        header.setSpacing(4)
+        title_stack = QVBoxLayout()
+        title_stack.setSpacing(0)
+        self.note_title_label = QLabel("笔记详情")
+        self.note_title_label.setObjectName("PanelTitle")
+        title_stack.addWidget(self.note_title_label)
         self.note_status = QLabel()
         self.note_status.setObjectName("MutedLabel")
-        header.addWidget(self.note_status)
-        header.addStretch(1)
+        title_stack.addWidget(self.note_status)
+        header.addLayout(title_stack, stretch=1)
+        layout.addWidget(detail_header)
+
+        self.mode_stack = QStackedWidget()
+        self.mode_stack.addWidget(self._build_editor())
+        self.mode_stack.addWidget(self._build_reader())
+        self.mode_stack.setCurrentIndex(1)
+        layout.addWidget(self.mode_stack, stretch=1)
+
+        action_bar = QFrame()
+        action_bar.setObjectName("ContextBar")
+        actions = QHBoxLayout(action_bar)
+        actions.setContentsMargins(10, 8, 10, 8)
+        actions.setSpacing(8)
         self.original_button = ghost_button("查看原图")
         self.original_button.setToolTip("按需打开录入时保存的不可变原图")
         self.original_button.clicked.connect(self._open_original)
@@ -981,18 +1015,13 @@ class NotePage(QWidget):
         more_menu.addAction("加入合集", self._edit_note_collections)
         more_menu.addAction("加入复习计划", self._request_review)
         self.more_button.setMenu(more_menu)
-        header.addWidget(self.original_button)
-        header.addWidget(self.more_button)
-        header.addWidget(self.read_button)
-        header.addWidget(self.edit_button)
-        layout.addLayout(header)
-
-        self.mode_stack = QStackedWidget()
-        self.mode_stack.addWidget(self._build_editor())
-        self.mode_stack.addWidget(self._build_reader())
-        self.mode_stack.setCurrentIndex(1)
+        actions.addWidget(self.original_button)
+        actions.addWidget(self.more_button)
+        actions.addStretch(1)
+        actions.addWidget(self.read_button)
+        actions.addWidget(self.edit_button)
+        layout.addWidget(action_bar)
         self.read_button.hide()
-        layout.addWidget(self.mode_stack, stretch=1)
         return page
 
     def _request_review(self) -> None:
@@ -1283,6 +1312,7 @@ class NotePage(QWidget):
         self._loading = True
         self.title_edit.setText(note.title)
         self.summary_edit.setPlainText(note.summary)
+        self.note_title_label.setText(note.title or "未命名笔记")
         self.note_status.setText(
             f"{_STATUS_LABELS[note.status]} · {len(note.blocks)} 个内容块 · 已保存到本地"
         )

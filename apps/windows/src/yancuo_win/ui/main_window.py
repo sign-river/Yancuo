@@ -2509,8 +2509,8 @@ class MainWindow(QMainWindow):
         reader = widget.findChild(MathContentView)
         if reader is not None and hasattr(reader, "content_height_changed"):
             reader.content_height_changed.connect(
-                lambda target=item, source=widget: self._sync_inline_question_size(
-                    target, source
+                lambda problem_id=problem.id, source=widget: self._sync_inline_question_size(
+                    problem_id, source
                 )
             )
         item.setSizeHint(widget.sizeHint())
@@ -2589,8 +2589,11 @@ class MainWindow(QMainWindow):
         self._materialized_problem_rows = desired
 
     def _sync_inline_question_size(
-        self, item: QListWidgetItem, widget: _InlineQuestionItem
+        self, problem_id: str, widget: _InlineQuestionItem
     ) -> None:
+        _row, item = self._find_problem_item(problem_id)
+        if item is None:
+            return
         if self.problem_list.itemWidget(item) is not widget:
             return
         item.setSizeHint(widget.sizeHint())
