@@ -781,11 +781,6 @@ def app_stylesheet(theme: str = "light") -> str:
         margin: 1px 0;
         border-radius: 0;
     }}
-    QTreeWidget#KnowledgeTree::branch,
-    QTreeWidget#KnowledgeTree::branch:selected,
-    QTreeWidget#KnowledgeTree::branch:hover {{
-        background: transparent;
-    }}
     QListWidget#ProblemList::item {{ min-height: 0; padding: 0; margin: 0; border-radius: 0; }}
     QListWidget#FilterNav::item:hover, QListWidget#ProblemList::item:hover,
     QTreeWidget#KnowledgeTree::item:hover {{

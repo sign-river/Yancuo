@@ -197,7 +197,7 @@ def test_soft_visual_tokens_and_library_surfaces_are_rendered() -> None:
     assert "QSplitter#DialogWorkspace" in rendered
     assert "QScrollArea#ImageViewerCanvas" in rendered
     assert "QListWidget#MainNav:focus" in rendered
-    assert "QTreeWidget#KnowledgeTree::branch:selected" in rendered
+    assert "QTreeWidget#KnowledgeTree::branch:selected" not in rendered
     assert 'QMenu::item[danger="true"]' in rendered
     assert 'QFrame#StateNotice[state="loading"]' in rendered
     assert 'QFrame#StateNotice[state="error"]' in rendered
@@ -221,6 +221,6 @@ def test_tree_branch_style_is_shared_and_keeps_branch_surface_transparent() -> N
     widgets_module.apply_themed_tree_branches(tree)
 
     assert isinstance(tree.style(), widgets_module.ThemedTreeBranchStyle)
-    assert "QTreeWidget#KnowledgeTree::branch:selected" in app_stylesheet("light")
+    assert "QTreeWidget#KnowledgeTree::branch:selected" not in app_stylesheet("light")
     tree.close()
     app.processEvents()
