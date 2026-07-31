@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from time import perf_counter
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QThread, Signal
@@ -13,6 +14,23 @@ from yancuo_win.application.problem_chat_service import ProblemChatService
 
 if TYPE_CHECKING:
     from yancuo_win.application.intake_service import ProblemIntakeService
+
+
+class CallableWorker(QThread):
+    """Run one blocking service call without giving it access to Qt widgets."""
+
+    finished_ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, task: Callable[[], Any], parent=None) -> None:
+        super().__init__(parent)
+        self._task = task
+
+    def run(self) -> None:
+        try:
+            self.finished_ok.emit(self._task())
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
 
 
 class AIJobWorker(QThread):

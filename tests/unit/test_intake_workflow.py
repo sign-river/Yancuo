@@ -937,6 +937,7 @@ def test_region_rerecognition_compares_applies_and_undoes_without_mutating_origi
     )
     unchanged = intake.list_candidates(started.job_id)[0]
     assert unchanged.fields["title"] == baseline["title"]
+    assert len(intake.list_candidates(started.job_id)) == 1
 
     proposal = intake.rerecognize_ai_candidate_region(
         candidate.review_item_id,
@@ -959,6 +960,44 @@ def test_region_rerecognition_compares_applies_and_undoes_without_mutating_origi
     assert not any(
         (intake.runtime.paths.cache_dir / "region_recognition").glob("*.png")
     )
+
+
+def test_region_rerecognition_supersedes_stale_proposals_without_extra_candidates(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "region-repeated.png"
+    image = QImage(240, 160, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    assert image.save(str(image_path), "PNG")
+
+    started = intake.start_ai([image_path])
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    intake.update_ai_candidate_region(
+        candidate.review_item_id,
+        {"x": 0.2, "y": 0.25, "width": 0.5, "height": 0.5},
+    )
+    first = intake.rerecognize_ai_candidate_region(
+        candidate.review_item_id, candidate.fields
+    )
+    second = intake.rerecognize_ai_candidate_region(
+        candidate.review_item_id, candidate.fields
+    )
+
+    with pytest.raises(DomainError, match="已被新的识别结果替代"):
+        intake.decide_region_rerecognition(first.proposal_id, apply_new=True)
+    intake.decide_region_rerecognition(second.proposal_id, apply_new=True)
+
+    candidates = intake.list_candidates(started.job_id)
+    assert len(candidates) == 1
+    assert candidates[0].review_item_id == candidate.review_item_id
+    committed = intake.commit_ai_candidate(
+        candidate.review_item_id, candidates[0].fields
+    )
+    assert intake.app.get_problem(committed.id) is not None
+    assert len(intake.list_candidates(started.job_id)) == 1
+    assert intake.list_candidates(started.job_id)[0].status == "committed"
 
 
 def test_region_rerecognition_removes_temporary_crop_after_failure(

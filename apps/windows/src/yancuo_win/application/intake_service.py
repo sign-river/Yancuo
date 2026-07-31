@@ -1498,6 +1498,28 @@ class ProblemIntakeService:
             current = session.get(IntakeCandidateRecord, review_item_id)
             if current is None or current.status != "pending":
                 raise DomainError("重新识别期间候选题状态已变化")
+            # A comparison is temporary and belongs to exactly one candidate.
+            # Keep old proposals in the audit trail, but make them incapable of
+            # overwriting a later recognition result.
+            for open_proposal_id in self._open_region_proposal_ids(
+                session, review_item_id
+            ):
+                session.add(
+                    AuditLog(
+                        id=new_id("audit"),
+                        action="intake_region_rerecognition_superseded",
+                        entity_type="intake_candidate",
+                        entity_id=review_item_id,
+                        detail_json=json.dumps(
+                            {
+                                "proposal_id": open_proposal_id,
+                                "superseded_by": proposal_id,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        actor=self.runtime.identity.user_id,
+                    )
+                )
             session.add(
                 AuditLog(
                     id=proposal_id,
@@ -1541,22 +1563,10 @@ class ProblemIntakeService:
                 or proposal.action != "intake_region_rerecognition_proposed"
             ):
                 raise DomainError("区域重新识别提案不存在")
-            already_decided = session.scalar(
-                select(func.count())
-                .select_from(AuditLog)
-                .where(
-                    AuditLog.action.in_(
-                        {
-                            "intake_region_rerecognition_applied",
-                            "intake_region_rerecognition_discarded",
-                        }
-                    ),
-                    AuditLog.detail_json.like(
-                        f'%"proposal_id": "{proposal_id}"%'
-                    ),
-                )
-            )
-            if already_decided:
+            proposal_state = self._region_proposal_state(session, proposal_id)
+            if proposal_state == "superseded":
+                raise DomainError("区域重新识别提案已被新的识别结果替代")
+            if proposal_state == "decided":
                 raise DomainError("区域重新识别提案已经处理")
             try:
                 detail = json.loads(proposal.detail_json)
@@ -1598,6 +1608,46 @@ class ProblemIntakeService:
                 )
             )
             session.commit()
+
+    @staticmethod
+    def _region_proposal_state(session, proposal_id: str) -> str | None:
+        """Return whether a proposal has been decided or replaced."""
+
+        rows = session.scalars(
+            select(AuditLog).where(
+                AuditLog.action.in_(
+                    {
+                        "intake_region_rerecognition_applied",
+                        "intake_region_rerecognition_discarded",
+                        "intake_region_rerecognition_superseded",
+                    }
+                )
+            )
+        ).all()
+        for row in rows:
+            try:
+                detail = json.loads(row.detail_json)
+            except json.JSONDecodeError:
+                continue
+            if detail.get("proposal_id") != proposal_id:
+                continue
+            if row.action == "intake_region_rerecognition_superseded":
+                return "superseded"
+            return "decided"
+        return None
+
+    def _open_region_proposal_ids(self, session, candidate_id: str) -> list[str]:
+        proposals = session.scalars(
+            select(AuditLog).where(
+                AuditLog.action == "intake_region_rerecognition_proposed",
+                AuditLog.entity_id == candidate_id,
+            )
+        ).all()
+        return [
+            proposal.id
+            for proposal in proposals
+            if self._region_proposal_state(session, proposal.id) is None
+        ]
 
     def can_undo_region_rerecognition(self, candidate_id: str) -> bool:
         return self._latest_region_apply(candidate_id) is not None

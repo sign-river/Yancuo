@@ -404,6 +404,10 @@ def app_stylesheet(theme: str = "light") -> str:
         color: {t.muted};
         font-size: 12px;
     }}
+    QLabel#FieldError {{
+        color: {t.danger};
+        font-size: 12px;
+    }}
     QLabel#SectionTitle {{
         font-size: 14px;
         font-weight: 600;

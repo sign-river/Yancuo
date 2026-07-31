@@ -63,7 +63,7 @@ from yancuo_win.infrastructure.credentials import get_secret
 from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.import_export.gmshare import GmshareService
 from yancuo_win.import_export.workspace import WorkspaceService
-from yancuo_win.tasks.worker import AIJobWorker
+from yancuo_win.tasks.worker import AIJobWorker, CallableWorker
 from yancuo_win.tasks.search_worker import AiSearchWorker
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.icons import bind_icon
@@ -260,6 +260,12 @@ class MainWindow(QMainWindow):
         self._expanded_question_id: str | None = None
         self._ai_worker: AIJobWorker | None = None
         self._ai_search_worker: AiSearchWorker | None = None
+        self._search_index_worker: CallableWorker | None = None
+        self._cloud_profile_worker: CallableWorker | None = None
+        self._cloud_operation_worker: CallableWorker | None = None
+        self._pending_cloud_restore: tuple[CloudBackupService, Path, str] | None = None
+        self._local_restore_worker: CallableWorker | None = None
+        self._local_backup_worker: CallableWorker | None = None
         self._ai_search_query = ""
         self._ai_search_problem_ids: list[str] | None = None
         self._ai_search_matches = {}
@@ -1589,31 +1595,54 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.runtime.paths.root)))
 
     def _inspect_cloud_profiles(self) -> None:
+        if self._cloud_profile_worker is not None:
+            return
         self._set_settings_action_busy(self.inspect_cloud_profiles_button, "正在检查…")
         try:
-            self.cloud = CloudBackupService(
+            cloud = CloudBackupService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
             )
-            state = self.cloud.profile_connection_state()
-            profiles = state["remote_profiles"]
-            lines = [f"本地资料：{state['local_profile_id']}"]
-            lines.extend(
-                f"云端资料：{item['profile_id']} · {item.get('tag', '无快照')}"
-                for item in profiles
-            )
-            if state["requires_takeover"]:
-                lines.append("发现其他资料：恢复或合并前需明确确认，不会自动覆盖本地数据。")
-            if state["branch_detected"]:
-                lines.append("检测到另一设备已更新当前资料：已暂停上传，需恢复或合并确认。")
-            if not profiles:
-                lines.append("云端尚无资料快照。")
-            self.account_remote_summary.setText(
-                "\n".join(lines) + "\n最后检查：" + QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm")
-            )
         except DomainError as exc:
-            self.account_remote_summary.setText(f"无法读取云端资料：{exc}")
-        finally:
             self._set_settings_action_idle(self.inspect_cloud_profiles_button, "查看云端资料")
+            self.account_remote_summary.setText(f"无法读取云端资料：{exc}")
+            return
+        self._cloud_profile_worker = CallableWorker(cloud.profile_connection_state, self)
+        self._cloud_profile_worker.finished_ok.connect(self._on_cloud_profiles_loaded)
+        self._cloud_profile_worker.failed.connect(self._on_cloud_profiles_failed)
+        self._cloud_profile_worker.finished.connect(self._on_cloud_profile_worker_finished)
+        self._cloud_profile_worker.start()
+
+    def _on_cloud_profiles_loaded(self, state: object) -> None:
+        if not isinstance(state, dict):
+            self._on_cloud_profiles_failed("云端资料状态格式无效")
+            return
+        profiles = state.get("remote_profiles", [])
+        lines = [f"本地资料：{state.get('local_profile_id', '未知')}"]
+        lines.extend(
+            f"云端资料：{item['profile_id']} · {item.get('tag', '无快照')}"
+            for item in profiles
+            if isinstance(item, dict) and item.get("profile_id")
+        )
+        if state.get("requires_takeover"):
+            lines.append("发现其他资料：恢复或合并前需明确确认，不会自动覆盖本地数据。")
+        if state.get("branch_detected"):
+            lines.append("检测到另一设备已更新当前资料：已暂停上传，需恢复或合并确认。")
+        if not profiles:
+            lines.append("云端尚无资料快照。")
+        self.account_remote_summary.setText(
+            "\n".join(lines) + "\n最后检查："
+            + QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm")
+        )
+
+    def _on_cloud_profiles_failed(self, error: str) -> None:
+        self.account_remote_summary.setText(f"无法读取云端资料：{error}")
+
+    def _on_cloud_profile_worker_finished(self) -> None:
+        worker = self._cloud_profile_worker
+        self._cloud_profile_worker = None
+        self._set_settings_action_idle(self.inspect_cloud_profiles_button, "查看云端资料")
+        if worker is not None:
+            worker.deleteLater()
 
     def _restore_cloud_profile(self) -> None:
         try:
@@ -3170,24 +3199,27 @@ class MainWindow(QMainWindow):
             )
 
     def _backup(self) -> None:
-        try:
-            dest = self.services.create_backup()
-            self._set_local_backup_summary(Path(dest), "ZIP 本机备份")
-            self._show_operation_result(
-                "备份完成",
-                "本机备份已生成。",
-                details=f"保存位置：{dest}",
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._show_operation_result(
-                "备份失败",
-                "本机备份未能生成。",
-                details=str(exc),
-                retry=self._backup,
-                is_error=True,
-            )
+        if self._local_backup_worker is not None:
+            self._show_status_toast("已有本机备份任务正在运行")
+            return
+        self._local_backup_worker = CallableWorker(self.services.create_backup, self)
+        self._local_backup_worker.finished_ok.connect(self._on_zip_backup_done)
+        self._local_backup_worker.failed.connect(self._show_zip_backup_failed)
+        self._local_backup_worker.finished.connect(self._on_local_backup_worker_finished)
+        self._local_backup_worker.start()
+
+    def _on_zip_backup_done(self, value: object) -> None:
+        path = Path(str(value))
+        self._set_local_backup_summary(path, "ZIP 本机备份")
+        self._show_operation_result("备份完成", "本机备份已生成。", details=f"保存位置：{path}")
+
+    def _show_zip_backup_failed(self, error: str) -> None:
+        self._show_operation_result("备份失败", "本机备份未能生成。", details=error, retry=self._backup, is_error=True)
 
     def _export_ebpack(self) -> None:
+        if self._local_backup_worker is not None:
+            self._show_status_toast("已有本机备份任务正在运行")
+            return
         path, _ = QFileDialog.getSaveFileName(
             self,
             "导出 ebpack",
@@ -3196,22 +3228,27 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        try:
-            dest = self.ebpack.export_ebpack(Path(path))
-            self._set_local_backup_summary(Path(dest), "完整 .ebpack 备份")
-            self._show_operation_result(
-                "完整备份包导出完成",
-                "ebpack 已生成。",
-                details=f"保存位置：{dest}",
-            )
-        except DomainError as exc:
-            self._show_operation_result(
-                "完整备份包导出失败",
-                "ebpack 未能生成。",
-                details=str(exc),
-                retry=self._export_ebpack,
-                is_error=True,
-            )
+        self._local_backup_worker = CallableWorker(
+            lambda: self.ebpack.export_ebpack(Path(path)), self
+        )
+        self._local_backup_worker.finished_ok.connect(self._on_ebpack_backup_done)
+        self._local_backup_worker.failed.connect(self._show_ebpack_backup_failed)
+        self._local_backup_worker.finished.connect(self._on_local_backup_worker_finished)
+        self._local_backup_worker.start()
+
+    def _on_ebpack_backup_done(self, value: object) -> None:
+        path = Path(str(value))
+        self._set_local_backup_summary(path, "完整 .ebpack 备份")
+        self._show_operation_result("完整备份包导出完成", "ebpack 已生成。", details=f"保存位置：{path}")
+
+    def _show_ebpack_backup_failed(self, error: str) -> None:
+        self._show_operation_result("完整备份包导出失败", "ebpack 未能生成。", details=error, retry=self._export_ebpack, is_error=True)
+
+    def _on_local_backup_worker_finished(self) -> None:
+        worker = self._local_backup_worker
+        self._local_backup_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _set_local_backup_summary(self, path: Path, kind: str) -> None:
         try:
@@ -3226,6 +3263,9 @@ class MainWindow(QMainWindow):
         )
 
     def _import_ebpack(self) -> None:
+        if self._local_restore_worker is not None:
+            self._show_status_toast("已有本机恢复任务正在运行")
+            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择 ebpack",
@@ -3239,25 +3279,26 @@ class MainWindow(QMainWindow):
         )
         if not target:
             return
-        try:
-            result = self.ebpack.restore_ebpack(Path(path), Path(target))
-            self._show_operation_result(
-                "恢复完成",
-                "备份包已恢复到独立目录，当前资料没有被覆盖。",
-                details=(
-                    f"恢复位置：{result['target_root']}\n"
-                    f"数据库版本：schema v{result['schema_version']}\n"
-                    "下一步：将 YANCUO_DATA_ROOT 指向该目录后重启。"
-                ),
-            )
-        except DomainError as exc:
-            self._show_operation_result(
-                "恢复失败",
-                "完整备份包未能恢复。",
-                details=str(exc),
-                retry=self._import_ebpack,
-                is_error=True,
-            )
+        self._local_restore_worker = CallableWorker(
+            lambda: self.ebpack.restore_ebpack(Path(path), Path(target)), self
+        )
+        self._local_restore_worker.finished_ok.connect(self._on_ebpack_restore_done)
+        self._local_restore_worker.failed.connect(self._show_ebpack_restore_failed)
+        self._local_restore_worker.finished.connect(self._on_local_restore_worker_finished)
+        self._local_restore_worker.start()
+
+    def _on_ebpack_restore_done(self, value: object) -> None:
+        result = value if isinstance(value, dict) else {}
+        self._show_operation_result("恢复完成", "备份包已恢复到独立目录，当前资料没有被覆盖。", details=f"恢复位置：{result.get('target_root', '未知')}\n数据库版本：schema v{result.get('schema_version', '未知')}\n下一步：将 YANCUO_DATA_ROOT 指向该目录后重启。")
+
+    def _show_ebpack_restore_failed(self, error: str) -> None:
+        self._show_operation_result("恢复失败", "完整备份包未能恢复。", details=error, retry=self._import_ebpack, is_error=True)
+
+    def _on_local_restore_worker_finished(self) -> None:
+        worker = self._local_restore_worker
+        self._local_restore_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _export_gmshare(self) -> None:
         ids: list[str] = []
@@ -3323,34 +3364,50 @@ class MainWindow(QMainWindow):
             )
 
     def _cloud_backup(self) -> None:
+        if self._cloud_operation_worker is not None:
+            return
         self._set_settings_action_busy(self.cloud_backup_button, "正在备份…")
         try:
-            self.cloud = CloudBackupService(
+            cloud = CloudBackupService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
             )
-            self.cloud.ensure_repository()
-            result = self.cloud.upload_backup()
-            self._show_operation_result(
-                "云备份完成",
-                "不可变完整快照已上传，并已更新当前资料指针。",
-                details=(
-                    f"备份标签：{result['tag']}\n"
-                    f"SHA-256：{result['sha256'][:16]}…\n"
-                    "说明：这是备份操作，不是实时同步。"
-                ),
-            )
         except DomainError as exc:
-            self._show_operation_result(
-                "云备份失败",
-                "当前资料未能完成云备份。",
-                details=str(exc),
-                retry=self._cloud_backup,
-                is_error=True,
-            )
-        finally:
             self._set_settings_action_idle(self.cloud_backup_button, "云备份")
+            self._show_cloud_backup_failed(str(exc))
+            return
+        def backup() -> dict[str, object]:
+            cloud.ensure_repository()
+            return cloud.upload_backup()
+        self._cloud_operation_worker = CallableWorker(backup, self)
+        self._cloud_operation_worker.finished_ok.connect(self._on_cloud_backup_done)
+        self._cloud_operation_worker.failed.connect(self._show_cloud_backup_failed)
+        self._cloud_operation_worker.finished.connect(self._on_cloud_backup_worker_finished)
+        self._cloud_operation_worker.start()
+
+    def _on_cloud_backup_done(self, result: object) -> None:
+        if not isinstance(result, dict):
+            self._show_cloud_backup_failed("云备份结果格式无效")
+            return
+        self._show_operation_result(
+            "云备份完成", "不可变完整快照已上传，并已更新当前资料指针。",
+            details=(f"备份标签：{result.get('tag', '未知')}\n"
+                     f"SHA-256：{str(result.get('sha256', ''))[:16]}…\n"
+                     "说明：这是备份操作，不是实时同步。"),
+        )
+
+    def _show_cloud_backup_failed(self, error: str) -> None:
+        self._show_operation_result("云备份失败", "当前资料未能完成云备份。", details=error, retry=self._cloud_backup, is_error=True)
+
+    def _on_cloud_backup_worker_finished(self) -> None:
+        worker = self._cloud_operation_worker
+        self._cloud_operation_worker = None
+        self._set_settings_action_idle(self.cloud_backup_button, "云备份")
+        if worker is not None:
+            worker.deleteLater()
 
     def _cloud_restore(self) -> None:
+        if self._cloud_operation_worker is not None:
+            return
         target = QFileDialog.getExistingDirectory(
             self, "选择恢复到的数据目录（建议空目录）"
         )
@@ -3358,112 +3415,146 @@ class MainWindow(QMainWindow):
             return
         self._set_settings_action_busy(self.cloud_restore_button, "正在恢复…")
         try:
-            self.cloud = CloudBackupService(
+            cloud = CloudBackupService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
             )
-            backups = self.cloud.list_backups()
-            latest = next((b for b in backups if b.get("is_latest")), None)
-            summary = "云端备份列表：\n" + "\n".join(
-                f"- {b.get('profile_id') or '旧格式'} · {b['tag']}"
-                f"{' (资料最新)' if b.get('is_latest') else ''}"
-                for b in backups[:20]
-            )
-            if not backups:
-                self._show_status_toast("云端没有可恢复的备份")
-                return
-            if (
-                QMessageBox.question(
-                    self,
-                    "确认恢复",
-                    summary
-                    + "\n\n将恢复当前本地资料对应的最新快照到所选目录。继续？",
-                )
-                != QMessageBox.StandardButton.Yes
-            ):
-                return
-            result = self.cloud.restore_latest_to(Path(target))
-            self._show_operation_result(
-                "云恢复完成",
-                "云端快照已恢复到独立目录，当前资料没有被覆盖。",
-                details=(
-                    f"恢复位置：{result['target_root']}\n"
-                    f"快照：{latest['tag'] if latest else '未知'}\n"
-                    "下一步：设置 YANCUO_DATA_ROOT 后重启。"
-                ),
-            )
         except DomainError as exc:
-            self._show_operation_result(
-                "云恢复失败",
-                "云端快照未能恢复。",
-                details=str(exc),
-                retry=self._cloud_restore,
-                is_error=True,
-            )
-        finally:
             self._set_settings_action_idle(self.cloud_restore_button, "云恢复")
+            self._show_cloud_restore_failed(str(exc))
+            return
+        self._cloud_operation_worker = CallableWorker(cloud.list_backups, self)
+        self._cloud_operation_worker.finished_ok.connect(
+            lambda backups: self._on_cloud_restore_listed(cloud, Path(target), backups)
+        )
+        self._cloud_operation_worker.failed.connect(self._show_cloud_restore_failed)
+        self._cloud_operation_worker.finished.connect(self._on_cloud_restore_list_worker_finished)
+        self._cloud_operation_worker.start()
+
+    def _on_cloud_restore_listed(self, cloud: CloudBackupService, target: Path, value: object) -> None:
+        backups = value if isinstance(value, list) else []
+        if not backups:
+            self._show_status_toast("云端没有可恢复的备份")
+            return
+        latest = next((item for item in backups if item.get("is_latest")), None)
+        summary = "云端备份列表：\n" + "\n".join(
+            f"- {item.get('profile_id') or '旧格式'} · {item['tag']}"
+            f"{' (资料最新)' if item.get('is_latest') else ''}"
+            for item in backups[:20]
+        )
+        if QMessageBox.question(self, "确认恢复", summary + "\n\n将恢复当前本地资料对应的最新快照到所选目录。继续？") != QMessageBox.StandardButton.Yes:
+            return
+        tag = latest["tag"] if latest else "未知"
+        self._pending_cloud_restore = (cloud, target, tag)
+
+    def _on_cloud_restore_list_worker_finished(self) -> None:
+        worker = self._cloud_operation_worker
+        self._cloud_operation_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        pending = self._pending_cloud_restore
+        self._pending_cloud_restore = None
+        if pending is None:
+            self._set_settings_action_idle(self.cloud_restore_button, "云恢复")
+            return
+        cloud, target, tag = pending
+        self._cloud_operation_worker = CallableWorker(lambda: cloud.restore_latest_to(target), self)
+        self._cloud_operation_worker.finished_ok.connect(lambda result: self._on_cloud_restore_done(tag, result))
+        self._cloud_operation_worker.failed.connect(self._show_cloud_restore_failed)
+        self._cloud_operation_worker.finished.connect(self._on_cloud_restore_worker_finished)
+        self._cloud_operation_worker.start()
+
+    def _on_cloud_restore_done(self, tag: str, value: object) -> None:
+        result = value if isinstance(value, dict) else {}
+        self._show_operation_result("云恢复完成", "云端快照已恢复到独立目录，当前资料没有被覆盖。", details=f"恢复位置：{result.get('target_root', '未知')}\n快照：{tag}\n下一步：设置 YANCUO_DATA_ROOT 后重启。")
+
+    def _show_cloud_restore_failed(self, error: str) -> None:
+        self._show_operation_result("云恢复失败", "云端快照未能恢复。", details=error, retry=self._cloud_restore, is_error=True)
+
+    def _on_cloud_restore_worker_finished(self) -> None:
+        worker = self._cloud_operation_worker
+        self._cloud_operation_worker = None
+        self._set_settings_action_idle(self.cloud_restore_button, "云恢复")
+        if worker is not None:
+            worker.deleteLater()
 
     def _sync_push(self) -> None:
+        if self._cloud_operation_worker is not None:
+            return
         self._set_settings_action_busy(self.sync_push_button, "正在推送…")
         try:
-            self.sync = SyncService(
+            sync = SyncService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
             )
-            result = self.sync.push_operations()
-            self._show_operation_result(
-                "推送增量",
-                f"已推送 {result['pushed']} 条增量记录。",
-                details="说明：这是手动增量同步，不是实时同步；当前通道需要 local_folder。",
-            )
         except DomainError as exc:
-            self._show_operation_result(
-                "推送失败",
-                "增量记录未能推送。",
-                details=str(exc),
-                retry=self._sync_push,
-                is_error=True,
-            )
-        finally:
             self._set_settings_action_idle(self.sync_push_button, "推送增量")
+            self._show_sync_push_failed(str(exc))
+            return
+        self._cloud_operation_worker = CallableWorker(sync.push_operations, self)
+        self._cloud_operation_worker.finished_ok.connect(self._on_sync_push_done)
+        self._cloud_operation_worker.failed.connect(self._show_sync_push_failed)
+        self._cloud_operation_worker.finished.connect(self._on_sync_push_worker_finished)
+        self._cloud_operation_worker.start()
+
+    def _on_sync_push_done(self, result: object) -> None:
+        pushed = result.get("pushed", 0) if isinstance(result, dict) else 0
+        self._show_operation_result("推送增量", f"已推送 {pushed} 条增量记录。", details="说明：这是手动增量同步，不是实时同步；当前通道需要 local_folder。")
+
+    def _show_sync_push_failed(self, error: str) -> None:
+        self._show_operation_result("推送失败", "增量记录未能推送。", details=error, retry=self._sync_push, is_error=True)
+
+    def _on_sync_push_worker_finished(self) -> None:
+        worker = self._cloud_operation_worker
+        self._cloud_operation_worker = None
+        self._set_settings_action_idle(self.sync_push_button, "推送增量")
+        if worker is not None:
+            worker.deleteLater()
 
     def _sync_pull(self) -> None:
+        if self._cloud_operation_worker is not None:
+            return
         self._set_settings_action_busy(self.sync_pull_button, "正在拉取…")
         try:
-            self.sync = SyncService(
+            sync = SyncService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
             )
-            result = self.sync.pull_and_merge()
-            msg = (
-                f"应用 {result['applied']} 条\n"
-                f"自动合并字段约 {result['auto_merged_fields']}\n"
-                f"冲突字段 {result['conflicts']}\n"
-            )
-            if result.get("snapshot"):
-                msg += f"合并前快照：{result['snapshot']}\n"
-            if result.get("review_session_id"):
-                msg += "请在工作台打开「待确认变更」处理同步冲突。"
-            self._show_operation_result(
-                "拉取合并完成",
-                (
-                    f"已应用 {result['applied']} 条记录，"
-                    f"发现 {result['conflicts']} 个冲突字段。"
-                ),
-                details=msg,
-            )
-            if result.get("review_session_id"):
-                ReviewDialog(self.ai, self.services, self).exec()
-            self.refresh_all()
         except DomainError as exc:
-            self._show_operation_result(
-                "拉取合并失败",
-                "云端增量未能拉取或合并。",
-                details=str(exc),
-                retry=self._sync_pull,
-                is_error=True,
-            )
-        finally:
             self._set_settings_action_idle(self.sync_pull_button, "拉取合并")
+            self._show_sync_pull_failed(str(exc))
+            return
+        self._cloud_operation_worker = CallableWorker(sync.pull_and_merge, self)
+        self._cloud_operation_worker.finished_ok.connect(self._on_sync_pull_done)
+        self._cloud_operation_worker.failed.connect(self._show_sync_pull_failed)
+        self._cloud_operation_worker.finished.connect(self._on_sync_pull_worker_finished)
+        self._cloud_operation_worker.start()
+
+    def _on_sync_pull_done(self, value: object) -> None:
+        result = value if isinstance(value, dict) else {}
+        msg = (f"应用 {result.get('applied', 0)} 条\n"
+               f"自动合并字段约 {result.get('auto_merged_fields', 0)}\n"
+               f"冲突字段 {result.get('conflicts', 0)}\n")
+        if result.get("snapshot"):
+            msg += f"合并前快照：{result['snapshot']}\n"
+        if result.get("review_session_id"):
+            msg += "请在工作台打开「待确认变更」处理同步冲突。"
+        self._show_operation_result("拉取合并完成", f"已应用 {result.get('applied', 0)} 条记录，发现 {result.get('conflicts', 0)} 个冲突字段。", details=msg)
+        if result.get("review_session_id"):
+            ReviewDialog(self.ai, self.services, self).exec()
+        self.refresh_all()
+
+    def _show_sync_pull_failed(self, error: str) -> None:
+        self._show_operation_result("拉取合并失败", "云端增量未能拉取或合并。", details=error, retry=self._sync_pull, is_error=True)
+
+    def _on_sync_pull_worker_finished(self) -> None:
+        worker = self._cloud_operation_worker
+        self._cloud_operation_worker = None
+        self._set_settings_action_idle(self.sync_pull_button, "拉取合并")
+        if worker is not None:
+            worker.deleteLater()
 
     def _restore_backup(self) -> None:
+        if self._local_restore_worker is not None:
+            self._show_status_toast("已有本机恢复任务正在运行")
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, "选择备份包", str(self.runtime.paths.backup_dir), "Zip (*.zip)"
         )
@@ -3474,58 +3565,71 @@ class MainWindow(QMainWindow):
         )
         if not target:
             return
-        try:
-            root = self.services.restore_backup(Path(path), Path(target))
-            self._show_operation_result(
-                "恢复完成",
-                "旧版 zip 已恢复到独立目录，当前资料没有被覆盖。",
-                details=(
-                    f"恢复位置：{root}\n"
-                    "下一步：将 YANCUO_DATA_ROOT 指向该目录后重启。"
-                ),
-            )
-        except DomainError as exc:
-            self._show_operation_result(
-                "恢复失败",
-                "旧版 zip 未能恢复。",
-                details=str(exc),
-                retry=self._restore_backup,
-                is_error=True,
-            )
+        self._local_restore_worker = CallableWorker(
+            lambda: self.services.restore_backup(Path(path), Path(target)), self
+        )
+        self._local_restore_worker.finished_ok.connect(self._on_zip_restore_done)
+        self._local_restore_worker.failed.connect(self._show_zip_restore_failed)
+        self._local_restore_worker.finished.connect(self._on_local_restore_worker_finished)
+        self._local_restore_worker.start()
+
+    def _on_zip_restore_done(self, root: object) -> None:
+        self._show_operation_result("恢复完成", "旧版 zip 已恢复到独立目录，当前资料没有被覆盖。", details=f"恢复位置：{root}\n下一步：将 YANCUO_DATA_ROOT 指向该目录后重启。")
+
+    def _show_zip_restore_failed(self, error: str) -> None:
+        self._show_operation_result("恢复失败", "旧版 zip 未能恢复。", details=error, retry=self._restore_backup, is_error=True)
     def _open_settings(self) -> None:
         self._show_navigation_page(_PAGE_SETTINGS)
         self.settings_nav.setCurrentRow(1)
         self._refresh_focus_pages()
 
     def _rebuild_search_index(self) -> None:
+        if self._search_index_worker is not None:
+            return
         self._set_settings_action_busy(self.rebuild_search_button, "正在重建…")
         self.search_index_summary.setText("正在检查并重建本地索引…")
         self.status.showMessage("正在重建本地搜索索引")
-        QApplication.processEvents()
-        try:
-            count = self.search.rebuild()
-            health = self._refresh_search_index_summary()
-            if self.search_edit.text().strip():
-                self.refresh_problems()
-            self._show_status_toast(
-                f"本地搜索索引已重建：{count} 道题 · {health.summary}"
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.search_index_summary.setText(f"重建失败：{exc}")
-            self.status.showMessage("本地搜索索引重建失败", 5000)
-            QMessageBox.warning(self, "搜索索引重建失败", str(exc))
-        finally:
-            self._set_settings_action_idle(self.rebuild_search_button, "检查并重建索引")
+        self._search_index_worker = CallableWorker(self.search.rebuild, self)
+        self._search_index_worker.finished_ok.connect(self._on_search_rebuild_done)
+        self._search_index_worker.failed.connect(self._on_search_index_failed)
+        self._search_index_worker.finished.connect(self._on_search_index_worker_finished)
+        self._search_index_worker.start()
 
     def _check_search_index(self) -> None:
+        if self._search_index_worker is not None:
+            return
         self._set_settings_action_busy(self.check_search_button, "正在检查…")
-        try:
-            self._refresh_search_index_summary()
-            self._show_status_toast("本地搜索索引检查完成")
-        except Exception as exc:  # noqa: BLE001
-            self.search_index_summary.setText(f"索引检查失败：{exc}")
-        finally:
-            self._set_settings_action_idle(self.check_search_button, "检查索引")
+        self._search_index_worker = CallableWorker(self.search.check_consistency, self)
+        self._search_index_worker.finished_ok.connect(self._on_search_check_done)
+        self._search_index_worker.failed.connect(self._on_search_index_failed)
+        self._search_index_worker.finished.connect(self._on_search_index_worker_finished)
+        self._search_index_worker.start()
+
+    def _on_search_rebuild_done(self, count: object) -> None:
+        health = self._refresh_search_index_summary()
+        if self.search_edit.text().strip():
+            self.refresh_problems()
+        self._show_status_toast(f"本地搜索索引已重建：{count} 道题 · {health.summary}")
+
+    def _on_search_check_done(self, health: object) -> None:
+        if isinstance(health, SearchIndexHealth):
+            self.search_index_summary.setText(
+                f"索引状态：{health.summary}\n最后检查："
+                + QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm")
+            )
+        self._show_status_toast("本地搜索索引检查完成")
+
+    def _on_search_index_failed(self, error: str) -> None:
+        self.search_index_summary.setText(f"索引操作失败：{error}")
+        self.status.showMessage("本地搜索索引操作失败", 5000)
+
+    def _on_search_index_worker_finished(self) -> None:
+        worker = self._search_index_worker
+        self._search_index_worker = None
+        self._set_settings_action_idle(self.rebuild_search_button, "检查并重建索引")
+        self._set_settings_action_idle(self.check_search_button, "检查索引")
+        if worker is not None:
+            worker.deleteLater()
 
     def _refresh_search_index_summary(self) -> SearchIndexHealth:
         health = self.search.check_consistency()

@@ -43,6 +43,7 @@ from yancuo_win.infrastructure.credentials import (
     set_secret,
 )
 from yancuo_win.tasks.model_worker import AIModelListWorker
+from yancuo_win.tasks.worker import CallableWorker
 from yancuo_win.ui.widgets import (
     CardFrame,
     PageHeader,
@@ -75,8 +76,10 @@ class ServiceSettingsPage(QWidget):
         self.runtime = runtime
         self.section = section
         self._ai_model_worker: AIModelListWorker | None = None
+        self._connection_worker: CallableWorker | None = None
         self._dirty = False
         self._last_connection_test = "尚未测试"
+        self._field_errors: dict[str, QLabel] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 20)
@@ -214,6 +217,7 @@ class ServiceSettingsPage(QWidget):
             "从 API 获取或手动输入支持图片的模型 ID"
         )
         ai_form.addRow("图片模型 ID", self.ai_model)
+        self._add_field_error(ai_form, "ai_model")
         self.ai_model_status = StateNotice(
             "可从 API 获取账户可用模型；请自行确认支持图片输入。",
             "info",
@@ -248,6 +252,7 @@ class ServiceSettingsPage(QWidget):
         ai_token_row.addWidget(self.ai_token_edit, stretch=1)
         ai_token_row.addWidget(self.ai_token_visibility_button)
         ai_form.addRow("新 AI 密钥", ai_token_control)
+        self._add_field_error(ai_form, "ai_token")
         ai_card.body.addLayout(ai_form)
 
         self.clear_ai_button = QPushButton("清除 AI 密钥")
@@ -308,12 +313,15 @@ class ServiceSettingsPage(QWidget):
         describe_field(self.repo_edit, "仓库 name")
         describe_field(self.branch_edit, "同步分支")
         cloud_form.addRow("仓库 owner", self.owner_edit)
+        self._add_field_error(cloud_form, "cloud_owner")
         cloud_form.addRow("仓库 name", self.repo_edit)
+        self._add_field_error(cloud_form, "cloud_repo")
         cloud_form.addRow("同步分支", self.branch_edit)
 
         self.local_root = QLineEdit(_default_local_root(runtime))
         describe_field(self.local_root, "本地云目录")
         cloud_form.addRow("本地云目录", self.local_root)
+        self._add_field_error(cloud_form, "cloud_root")
         self.browse_local_button = QPushButton("浏览…")
         self.browse_local_button.clicked.connect(self._browse_local)
         cloud_form.addRow("", self.browse_local_button)
@@ -339,6 +347,7 @@ class ServiceSettingsPage(QWidget):
         token_row.addWidget(self.token_edit, stretch=1)
         token_row.addWidget(self.token_visibility_button)
         cloud_form.addRow("新令牌", self.token_control)
+        self._add_field_error(cloud_form, "cloud_token")
         self.cloud_permission_notice = StateNotice()
         cloud_form.addRow("", self.cloud_permission_notice)
         cloud_card.body.addLayout(cloud_form)
@@ -408,6 +417,63 @@ class ServiceSettingsPage(QWidget):
     def _mark_dirty(self, *_args: object) -> None:
         self._dirty = True
         self._set_save_enabled(True)
+
+    def _add_field_error(self, form: QFormLayout, name: str) -> None:
+        label = QLabel()
+        label.setObjectName("FieldError")
+        label.setWordWrap(True)
+        label.setVisible(False)
+        self._field_errors[name] = label
+        form.addRow("", label)
+
+    def _clear_field_errors(self) -> None:
+        for label in self._field_errors.values():
+            try:
+                label.clear()
+                label.setVisible(False)
+            except RuntimeError:
+                # Other settings sections are constructed but not attached to
+                # this page, so Qt may already have reclaimed their labels.
+                continue
+
+    def _set_field_error(self, name: str, message: str) -> None:
+        label = self._field_errors[name]
+        label.setText(message)
+        label.setVisible(True)
+
+    def _validate_ai_fields(self) -> bool:
+        self._clear_field_errors()
+        if self.ai_model.currentText().strip():
+            return True
+        self._set_field_error("ai_model", "请填写支持图片输入的模型 ID。")
+        self.ai_model.setFocus(Qt.FocusReason.OtherFocusReason)
+        return False
+
+    def _validate_cloud_fields(self, *, require_token: bool) -> bool:
+        self._clear_field_errors()
+        provider = str(self.provider.currentData())
+        if provider == "local_folder":
+            if self.local_root.text().strip():
+                return True
+            self._set_field_error("cloud_root", "请选择本地云同步目录。")
+            self.local_root.setFocus(Qt.FocusReason.OtherFocusReason)
+            return False
+        for name, field, message in (
+            ("cloud_owner", self.owner_edit, "请填写仓库所有者。"),
+            ("cloud_repo", self.repo_edit, "请填写仓库名称。"),
+        ):
+            if not field.text().strip():
+                self._set_field_error(name, message)
+                field.setFocus(Qt.FocusReason.OtherFocusReason)
+                return False
+        key = self._credential_key_for_provider()
+        if require_token and not self.token_edit.text().strip() and not (
+            key and get_secret(key)
+        ):
+            self._set_field_error("cloud_token", "测试连接前请粘贴访问令牌。")
+            self.token_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+            return False
+        return True
 
     @staticmethod
     def _toggle_secret_visibility(field: QLineEdit, button: QPushButton) -> None:
@@ -501,8 +567,7 @@ class ServiceSettingsPage(QWidget):
     def _apply_ai_session(self) -> None:
         name = self.ai_provider.currentData()
         model = self.ai_model.currentText().strip()
-        if not model:
-            QMessageBox.warning(self, "模型未设置", "请填写 Faro 模型广场中的图片模型 ID")
+        if not self._validate_ai_fields():
             return
         try:
             if not self._save_ai_token():
@@ -523,12 +588,15 @@ class ServiceSettingsPage(QWidget):
             provider_label = "Faro API" if name == "openai_compatible" else "Mock"
             self.status_message.emit(f"AI 设置已保存：{provider_label} / {model}")
         except (ConfigError, DomainError) as exc:
+            self._set_field_error("ai_token", str(exc))
             QMessageBox.warning(self, "AI 设置未就绪", str(exc))
 
     def _test_ai_connection(self) -> None:
         name = self.ai_provider.currentData()
         if name == "mock":
             self.status_message.emit("Mock 不访问网络；连接测试请先选择 Faro API")
+            return
+        if not self._validate_ai_fields():
             return
         model = self.ai_model.currentText().strip()
         self.test_ai_button.setEnabled(False)
@@ -539,30 +607,47 @@ class ServiceSettingsPage(QWidget):
             list_models = getattr(provider, "list_models", None)
             if not callable(list_models):
                 raise DomainError("当前提供商不支持连接测试")
-            models = list_models(timeout_seconds=20)
         except DomainError as exc:
-            self._last_connection_test = f"连接失败：{exc}"
-            self.ai_connection_notice.set_state(self._last_connection_test, "error")
-            QMessageBox.warning(self, "Faro 连接失败", str(exc))
-        else:
-            self._last_connection_test = f"连接成功，最后测试：{QDateTime.currentDateTime().toString('yyyy-MM-dd HH:mm')}"
-            self.ai_connection_notice.set_state(
-                "连接成功，模型列表获取正常。" if not model or model in models else "连接成功，但当前模型不在返回列表中。",
-                "success" if not model or model in models else "info",
-            )
-            if model and model not in models:
-                sample = "、".join(models[:8]) or "（服务未返回模型）"
-                QMessageBox.warning(
-                    self,
-                    "连接成功，但模型未找到",
-                    f"Faro 身份验证成功，但模型列表中没有“{model}”。\n"
-                    f"请从模型广场重新复制 ID。当前返回示例：{sample}",
-                )
-            else:
-                self.status_message.emit(f"Faro 连接成功，已在模型列表中找到“{model}”")
-        finally:
             self.test_ai_button.setEnabled(True)
             self.test_ai_button.setText("测试 Faro 连接")
+            self._on_ai_connection_failed(str(exc))
+            return
+        self._connection_worker = CallableWorker(
+            lambda: list_models(timeout_seconds=20), self
+        )
+        self._connection_worker.finished_ok.connect(
+            lambda models: self._on_ai_connection_finished(model, models)
+        )
+        self._connection_worker.failed.connect(self._on_ai_connection_failed)
+        self._connection_worker.finished.connect(self._on_connection_worker_finished)
+        self._connection_worker.start()
+
+    def _on_ai_connection_finished(self, model: str, value: object) -> None:
+        models = [str(item) for item in value] if isinstance(value, list) else []
+        self._last_connection_test = f"连接成功，最后测试：{QDateTime.currentDateTime().toString('yyyy-MM-dd HH:mm')}"
+        self.ai_connection_notice.set_state(
+            "连接成功，模型列表获取正常。" if not model or model in models else "连接成功，但当前模型不在返回列表中。",
+            "success" if not model or model in models else "info",
+        )
+        if model and model not in models:
+            sample = "、".join(models[:8]) or "（服务未返回模型）"
+            QMessageBox.warning(self, "连接成功，但模型未找到", f"Faro 身份验证成功，但模型列表中没有“{model}”。\n请从模型广场重新复制 ID。当前返回示例：{sample}")
+        else:
+            self.status_message.emit(f"Faro 连接成功，已在模型列表中找到“{model}”")
+
+    def _on_ai_connection_failed(self, error: str) -> None:
+        self._set_field_error("ai_token", error)
+        self._last_connection_test = f"连接失败：{error}"
+        self.ai_connection_notice.set_state(self._last_connection_test, "error")
+        QMessageBox.warning(self, "Faro 连接失败", error)
+
+    def _on_connection_worker_finished(self) -> None:
+        worker = self._connection_worker
+        self._connection_worker = None
+        self.test_ai_button.setEnabled(True)
+        self.test_ai_button.setText("测试 Faro 连接")
+        if worker is not None:
+            worker.deleteLater()
 
     def _fetch_ai_models(self) -> None:
         name = self.ai_provider.currentData()
@@ -723,6 +808,8 @@ class ServiceSettingsPage(QWidget):
         self.status_message.emit("云令牌已从系统凭据中清除")
 
     def _save_cloud_settings(self) -> None:
+        if not self._validate_cloud_fields(require_token=False):
+            return
         key = self._credential_key_for_provider()
         token = self.token_edit.text().strip()
         if key and token:
@@ -768,6 +855,8 @@ class ServiceSettingsPage(QWidget):
             self.status_message.emit(f"当前会话已应用云端提供商：{name}")
 
     def _test_cloud(self) -> None:
+        if not self._validate_cloud_fields(require_token=True):
+            return
         self.test_cloud_button.setEnabled(False)
         self.test_cloud_button.setText("正在测试…")
         self._apply_session_provider(notify=False)
@@ -778,37 +867,53 @@ class ServiceSettingsPage(QWidget):
                 else None
             )
             provider = get_cloud_provider(self.runtime.settings, local_root=root)
-            provider.test_connection()
         except DomainError as exc:
-            self.cloud_permission_notice.set_state(f"连接失败：{exc}", "error")
-            QMessageBox.warning(self, "连接失败", str(exc))
-        else:
-            try:
-                save_cloud_preferences(
-                    self.runtime.paths.root,
-                    provider=str(self.provider.currentData()),
-                    owner=self.owner_edit.text(),
-                    repository=self.repo_edit.text(),
-                    local_root=self.local_root.text(),
-                    branch=self.branch_edit.text(),
-                    enabled=True,
-                )
-            except (ConfigError, OSError) as exc:
-                QMessageBox.warning(
-                    self,
-                    "连接成功但保存失败",
-                    f"云端连接有效，但当前字段未能写入本地偏好：{exc}",
-                )
-            else:
-                self.cloud_permission_notice.set_state(
-                    "连接测试成功，设置已保存。最后测试："
-                    + QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm"),
-                    "success",
-                )
-                self.status_message.emit("云端连接测试成功")
-        finally:
             self.test_cloud_button.setEnabled(True)
             self.test_cloud_button.setText("测试云连接")
+            self._on_cloud_connection_failed(str(exc))
+            return
+        self._connection_worker = CallableWorker(provider.test_connection, self)
+        self._connection_worker.finished_ok.connect(self._on_cloud_connection_finished)
+        self._connection_worker.failed.connect(self._on_cloud_connection_failed)
+        self._connection_worker.finished.connect(self._on_cloud_connection_worker_finished)
+        self._connection_worker.start()
+
+    def _on_cloud_connection_finished(self, _result: object) -> None:
+        try:
+            save_cloud_preferences(
+                self.runtime.paths.root,
+                provider=str(self.provider.currentData()),
+                owner=self.owner_edit.text(),
+                repository=self.repo_edit.text(),
+                local_root=self.local_root.text(),
+                branch=self.branch_edit.text(),
+                enabled=True,
+            )
+        except (ConfigError, OSError) as exc:
+            QMessageBox.warning(self, "连接成功但保存失败", f"云端连接有效，但当前字段未能写入本地偏好：{exc}")
+            return
+        self.cloud_permission_notice.set_state(
+            "连接测试成功，设置已保存。最后测试："
+            + QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm"),
+            "success",
+        )
+        self.status_message.emit("云端连接测试成功")
+
+    def _on_cloud_connection_failed(self, error: str) -> None:
+        self._set_field_error(
+            "cloud_root" if self.provider.currentData() == "local_folder" else "cloud_token",
+            error,
+        )
+        self.cloud_permission_notice.set_state(f"连接失败：{error}", "error")
+        QMessageBox.warning(self, "连接失败", error)
+
+    def _on_cloud_connection_worker_finished(self) -> None:
+        worker = self._connection_worker
+        self._connection_worker = None
+        self.test_cloud_button.setEnabled(True)
+        self.test_cloud_button.setText("测试云连接")
+        if worker is not None:
+            worker.deleteLater()
 
     def _open_data_root(self) -> None:
         path = self.runtime.paths.root

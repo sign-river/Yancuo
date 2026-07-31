@@ -25,6 +25,40 @@ def test_image_viewer_keeps_original_zoom_mapping_and_semantic_surfaces() -> Non
     assert dialog._scale == pytest.approx(1.0)
     assert dialog.scale_label.text() == "100%"
 
+    dialog._show_actual_size()
+    assert dialog._scale == pytest.approx(1.0)
+
+    dialog.close()
+    app.processEvents()
+
+
+def test_image_viewer_reset_restores_fit_scale_and_switching_images_refits(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    paths = []
+    for index, size in enumerate(((2400, 1600), (3200, 1200))):
+        path = tmp_path / f"large-image-{index}.png"
+        pixmap = QPixmap(*size)
+        pixmap.fill("white")
+        assert pixmap.save(str(path))
+        paths.append(path)
+
+    dialog = ImageViewerDialog(
+        QPixmap(str(paths[0])), image_paths=paths, image_index=0
+    )
+    dialog.resize(800, 600)
+    dialog.show()
+    app.processEvents()
+    first_fit = dialog._fit_scale
+    assert 0 < first_fit < 1
+
+    dialog._show_actual_size()
+    assert dialog._scale == pytest.approx(1.0)
+    dialog._reset()
+    assert dialog._scale == pytest.approx(first_fit)
+
+    dialog._move_image(1)
+    assert dialog._scale == pytest.approx(dialog._fit_scale)
+    assert dialog._fit_scale < 1
     dialog.close()
     app.processEvents()
 

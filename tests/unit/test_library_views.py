@@ -811,6 +811,25 @@ def test_settings_expose_loading_failure_disabled_and_permission_states(
     assert not cloud_settings.token_edit.isEnabled()
 
 
+def test_settings_show_field_level_validation_errors(window: MainWindow) -> None:
+    ai_settings = window.ai_settings_page
+    ai_settings.ai_model.setCurrentText("")
+    ai_settings._apply_ai_session()
+    assert not ai_settings._field_errors["ai_model"].isHidden()
+
+    cloud_settings = window.cloud_settings_page
+    cloud_settings.provider.setCurrentIndex(
+        cloud_settings.provider.findData("github")
+    )
+    cloud_settings.owner_edit.clear()
+    cloud_settings.repo_edit.clear()
+    cloud_settings._save_cloud_settings()
+    assert not cloud_settings._field_errors["cloud_owner"].isHidden()
+    cloud_settings.owner_edit.setText("owner")
+    cloud_settings._test_cloud()
+    assert not cloud_settings._field_errors["cloud_repo"].isHidden()
+
+
 def test_settings_secrets_are_hidden_by_default_and_can_be_revealed(
     window: MainWindow,
 ) -> None:

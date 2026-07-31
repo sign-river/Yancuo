@@ -35,6 +35,7 @@ class ImageViewerDialog(QDialog):
         self.setObjectName("ImageViewerDialog")
         self._source = pixmap
         self._scale = 1.0
+        self._fit_scale = 1.0
         self._source_regions = self._normalize_regions(source_regions)
         self._image_paths = tuple(Path(path) for path in image_paths)
         self._image_index = min(
@@ -70,6 +71,8 @@ class ImageViewerDialog(QDialog):
         zoom_in.clicked.connect(lambda: self._zoom(1.25))
         fit = default_button("适应窗口")
         fit.clicked.connect(self._fit)
+        actual_size = default_button("原始大小")
+        actual_size.clicked.connect(self._show_actual_size)
         self.scale_label = QLabel("")
         for button in (
             self.previous_button,
@@ -78,6 +81,7 @@ class ImageViewerDialog(QDialog):
             reset,
             zoom_in,
             fit,
+            actual_size,
         ):
             controls.addWidget(button)
         controls.addWidget(self.image_position_label)
@@ -110,17 +114,22 @@ class ImageViewerDialog(QDialog):
         self._render()
 
     def _reset(self) -> None:
+        self._scale = self._fit_scale
+        self._render()
+
+    def _show_actual_size(self) -> None:
         self._scale = 1.0
         self._render()
 
     def _fit(self) -> None:
         viewport = self.scroll.viewport().size() - QSize(24, 24)
         if self._source.width() and self._source.height():
-            self._scale = min(
+            self._fit_scale = min(
                 viewport.width() / self._source.width(),
                 viewport.height() / self._source.height(),
                 1.0,
             )
+            self._scale = self._fit_scale
         self._render()
 
     def _move_image(self, delta: int) -> None:
@@ -135,7 +144,6 @@ class ImageViewerDialog(QDialog):
         self._image_index = next_index
         self.current_image_path = self._image_paths[next_index]
         self._source = source
-        self._scale = 1.0
         self._update_image_navigation()
         self._fit()
 
