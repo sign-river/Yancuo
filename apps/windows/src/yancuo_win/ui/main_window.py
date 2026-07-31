@@ -831,6 +831,7 @@ class MainWindow(QMainWindow):
         self.knowledge_tree.setUniformRowHeights(True)
         self.knowledge_tree.setHeaderHidden(True)
         self.knowledge_tree.setIndentation(16)
+        apply_themed_tree_branches(self.knowledge_tree)
         self.knowledge_tree.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
         )

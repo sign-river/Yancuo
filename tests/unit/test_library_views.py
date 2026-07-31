@@ -31,7 +31,7 @@ from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.task_center import TaskCenterDialog
-from yancuo_win.ui.widgets import SoftItemDelegate
+from yancuo_win.ui.widgets import SoftItemDelegate, ThemedTreeBranchStyle
 
 
 class _ReaderStub(QWidget):
@@ -257,6 +257,8 @@ def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
     assert isinstance(builder.source_list.itemDelegate(), SoftItemDelegate)
     assert isinstance(builder.queue_list.itemDelegate(), SoftItemDelegate)
     assert builder.folder_tree.uniformRowHeights()
+    assert isinstance(window.knowledge_tree.style(), ThemedTreeBranchStyle)
+    assert isinstance(builder.folder_tree.style(), ThemedTreeBranchStyle)
     assert builder.source_list.uniformItemSizes()
     assert builder.queue_list.uniformItemSizes()
     assert isinstance(builder.queue_pane, QFrame)
