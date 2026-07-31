@@ -792,25 +792,25 @@ def app_stylesheet(theme: str = "light") -> str:
         color: {t.text};
         font-weight: 600;
     }}
-    QListWidget#UploadFileList {{
+    QListWidget#UploadFileList, QListWidget#AnswerImageList {{
         background: {t.upload_bg};
         border: 1px solid {t.border};
         border-radius: 8px;
         outline: none;
         padding: 6px;
     }}
-    QListWidget#UploadFileList::item {{
+    QListWidget#UploadFileList::item, QListWidget#AnswerImageList::item {{
         background: {t.card};
         border: 1px solid {t.border};
         border-radius: 8px;
         padding: 6px;
         margin: 3px;
     }}
-    QListWidget#UploadFileList::item:hover {{
+    QListWidget#UploadFileList::item:hover, QListWidget#AnswerImageList::item:hover {{
         background: {t.list_hover};
         border-color: {t.hover_border};
     }}
-    QListWidget#UploadFileList::item:selected {{
+    QListWidget#UploadFileList::item:selected, QListWidget#AnswerImageList::item:selected {{
         background: {t.list_selected};
         border-color: {t.primary};
         color: {t.text};

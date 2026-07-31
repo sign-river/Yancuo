@@ -198,6 +198,7 @@ def test_soft_visual_tokens_and_library_surfaces_are_rendered() -> None:
     assert "QScrollArea#ImageViewerCanvas" in rendered
     assert "QListWidget#MainNav:focus" in rendered
     assert "QTreeWidget#KnowledgeTree::branch:selected" not in rendered
+    assert "QListWidget#AnswerImageList" in rendered
     assert 'QMenu::item[danger="true"]' in rendered
     assert 'QFrame#StateNotice[state="loading"]' in rendered
     assert 'QFrame#StateNotice[state="error"]' in rendered
