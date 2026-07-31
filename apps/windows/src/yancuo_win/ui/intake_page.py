@@ -1411,6 +1411,7 @@ class IntakePage(QWidget):
         choose.clicked.connect(self._choose_answer_image)
         remove = QPushButton("移除选中")
         remove.clicked.connect(self._remove_answer_images)
+        answer_actions.addStretch(1)
         answer_actions.addWidget(choose)
         answer_actions.addWidget(remove)
         answer_actions.addStretch(1)
