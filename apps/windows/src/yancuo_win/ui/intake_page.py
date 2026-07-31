@@ -927,6 +927,7 @@ class IntakePage(QWidget):
     dashboard_requested = Signal()
     library_requested = Signal()
     open_problem_requested = Signal(str)
+    ai_review_ready = Signal(str, int)
 
     def __init__(self, intake: ProblemIntakeService, parent=None) -> None:
         super().__init__(parent)
@@ -1068,9 +1069,6 @@ class IntakePage(QWidget):
         upload = CardFrame()
         upload.setObjectName("IntakePrimarySurface")
         upload.add_title("1. 添加图片")
-        upload.add_hint(
-            "每张图片可以识别一道或多道候选题；AI 会拆分后逐题进入确认流程。"
-        )
         upload_content_host = QWidget()
         upload_content = QHBoxLayout(upload_content_host)
         self.ai_upload_content_layout = upload_content
@@ -1080,8 +1078,10 @@ class IntakePage(QWidget):
         file_actions = QVBoxLayout()
         file_actions.setSpacing(8)
         add = primary_button("选择图片")
+        add.setFixedWidth(104)
         add.clicked.connect(self._add_ai_files)
         remove = QPushButton("移除选中")
+        remove.setFixedWidth(104)
         remove.clicked.connect(self._remove_ai_files)
         file_actions.addWidget(add)
         file_actions.addWidget(remove)
@@ -1111,6 +1111,7 @@ class IntakePage(QWidget):
         self.ai_file_list.setIconSize(QSize(144, 104))
         self.ai_file_list.setGridSize(QSize(170, 138))
         self.ai_file_list.setFixedHeight(156)
+        self.ai_file_list.setFrameShape(QFrame.Shape.StyledPanel)
         self.ai_file_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
@@ -1275,7 +1276,7 @@ class IntakePage(QWidget):
         confirmation_surface = QFrame()
         confirmation_surface.setObjectName("IntakeConfirmationSurface")
         confirmation_layout = QVBoxLayout(confirmation_surface)
-        confirmation_layout.setContentsMargins(8, 8, 8, 8)
+        confirmation_layout.setContentsMargins(16, 14, 16, 14)
         confirmation_layout.addWidget(self.ai_result_tabs)
         self.ai_confirmation_surface = confirmation_surface
         layout.addWidget(confirmation_surface, stretch=1)
@@ -1283,7 +1284,7 @@ class IntakePage(QWidget):
         action_bar = QFrame()
         action_bar.setObjectName("IntakeActionBar")
         actions = QHBoxLayout(action_bar)
-        actions.setContentsMargins(12, 8, 12, 8)
+        actions.setContentsMargins(16, 10, 16, 10)
         self.ai_previous_button = QPushButton("上一题")
         self.ai_previous_button.clicked.connect(lambda: self._move_candidate(-1))
         self.ai_next_button = QPushButton("下一题")
@@ -1315,8 +1316,8 @@ class IntakePage(QWidget):
         # over the preview when the window height is constrained.
         image_tools = QWidget()
         image_tools_layout = QVBoxLayout(image_tools)
-        image_tools_layout.setContentsMargins(0, 0, 0, 0)
-        image_tools_layout.setSpacing(10)
+        image_tools_layout.setContentsMargins(12, 12, 12, 12)
+        image_tools_layout.setSpacing(12)
         self.image_preview = ImagePreviewLabel("无原图预览")
         self.image_preview.setMinimumHeight(280)
         self.image_preview.setMaximumHeight(360)
@@ -1653,6 +1654,25 @@ class IntakePage(QWidget):
                 self._poll_progress()
         else:
             self.show_ai_upload()
+
+    def show_ai_review(self, job_id: str) -> bool:
+        """Open exactly the review batch named by a completion notification."""
+        try:
+            candidates = [
+                item
+                for item in self.intake.list_candidates(job_id)
+                if item.status in {"pending", "conflict"}
+            ]
+        except DomainError:
+            return False
+        if not candidates:
+            return False
+        self.ai_job_id = job_id
+        self.ai_candidates = candidates
+        self.candidate_index = 0
+        self._load_candidate()
+        self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
+        return True
 
     def _abandon_ai(self) -> None:
         job_id = self.ai_job_id or ""
@@ -2101,10 +2121,13 @@ class IntakePage(QWidget):
         self.candidate_index = 0
         self.processing_retry.setVisible(False)
         self._load_candidate()
+        was_processing = self.stack.currentIndex() == _PAGE_AI_PROCESSING
         self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
         self.status_message.emit(
             f"AI 已完成，生成 {len(self.ai_candidates)} 道待确认题目"
         )
+        if not was_processing:
+            self.ai_review_ready.emit(job_id, len(self.ai_candidates))
 
     def _on_ai_failed(self, job_id: str, error: str) -> None:
         if job_id in self._cancelled_ai_jobs:

@@ -1057,6 +1057,25 @@ def app_stylesheet(theme: str = "light") -> str:
         border: 1px solid {t.border};
         border-radius: 6px;
     }}
+    QFrame#CompletionNotification {{
+        background: {t.card};
+        border: 1px solid {t.border_strong};
+        border-radius: {m.radius_floating}px;
+    }}
+    QLabel#CompletionNotificationTitle {{
+        color: {t.text};
+        font-weight: 600;
+    }}
+    QProgressBar#CompletionNotificationProgress {{
+        max-height: 4px;
+        border: 0;
+        border-radius: 2px;
+        background: {t.progress_bg};
+    }}
+    QProgressBar#CompletionNotificationProgress::chunk {{
+        border-radius: 2px;
+        background: {t.primary};
+    }}
     QLabel#ToastText {{
         color: {t.text};
         font-size: 13px;

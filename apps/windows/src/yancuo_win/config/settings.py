@@ -22,6 +22,7 @@ class ApplicationConfig(BaseModel):
     theme: str = "system"
     preview_zoom_scale: float = Field(default=0.96, ge=0.8, le=1.5)
     auto_save_seconds: int = Field(default=30, ge=1)
+    ai_completion_notification_seconds: int = Field(default=8, ge=1, le=60)
     confirm_before_delete: bool = True
     schema_version: int = Field(default=1, ge=1)
 

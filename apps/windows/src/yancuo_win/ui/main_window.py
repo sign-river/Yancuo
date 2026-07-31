@@ -78,6 +78,7 @@ from yancuo_win.ui.settings_dialog import ServiceSettingsPage
 from yancuo_win.ui.widgets import (
     CardFrame,
     ConfirmDialog,
+    CompletionNotification,
     IconButton,
     OperationResultDialog,
     PageHeader,
@@ -289,6 +290,10 @@ class MainWindow(QMainWindow):
         self._build_central()
         self._build_status()
         self.toast = ToastMessage(self)
+        self.ai_completion_notification = CompletionNotification(self)
+        self.ai_completion_notification.activated.connect(
+            self._open_completed_ai_review
+        )
         self._build_shortcuts()
         self.refresh_all()
         self._update_context_bar(False)
@@ -343,6 +348,7 @@ class MainWindow(QMainWindow):
         self.intake_page.status_message.connect(
             lambda message: self.statusBar().showMessage(message)
         )
+        self.intake_page.ai_review_ready.connect(self._show_ai_completion_notification)
         self.intake_page.dashboard_requested.connect(self._show_dashboard)
         self.intake_page.library_requested.connect(self._show_library)
         self.intake_page.open_problem_requested.connect(self._open_problem_from_intake)
@@ -558,6 +564,18 @@ class MainWindow(QMainWindow):
 
     def _show_toast(self, message: str) -> None:
         self.toast.show_message(message)
+
+    def _show_ai_completion_notification(self, job_id: str, candidates: int) -> None:
+        duration_ms = self.runtime.settings.application.ai_completion_notification_seconds * 1000
+        self.ai_completion_notification.enqueue(job_id, candidates, duration_ms)
+
+    def _open_completed_ai_review(self, job_id: str) -> None:
+        if not self.intake_page.show_ai_review(job_id):
+            self.statusBar().showMessage("该 AI 批次已无待确认题目", 3500)
+            return
+        self._show_navigation_page(_PAGE_INTAKE)
+        self.activateWindow()
+        self.raise_()
 
     def _show_status_toast(self, message: str) -> None:
         self.statusBar().showMessage(message, 3500)

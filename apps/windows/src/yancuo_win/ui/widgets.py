@@ -5,7 +5,16 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from PySide6.QtCore import QModelIndex, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPropertyAnimation,
+    QModelIndex,
+    QPoint,
+    QSize,
+    QTimer,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,6 +24,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QProxyStyle,
     QSizePolicy,
@@ -418,6 +428,109 @@ class ToastMessage(QFrame):
         self.raise_()
         self.show()
         self._timer.start(duration_ms)
+
+
+class CompletionNotification(QFrame):
+    """Queued, clickable AI completion notice with a testable countdown."""
+
+    activated = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("CompletionNotification")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setVisible(False)
+        self._job_id = ""
+        self._queue: list[tuple[str, int]] = []
+        self._duration_ms = 8000
+        self._remaining_ms = self._duration_ms
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 10)
+        layout.setSpacing(6)
+        self.title = QLabel("AI 识别完成")
+        self.title.setObjectName("CompletionNotificationTitle")
+        self.summary = QLabel()
+        self.summary.setObjectName("MutedLabel")
+        self.summary.setWordWrap(True)
+        self.progress = QProgressBar()
+        self.progress.setObjectName("CompletionNotificationProgress")
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, self._duration_ms)
+        layout.addWidget(self.title)
+        layout.addWidget(self.summary)
+        layout.addWidget(self.progress)
+        self._timer = QTimer(self)
+        self._timer.setInterval(50)
+        self._timer.timeout.connect(self._advance)
+        self._slide = QPropertyAnimation(self, b"pos", self)
+        self._slide.setDuration(180)
+        self._slide.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def enqueue(self, job_id: str, candidates: int, duration_ms: int) -> None:
+        self._queue.append((job_id, candidates))
+        self._duration_ms = max(1000, duration_ms)
+        # ``isVisible`` also depends on the parent window.  The hidden state
+        # alone keeps completed batches queued while the app is minimized.
+        if self.isHidden():
+            self._show_next()
+
+    def _show_next(self) -> None:
+        if not self._queue:
+            self.hide()
+            return
+        self._job_id, candidates = self._queue.pop(0)
+        self._remaining_ms = self._duration_ms
+        self.summary.setText(f"已生成 {candidates} 道待确认题目，点击继续审核")
+        self.setAccessibleName("AI 识别完成，点击继续审核")
+        self.setAccessibleDescription(self.summary.text())
+        self.progress.setRange(0, self._duration_ms)
+        self.progress.setValue(self._remaining_ms)
+        self.adjustSize()
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        target_x = max(12, parent.width() - self.width() - 20)
+        target_y = 64
+        self.move(parent.width() + 8, target_y)
+        self.show()
+        self.raise_()
+        self._slide.stop()
+        self._slide.setStartValue(self.pos())
+        self._slide.setEndValue(QPoint(target_x, target_y))
+        self._slide.start()
+        self._timer.start()
+
+    def _advance(self) -> None:
+        self._remaining_ms = max(0, self._remaining_ms - self._timer.interval())
+        self.progress.setValue(self._remaining_ms)
+        self.progress.setAccessibleDescription(f"通知将在 {max(0, (self._remaining_ms + 999) // 1000)} 秒后关闭")
+        if self._remaining_ms == 0:
+            self._timer.stop()
+            self.hide()
+            QTimer.singleShot(0, self._show_next)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._activate()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: ANN001, N802
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self._activate()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _activate(self) -> None:
+        job_id = self._job_id
+        self._timer.stop()
+        self.hide()
+        if job_id:
+            self.activated.emit(job_id)
+        QTimer.singleShot(0, self._show_next)
 
 
 class BatchActionBar(QFrame):
