@@ -63,6 +63,8 @@
 
 导入时以 `revision` 作为冲突检测基线：若库中当前 `revision` 与导出时不同，则进入**冲突**，不得静默覆盖。
 
+可选 `content_blocks` 保留题干的有序表格、公式和题图描述；图片块必须带 `source_image_index` 和归一化 `source_region`，且不能替换不可变原图。缺失时按 Markdown 正文安全降级。
+
 ---
 
 ## 4. problem.md

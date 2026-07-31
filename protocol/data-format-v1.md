@@ -14,6 +14,8 @@
 4. 题目修改通过 `revision` + `versions` 追溯；AI/外部导入不得静默覆盖。  
 5. 未在本文标注为 MVP 的字段，实现方可延后写入，但不得占用冲突语义。
 
+题目可加法保存有序 `content_blocks`（`text`、`formula`、`table`、`figure`）。图像来源块必须携带 `source_image_index` 和归一化 `source_region`；未可靠识别的单元格或图形标注不得猜造。旧题缺失内容块时安全回退到 `question_markdown` / `question_latex`。
+
 ---
 
 ## 2. 标识与身份

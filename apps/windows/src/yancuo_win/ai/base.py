@@ -28,6 +28,27 @@ def normalize_region(value: Any) -> dict[str, float]:
     return {"x": x, "y": y, "width": width, "height": height}
 
 
+def normalize_content_blocks(value: Any) -> list[dict[str, Any]]:
+    """Keep only explicit blocks; do not infer unrecognized cells or figures."""
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for raw in value[:100]:
+        if not isinstance(raw, dict) or raw.get("type") not in {"text", "formula", "table", "figure"}:
+            continue
+        block = {"type": raw["type"], "content": raw.get("content", ""), "source_region": normalize_region(raw.get("source_region"))}
+        if isinstance(raw.get("source_image_index"), int) and raw["source_image_index"] >= 0:
+            block["source_image_index"] = raw["source_image_index"]
+        if block["type"] == "table":
+            if not isinstance(raw.get("rows"), list) or not all(isinstance(row, list) for row in raw["rows"]):
+                continue
+            block["rows"] = raw["rows"]
+        if block["type"] == "figure" and not block["source_region"]:
+            continue
+        result.append(block)
+    return result
+
+
 @dataclass
 class StructuredCandidate:
     fields: dict[str, Any]

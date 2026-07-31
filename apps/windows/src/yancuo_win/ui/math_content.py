@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import weakref
 from collections.abc import Iterable, Mapping
@@ -233,7 +234,25 @@ def build_problem_html(
         )
     elif meta_parts:
         body.append(f'<div class="reader-meta meta-row">{"".join(meta_parts)}</div>')
-    body.append(_section("题目", question))
+    raw_blocks = fields.get("content_blocks")
+    if not isinstance(raw_blocks, list):
+        try:
+            raw_blocks = json.loads(str(fields.get("question_content_json") or "[]"))
+        except json.JSONDecodeError:
+            raw_blocks = []
+    block_html: list[str] = []
+    for block in raw_blocks:
+        if not isinstance(block, Mapping):
+            continue
+        kind = block.get("type")
+        if kind in {"text", "formula"}:
+            block_html.append(_section("题目" if kind == "text" else "公式", str(block.get("content") or "")))
+        elif kind == "table" and isinstance(block.get("rows"), list):
+            rows = "".join("<tr>" + "".join(f"<td>{render_math_text(str(cell), empty='', allow_bare_latex=True)}</td>" for cell in row) + "</tr>" for row in block["rows"] if isinstance(row, list))
+            block_html.append(f'<section class="content-card"><h2>表格</h2><table class="problem-table">{rows}</table></section>')
+        elif kind == "figure":
+            block_html.append(_section("题图", str(block.get("content") or "题图保留在可追溯原图区域中")))
+    body.extend(block_html or [_section("题目", question)])
     if latex and not _contains_math(question, allow_bare_latex=True):
         body.append(
             '<section class="content-card formula-card"><h2>题目公式</h2>'
@@ -285,6 +304,8 @@ def build_problem_html(
     border: 1px solid {colors.border}; border-radius: 12px;
   }}
   .rich-text {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
+  .problem-table {{ width: 100%; border-collapse: collapse; }}
+  .problem-table td {{ border: 1px solid {colors.border}; padding: 7px 9px; vertical-align: top; }}
   .rich-text math {{
     font-family: "Cambria Math", "STIX Two Math", serif;
     font-size: {1.08 if compact else 1.18}em;

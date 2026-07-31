@@ -130,6 +130,7 @@ class Problem(Base):
     title: Mapped[str | None] = mapped_column(String(256), nullable=True)
     question_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
     question_latex: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    question_content_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     user_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)
     correct_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)
     solution_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)

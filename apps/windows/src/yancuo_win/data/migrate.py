@@ -416,6 +416,19 @@ def _migrate_to_v19(engine: Engine) -> None:
     logger.info("migrated database to schema_version=19")
 
 
+def _migrate_to_v20(engine: Engine) -> None:
+    """Add ordered question content blocks without rewriting legacy questions."""
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(problems)")).fetchall()}
+        if "question_content_json" not in columns:
+            conn.execute(text("ALTER TABLE problems ADD COLUMN question_content_json TEXT NOT NULL DEFAULT '[]'"))
+    with Session(engine) as session:
+        set_schema_version(session, 20)
+        session.commit()
+    logger.info("migrated database to schema_version=20")
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -479,6 +492,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     17: _migrate_to_v17,
     18: _migrate_to_v18,
     19: _migrate_to_v19,
+    20: _migrate_to_v20,
 }
 
 

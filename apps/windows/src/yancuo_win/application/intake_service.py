@@ -23,7 +23,7 @@ from PySide6.QtGui import QImage
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
-from yancuo_win.ai.base import normalize_region
+from yancuo_win.ai.base import normalize_content_blocks, normalize_region
 from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.bootstrap import RuntimeContext
@@ -62,6 +62,7 @@ _INTAKE_AI_FIELDS = frozenset(
         "title",
         "question_markdown",
         "question_latex",
+        "content_blocks",
         "correct_answer",
         "solution_markdown",
         "notes",
@@ -1721,6 +1722,7 @@ class ProblemIntakeService:
         """Apply the edited candidate, then promote its staging problem."""
 
         resolved_fields = dict(fields)
+        content_blocks = normalize_content_blocks(resolved_fields.pop("content_blocks", []))
         with self.runtime.session_factory() as session:
             self._apply_taxonomy_proposal(session, resolved_fields)
             session.commit()
@@ -1751,6 +1753,12 @@ class ProblemIntakeService:
                 image_paths=[original_image],
                 source="ai_intake",
             )
+            if content_blocks:
+                with self.runtime.session_factory() as session:
+                    stored = session.get(Problem, problem.id)
+                    if stored is not None:
+                        stored.question_content_json = json.dumps(content_blocks, ensure_ascii=False)
+                        session.commit()
             with self.runtime.session_factory() as session:
                 current = session.get(
                     IntakeCandidateRecord, review_item_id
