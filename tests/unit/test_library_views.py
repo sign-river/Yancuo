@@ -291,6 +291,11 @@ def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
     assert page.ai_confirmation_surface.objectName() == "IntakeConfirmationSurface"
     assert page.ai_confirmation_action_bar.objectName() == "IntakeActionBar"
     assert isinstance(page.ai_file_list.itemDelegate(), SoftItemDelegate)
+    assert page.ai_upload_content_host.minimumHeight() == 0
+    assert (
+        page.ai_upload_content_layout.itemAt(1).alignment()
+        == Qt.AlignmentFlag.AlignTop
+    )
 
 
 def _select_mode(window: MainWindow, mode: str) -> None:

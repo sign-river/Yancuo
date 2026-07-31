@@ -1070,11 +1070,11 @@ class IntakePage(QWidget):
         upload.setObjectName("IntakePrimarySurface")
         upload.add_title("1. 添加图片")
         upload_content_host = QWidget()
+        self.ai_upload_content_host = upload_content_host
         upload_content = QHBoxLayout(upload_content_host)
         self.ai_upload_content_layout = upload_content
         upload_content.setContentsMargins(0, 0, 0, 0)
         upload_content.setSpacing(12)
-        upload_content_host.setMinimumHeight(190)
         file_actions = QVBoxLayout()
         file_actions.setSpacing(8)
         add = primary_button("选择图片")
@@ -1119,7 +1119,11 @@ class IntakePage(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.ai_file_list.itemClicked.connect(self._toggle_ai_file_viewer)
-        upload_content.addWidget(self.ai_file_list, stretch=1)
+        upload_content.addWidget(
+            self.ai_file_list,
+            stretch=1,
+            alignment=Qt.AlignmentFlag.AlignTop,
+        )
         upload.body.addWidget(upload_content_host)
         layout.addWidget(upload)
 
