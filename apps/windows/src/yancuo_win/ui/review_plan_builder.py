@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -473,11 +474,23 @@ class ReviewPlanBuilder(QWidget):
 
     def _confirm_create(self) -> None:
         name = self.plan_name.text().strip()
-        count = self.queue_list.count()
-        if not name or not count:
-            self.status_message.emit("请填写计划名称并至少加入一项资料")
+        ids = [
+            item.data(Qt.ItemDataRole.UserRole)
+            for index in range(self.queue_list.count())
+            if (item := self.queue_list.item(index)).data(Qt.ItemDataRole.UserRole)
+        ]
+        if not ids:
+            message = "请先从左侧选择题目或笔记，并加入计划草稿。"
+            self.status_message.emit(message)
+            QMessageBox.information(self, "尚未加入复习内容", message)
             return
-        ids = [self.queue_list.item(index).data(Qt.ItemDataRole.UserRole) for index in range(count)]
+        if not name:
+            message = "请填写复习计划名称。"
+            self.status_message.emit(message)
+            QMessageBox.information(self, "请填写计划名称", message)
+            self.plan_name.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        count = len(ids)
         if not ConfirmDialog.ask(
             self,
             "确认创建复习计划",
