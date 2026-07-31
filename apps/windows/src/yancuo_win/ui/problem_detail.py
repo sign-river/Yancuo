@@ -254,7 +254,7 @@ class ProblemDetailPage(QWidget):
         header = PageHeader("题目详情")
         self.title_label = header.title
         self.meta_label = header.description
-        self.meta_label.setVisible(True)
+        self.meta_label.hide()
         header.add_leading(self.back_button)
         root.addWidget(header)
 
@@ -420,15 +420,6 @@ class ProblemDetailPage(QWidget):
     ) -> None:
         self.problem_id = problem.id
         self.title_label.setText(problem.title or "无标题题目")
-        status = {
-            "inbox": "收件箱",
-            "active": "正式题库",
-            "archived": "归档",
-            "trashed": "回收站",
-        }.get(problem.status, problem.status)
-        self.meta_label.setText(
-            f"{status} · 优先级 P{problem.priority} · 已复习 {problem.review_count} 次"
-        )
         is_trashed = problem.status == "trashed"
         self.review_button.setVisible(not is_trashed and problem.status != "archived")
         self.favorite_button.setVisible(not is_trashed)
