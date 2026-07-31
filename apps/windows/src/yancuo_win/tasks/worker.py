@@ -58,6 +58,24 @@ class AIJobWorker(QThread):
             self.failed.emit(self.job_id, str(exc))
 
 
+class ReviewApplicationWorker(QThread):
+    """Apply human-confirmed review decisions without blocking the dialog."""
+
+    finished_ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, ai: AIService, decisions: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.ai = ai
+        self.decisions = dict(decisions)
+
+    def run(self) -> None:
+        try:
+            self.finished_ok.emit(self.ai.apply_review_decisions(self.decisions))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
 class RegionRecognitionWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)

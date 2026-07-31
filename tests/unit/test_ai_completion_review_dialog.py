@@ -18,6 +18,23 @@ class _AIStub:
     def list_open_review_items(self):
         return [self.item]
 
+    def list_open_review_items_for_job(self, job_id: str):
+        assert job_id == "internal-job-id"
+        return [self.item]
+
+    def completion_review_overview(self):
+        return [
+            {
+                "job_id": "internal-job-id",
+                "label": "建议已生成",
+                "status": "completed",
+                "completed": 1,
+                "total": 1,
+                "failed": 0,
+                "review_count": 1,
+            }
+        ]
+
     def list_jobs(self, *, limit: int):
         assert limit == 1
         return []
@@ -45,7 +62,7 @@ def test_review_dialog_stages_decisions_and_hides_internal_identifiers(monkeypat
     QApplication.instance() or QApplication([])
     ai = _AIStub()
     dialog = ReviewDialog(ai, SimpleNamespace())
-    dialog._begin_review()
+    dialog._continue_review()
     dialog.list.setCurrentRow(0)
 
     assert "internal-review-id" not in dialog.list.item(0).text()
@@ -60,7 +77,12 @@ def test_review_dialog_stages_decisions_and_hides_internal_identifiers(monkeypat
         "yancuo_win.ui.review_dialog.ConfirmDialog.ask", lambda *_args: True
     )
     dialog._apply()
+    assert dialog._apply_worker is not None
+    assert dialog._apply_worker.wait(1000)
     assert ai.applied == {"internal-review-id": "accept"}
+    dialog._on_apply_done(
+        {"accepted_problem_ids": ["problem-private-id"], "rejected_item_ids": []}
+    )
     assert dialog.complete_summary.text().startswith("已采纳 1 项")
 
     dialog._undo()

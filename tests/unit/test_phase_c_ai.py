@@ -167,6 +167,21 @@ def test_review_decisions_wait_for_final_apply_and_return_safe_presentation(
     assert services.get_problem(problem_id).revision == before.revision + 2  # type: ignore[union-attr]
 
 
+def test_completion_review_overview_is_resumable_without_problem_details(
+    services: AppServices, ai: AIService, tmp_path: Path
+) -> None:
+    image = tmp_path / "overview.jpg"
+    image.write_bytes(b"\xff\xd8\xffoverview")
+    problem_id = services.import_images([image])["created"][0]
+    job = ai.create_structure_job([problem_id])
+
+    overview = ai.completion_review_overview()
+    entry = next(value for value in overview if value["job_id"] == job.id)
+    assert entry["label"] == "等待开始"
+    assert entry["review_count"] == 0
+    assert problem_id not in str({key: value for key, value in entry.items() if key != "job_id"})
+
+
 def test_ai_cannot_delete_and_filters_forbidden_fields() -> None:
     with pytest.raises(DomainError):
         validate_and_filter_proposal(

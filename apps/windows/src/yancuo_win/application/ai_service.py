@@ -417,6 +417,66 @@ class AIService:
             s.expunge_all()
             return list(rows)
 
+    def list_open_review_items_for_job(self, job_id: str) -> list[ReviewItem]:
+        """Return only unfinished AI proposals for a selected completion batch."""
+
+        with self.session() as s:
+            rows = s.scalars(
+                select(ReviewItem)
+                .join(ReviewSession, ReviewSession.id == ReviewItem.session_id)
+                .where(
+                    ReviewSession.job_id == job_id,
+                    ReviewSession.source == "ai",
+                    ReviewItem.status.in_(("pending", "conflict")),
+                )
+                .order_by(text("review_items.rowid"))
+            ).all()
+            s.expunge_all()
+            return list(rows)
+
+    def completion_review_overview(self, limit: int = 30) -> list[dict[str, Any]]:
+        """List resumable completion work using labels safe for the regular UI."""
+
+        labels = {
+            "pending": "等待开始",
+            "running": "正在生成建议",
+            "completed": "建议已生成",
+            "failed": "部分内容未完成",
+            "cancelled": "已取消",
+        }
+        with self.session() as s:
+            jobs = s.scalars(
+                select(AiJob)
+                .where(AiJob.job_type == "structure_recognize")
+                .order_by(AiJob.created_at.desc())
+                .limit(limit)
+            ).all()
+            result: list[dict[str, Any]] = []
+            for job in jobs:
+                open_count = s.scalar(
+                    select(func.count(ReviewItem.id))
+                    .join(ReviewSession, ReviewSession.id == ReviewItem.session_id)
+                    .where(
+                        ReviewSession.job_id == job.id,
+                        ReviewSession.source == "ai",
+                        ReviewItem.status.in_(("pending", "conflict")),
+                    )
+                )
+                if job.status == "cancelled" and not open_count:
+                    continue
+                result.append(
+                    {
+                        "job_id": job.id,
+                        "label": labels.get(job.status, "等待处理"),
+                        "status": job.status,
+                        "completed": job.done_items,
+                        "total": job.total_items,
+                        "failed": job.failed_items,
+                        "review_count": int(open_count or 0),
+                    }
+                )
+            return result
+
     def get_review_item(self, item_id: str) -> ReviewItem | None:
         with self.session() as s:
             item = s.get(ReviewItem, item_id)
