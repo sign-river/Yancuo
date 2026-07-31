@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLineEdit,
@@ -28,6 +29,7 @@ from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
     CardFrame,
+    IconButton,
     PageHeader,
     describe_field,
     ghost_button,
@@ -185,15 +187,15 @@ class ProblemDetailPage(QWidget):
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(14)
 
-        self.back_button = ghost_button("返回题库")
+        self.back_button = IconButton("chevron-left", "返回题库")
         self.back_button.clicked.connect(self.back_requested.emit)
         describe_field(self.back_button, "返回题库", "返回上一页，快捷键 Alt+Left")
         self.back_button.setToolTip("返回题库 (Alt+Left)")
         self.edit_button = primary_button("编辑题目")
         self.edit_button.clicked.connect(self._request_edit)
-        self.view_image_button = ghost_button("查看原图")
+        self.view_image_button = QPushButton("查看原图")
         self.view_image_button.clicked.connect(self._view_original_image)
-        self.chat_button = ghost_button("AI 讨论")
+        self.chat_button = QPushButton("AI 讨论")
         self.chat_button.clicked.connect(self._toggle_chat)
         self.chat_button.setEnabled(chat is not None)
         header = PageHeader("题目详情")
@@ -201,19 +203,21 @@ class ProblemDetailPage(QWidget):
         self.meta_label = header.description
         self.meta_label.setVisible(True)
         header.add_leading(self.back_button)
-        header.add_action(self.view_image_button)
-        header.add_action(self.chat_button)
-        header.add_action(self.edit_button)
         root.addWidget(header)
 
-        actions = QHBoxLayout()
-        self.previous_button = ghost_button("上一题")
+        toolbar = QFrame()
+        toolbar.setObjectName("ContextBar")
+        actions = QHBoxLayout(toolbar)
+        actions.setContentsMargins(8, 6, 8, 6)
+        actions.setSpacing(8)
+        self.previous_button = QPushButton("上一题")
         self.previous_button.clicked.connect(self.previous_requested.emit)
-        self.next_button = ghost_button("下一题")
+        self.next_button = QPushButton("下一题")
         self.next_button.clicked.connect(self.next_requested.emit)
         actions.addWidget(self.previous_button)
         actions.addWidget(self.next_button)
-        actions.addSpacing(12)
+        actions.addWidget(self.view_image_button)
+        actions.addWidget(self.chat_button)
         self.review_button = QPushButton("加入复习计划")
         self.review_button.clicked.connect(self._request_review)
         self.favorite_button = QPushButton("收藏")
@@ -233,8 +237,9 @@ class ProblemDetailPage(QWidget):
             self.restore_button,
         ):
             actions.addWidget(button)
+        actions.addWidget(self.edit_button)
         actions.addStretch(1)
-        root.addLayout(actions)
+        root.addWidget(toolbar)
 
         self.reader = MathContentView()
         self.reader.set_adaptive_content_height(560)
@@ -329,7 +334,7 @@ class ProblemDetailPage(QWidget):
         )
 
     def set_back_text(self, text: str) -> None:
-        self.back_button.setText(text)
+        self.back_button.setToolTip(text)
         self.back_button.setAccessibleName(text)
 
     def set_problem(
