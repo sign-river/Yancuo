@@ -917,6 +917,7 @@ class ProblemMessage(Base):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    reference_snapshot_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="complete", nullable=False)
     error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

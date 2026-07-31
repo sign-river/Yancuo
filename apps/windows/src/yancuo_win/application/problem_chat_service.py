@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import base64
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
+
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+from PySide6.QtGui import QImage
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -16,6 +20,33 @@ from yancuo_win.data.ids import new_id
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.data.models import Asset, Problem, ProblemConversation, ProblemMessage, utcnow
 from yancuo_win.domain.rules import DomainError
+
+
+@dataclass(frozen=True)
+class ProblemReference:
+    """A stable, normalized visual excerpt from an immutable original asset."""
+
+    asset_id: str
+    page_index: int
+    x: float
+    y: float
+    width: float
+    height: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"asset_id": self.asset_id, "page_index": self.page_index, "x": self.x, "y": self.y, "width": self.width, "height": self.height}
+
+    @classmethod
+    def from_value(cls, value: ProblemReference | dict[str, Any]) -> ProblemReference:
+        if isinstance(value, cls):
+            return value
+        try:
+            reference = cls(str(value["asset_id"]), int(value["page_index"]), float(value["x"]), float(value["y"]), float(value["width"]), float(value["height"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DomainError("引用区域格式无效") from exc
+        if not reference.asset_id or not 0 <= reference.x < 1 or not 0 <= reference.y < 1 or not 0 < reference.width <= 1 - reference.x or not 0 < reference.height <= 1 - reference.y:
+            raise DomainError("引用区域坐标无效")
+        return reference
 
 
 class ProblemChatService:
@@ -77,6 +108,15 @@ class ProblemChatService:
             session.expunge_all()
             return rows
 
+    def list_reference_sources(self, problem_id: str) -> list[dict[str, Any]]:
+        """Return immutable originals in the same stable order used for consented sends."""
+
+        with self._session() as session:
+            assets = list(session.scalars(select(Asset).where(Asset.problem_id == problem_id, Asset.role == "original").order_by(Asset.created_at.asc(), Asset.id.asc())))
+            sources = [(asset.id, asset.relative_path) for asset in assets]
+        store = ObjectStore(self.runtime.paths.asset_objects_dir)
+        return [{"asset_id": asset_id, "page_index": index, "path": store.resolve(relative_path)} for index, (asset_id, relative_path) in enumerate(sources) if store.resolve(relative_path).is_file()]
+
     def get_conversation(self, conversation_id: str) -> ProblemConversation | None:
         with self._session() as session:
             row = session.scalar(
@@ -114,10 +154,12 @@ class ProblemChatService:
             session.delete(conversation)
             session.commit()
 
-    def send_message(self, conversation_id: str, content: str) -> ProblemMessage:
+    def send_message(self, conversation_id: str, content: str, references: Sequence[ProblemReference | dict[str, Any]] = ()) -> ProblemMessage:
         content = content.strip()
         if not content:
             raise DomainError("请输入要讨论的问题")
+        reference_snapshot = [ProblemReference.from_value(value).as_dict() for value in references]
+        reference_json = json.dumps(reference_snapshot, ensure_ascii=False)
         with self._session() as session:
             conversation = session.get(ProblemConversation, conversation_id)
             if conversation is None:
@@ -133,6 +175,7 @@ class ProblemChatService:
                 and latest.role == "user"
                 and latest.status == "failed"
                 and latest.content_markdown == content
+                and latest.reference_snapshot_json == reference_json
             ):
                 user_message = latest
                 user_message.status = "pending"
@@ -153,6 +196,7 @@ class ProblemChatService:
                     role="user",
                     content_markdown=content,
                     status="pending",
+                    reference_snapshot_json=reference_json,
                 )
                 session.add(user_message)
             user_message_id = user_message.id
@@ -217,7 +261,7 @@ class ProblemChatService:
                 message.role == "user" and message.status in {"complete", "pending"}
             ) or (message.role == "assistant" and message.status == "complete")
             if include:
-                messages.append({"role": message.role, "content": message.content_markdown})
+                messages.append({"role": message.role, "content": self._message_content(conversation.problem_id, message, provider.capabilities.supports_chat_images)})
         if conversation.include_original_image and provider.capabilities.supports_chat_images:
             image_content = self._original_image_context(conversation.problem_id)
             if image_content:
@@ -227,6 +271,48 @@ class ProblemChatService:
             model=conversation.model or self.runtime.settings.ai.default_text_model,
             timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
         )
+
+    def _message_content(self, problem_id: str, message: ProblemMessage, include_images: bool) -> str | list[dict[str, Any]]:
+        if message.role != "user":
+            return message.content_markdown
+        try:
+            references = json.loads(message.reference_snapshot_json or "[]")
+        except json.JSONDecodeError:
+            references = []
+        if not references:
+            return message.content_markdown
+        if not include_images:
+            return f"{message.content_markdown}\n\n用户选择了 {len(references)} 个视觉引用，但当前提供商不支持图片对话。"
+        content: list[dict[str, Any]] = [{"type": "text", "text": f"{message.content_markdown}\n\n用户明确框选了以下 {len(references)} 个视觉引用；请优先回答选区，同时结合完整题目上下文。"}]
+        content.extend(self._reference_image_context(problem_id, references))
+        return content
+
+    def _reference_image_context(self, problem_id: str, references: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Rebuild ordered crops from immutable originals without sending full images."""
+
+        with self._session() as session:
+            sources = {asset.id: (asset.relative_path, asset.mime_type or "image/png") for asset in session.scalars(select(Asset).where(Asset.problem_id == problem_id, Asset.role == "original"))}
+        store = ObjectStore(self.runtime.paths.asset_objects_dir)
+        content: list[dict[str, Any]] = []
+        for index, value in enumerate(references, start=1):
+            reference = ProblemReference.from_value(value)
+            source = sources.get(reference.asset_id)
+            if source is None:
+                continue
+            relative_path, mime_type = source
+            image = QImage(str(store.resolve(relative_path)))
+            if image.isNull():
+                continue
+            x, y = round(image.width() * reference.x), round(image.height() * reference.y)
+            width, height = max(1, round(image.width() * reference.width)), max(1, round(image.height() * reference.height))
+            crop = image.copy(x, y, min(width, image.width() - x), min(height, image.height() - y))
+            encoded = QByteArray()
+            buffer = QBuffer(encoded)
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            crop.save(buffer, "PNG")
+            buffer.close()
+            content.extend([{"type": "text", "text": f"引用区域 {index}（第 {reference.page_index + 1} 页）"}, {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64.b64encode(bytes(encoded)).decode('ascii')}"}}])
+        return content
 
     def _original_image_context(self, problem_id: str) -> list[dict[str, Any]]:
         """Read originals in a deterministic order after explicit consent."""

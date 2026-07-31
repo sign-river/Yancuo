@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from PySide6.QtGui import QColor, QImage
 
 import yancuo_win.application.problem_chat_service as chat_module
 from yancuo_win.ai.base import (
@@ -16,7 +17,7 @@ from yancuo_win.ai.base import (
     StructuredResult,
 )
 from yancuo_win.application.bootstrap import bootstrap_runtime
-from yancuo_win.application.problem_chat_service import ProblemChatService
+from yancuo_win.application.problem_chat_service import ProblemChatService, ProblemReference
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.models import Asset
@@ -221,3 +222,32 @@ def test_retry_reuses_failed_user_message_without_duplicate_prompt(
         if message["role"] == "user" and message["content"] == "保留这条问题"
     ]
     assert len(successful_user_prompts) == 1
+
+
+def test_visual_reference_snapshot_is_ordered_and_immutable(
+    chat: tuple[AppServices, ProblemChatService],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services, problem_chat = chat
+    problem = services.create_problem(title="框选题", status="active")
+    image_path = tmp_path / "source.png"
+    image = QImage(40, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor("#FF0000"))
+    assert image.save(str(image_path), "PNG")
+    stored = services.store.store_copy(image_path, role="original")
+    with problem_chat._session() as session:
+        session.add(Asset(id="asset_reference", problem_id=problem.id, role="original", sha256=stored.sha256, relative_path=stored.relative_path, mime_type="image/png"))
+        session.commit()
+    provider = _CapturingChatProvider()
+    monkeypatch.setattr(chat_module, "get_provider", lambda *_args: provider)
+    conversation = problem_chat.create_conversation(problem.id)
+    reference = ProblemReference("asset_reference", 0, 0.25, 0.0, 0.5, 1.0)
+
+    assert problem_chat.send_message(conversation.id, "只解释中间部分", [reference]).status == "complete"
+    loaded = problem_chat.get_conversation(conversation.id)
+    assert loaded is not None
+    assert loaded.messages[0].reference_snapshot_json == '[{"asset_id": "asset_reference", "page_index": 0, "x": 0.25, "y": 0.0, "width": 0.5, "height": 1.0}]'
+    payload = provider.requests[0][1]["content"]
+    assert payload[0]["type"] == "text"
+    assert payload[2]["type"] == "image_url"

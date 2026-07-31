@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
@@ -16,11 +16,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QLabel,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
-from yancuo_win.application.problem_chat_service import ProblemChatService
+from yancuo_win.application.problem_chat_service import ProblemChatService, ProblemReference
 from yancuo_win.data.models import Problem
 from yancuo_win.tasks.worker import ProblemChatWorker
 from yancuo_win.ui.image_viewer import ImageViewerDialog
@@ -72,6 +73,91 @@ class _DetailImage(QLabel):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+
+
+class _ReferenceCanvas(QWidget):
+    """Image-backed multi-selection canvas that persists normalized coordinates."""
+
+    changed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._pixmap = QPixmap()
+        self._asset_id = ""
+        self._page_index = 0
+        self._regions: list[ProblemReference] = []
+        self._drawing = False
+        self._selection_enabled = False
+        self._start = QPoint()
+        self._draft = QRect()
+        self.setMinimumHeight(160)
+        self.setVisible(False)
+
+    def set_source(self, asset_id: str, page_index: int, path: Path | None) -> None:
+        self._asset_id, self._page_index = asset_id, page_index
+        self._pixmap = QPixmap(str(path)) if path else QPixmap()
+        self.setVisible(not self._pixmap.isNull())
+        self.update()
+
+    def references(self) -> list[ProblemReference]:
+        return list(self._regions)
+
+    def clear(self) -> None:
+        self._regions.clear()
+        self._draft = QRect()
+        self.changed.emit()
+        self.update()
+
+    def begin_selection(self) -> None:
+        self._selection_enabled = not self._pixmap.isNull()
+        self.setCursor(Qt.CursorShape.CrossCursor if self._selection_enabled else Qt.CursorShape.ArrowCursor)
+
+    def _image_rect(self) -> QRect:
+        if self._pixmap.isNull():
+            return QRect()
+        size = self._pixmap.size().scaled(self.size() - QSize(12, 12), Qt.AspectRatioMode.KeepAspectRatio)
+        return QRect((self.width() - size.width()) // 2, (self.height() - size.height()) // 2, size.width(), size.height())
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001, N802
+        del event
+        painter = QPainter(self)
+        rect = self._image_rect()
+        if rect.isEmpty():
+            return
+        painter.drawPixmap(rect, self._pixmap)
+        painter.setPen(QPen(QColor("#3370FF"), 2))
+        painter.setBrush(QColor(51, 112, 255, 45))
+        for index, reference in enumerate(self._regions, start=1):
+            if reference.asset_id != self._asset_id:
+                continue
+            region = QRect(round(rect.x() + rect.width() * reference.x), round(rect.y() + rect.height() * reference.y), round(rect.width() * reference.width), round(rect.height() * reference.height))
+            painter.drawRect(region)
+            painter.drawText(region.topLeft() + QPoint(4, 15), str(index))
+        if not self._draft.isEmpty():
+            painter.drawRect(self._draft.normalized())
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001, N802
+        if self._selection_enabled and event.button() == Qt.MouseButton.LeftButton and self._image_rect().contains(event.position().toPoint()):
+            self._drawing, self._start = True, event.position().toPoint()
+            self._draft = QRect(self._start, self._start)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001, N802
+        if self._drawing:
+            self._draft = QRect(self._start, event.position().toPoint())
+            self.update()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
+        if not self._drawing or event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._drawing = False
+        self._selection_enabled = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        rect, image = self._draft.normalized().intersected(self._image_rect()), self._image_rect()
+        self._draft = QRect()
+        if rect.width() >= 8 and rect.height() >= 8:
+            self._regions.append(ProblemReference(self._asset_id, self._page_index, (rect.x() - image.x()) / image.width(), (rect.y() - image.y()) / image.height(), rect.width() / image.width(), rect.height() / image.height()))
+            self.changed.emit()
+        self.update()
 
 
 class ProblemDetailPage(QWidget):
@@ -156,7 +242,11 @@ class ProblemDetailPage(QWidget):
             "题目正文与解析",
             "只读题目内容；可使用方向键或翻页键浏览长内容",
         )
-        root.addWidget(self.reader, stretch=1)
+        self.workspace = QSplitter(Qt.Orientation.Horizontal)
+        self.workspace.setChildrenCollapsible(False)
+        self.workspace.setHandleWidth(10)
+        self.workspace.addWidget(self.reader)
+        root.addWidget(self.workspace, stretch=1)
 
         self.chat_card = CardFrame()
         self.chat_card.add_title("AI 讨论")
@@ -186,6 +276,23 @@ class ProblemDetailPage(QWidget):
             "只读对话历史；可使用方向键浏览",
         )
         self.chat_card.body.addWidget(self.chat_history)
+        reference_row = QHBoxLayout()
+        self.add_reference_button = QPushButton("添加框选")
+        self.add_reference_button.clicked.connect(self._enable_reference_mode)
+        self.clear_references_button = ghost_button("清除全部")
+        self.clear_references_button.clicked.connect(self._clear_references)
+        self.reference_source_combo = QComboBox()
+        describe_field(self.reference_source_combo, "框选来源页面")
+        self.reference_source_combo.currentIndexChanged.connect(self._set_reference_source)
+        self.reference_summary = QLabel("未引用区域；将按整题提问")
+        reference_row.addWidget(self.add_reference_button)
+        reference_row.addWidget(self.clear_references_button)
+        reference_row.addWidget(self.reference_source_combo)
+        reference_row.addWidget(self.reference_summary, stretch=1)
+        self.chat_card.body.addLayout(reference_row)
+        self.reference_canvas = _ReferenceCanvas()
+        self.reference_canvas.changed.connect(self._update_reference_summary)
+        self.chat_card.body.addWidget(self.reference_canvas)
         prompt_row = QHBoxLayout()
         self.chat_input = QLineEdit()
         self.chat_input.setPlaceholderText("向当前题目提问")
@@ -197,7 +304,8 @@ class ProblemDetailPage(QWidget):
         prompt_row.addWidget(self.send_chat_button)
         self.chat_card.body.addLayout(prompt_row)
         self.chat_card.setVisible(False)
-        root.addWidget(self.chat_card)
+        self.workspace.addWidget(self.chat_card)
+        self.workspace.setSizes([760, 440])
         self.back_shortcut = QShortcut(QKeySequence("Alt+Left"), self)
         self.back_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.back_shortcut.activated.connect(self.back_requested.emit)
@@ -283,6 +391,7 @@ class ProblemDetailPage(QWidget):
             "打开可缩放原图" if self._image_path else "原始图片不存在或不可读取"
         )
         self.chat_card.setVisible(False)
+        self._configure_reference_source()
         self._refresh_conversations()
 
     def _view_original_image(self) -> None:
@@ -298,7 +407,52 @@ class ProblemDetailPage(QWidget):
     def _toggle_chat(self) -> None:
         self.chat_card.setVisible(not self.chat_card.isVisible())
         if self.chat_card.isVisible():
+            self.workspace.setSizes([760, 440])
             self._refresh_conversations()
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        self.workspace.setOrientation(
+            Qt.Orientation.Vertical if self.width() < 860 else Qt.Orientation.Horizontal
+        )
+
+    def _configure_reference_source(self) -> None:
+        self._reference_sources = self.chat.list_reference_sources(self.problem_id) if self.chat and self.problem_id else []
+        self.reference_source_combo.blockSignals(True)
+        self.reference_source_combo.clear()
+        for source in self._reference_sources:
+            self.reference_source_combo.addItem(f"原图 {int(source['page_index']) + 1}", source)
+        self.reference_source_combo.blockSignals(False)
+        self._set_reference_source()
+        enabled = bool(self._reference_sources)
+        self.add_reference_button.setEnabled(enabled)
+        self.clear_references_button.setEnabled(enabled)
+        self.reference_source_combo.setEnabled(enabled and len(self._reference_sources) > 1)
+        self._update_reference_summary()
+
+    def _set_reference_source(self, *_args) -> None:
+        source = self.reference_source_combo.currentData()
+        if not isinstance(source, dict):
+            source = None
+        self.reference_canvas.set_source(
+            str(source["asset_id"]) if source else "",
+            int(source["page_index"]) if source else 0,
+            source["path"] if source else None,
+        )
+
+    def _enable_reference_mode(self) -> None:
+        if self.reference_canvas.isVisible():
+            self.reference_canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+            self.reference_canvas.begin_selection()
+
+    def _clear_references(self) -> None:
+        self.reference_canvas.clear()
+
+    def _update_reference_summary(self) -> None:
+        count = len(self.reference_canvas.references())
+        self.reference_summary.setText(
+            f"本次引用 {count} 个区域" if count else "未引用区域；将按整题提问"
+        )
 
     def _refresh_conversations(self) -> None:
         self.conversation_combo.blockSignals(True)
@@ -325,7 +479,12 @@ class ProblemDetailPage(QWidget):
         for message in conversation.messages:
             role = "我" if message.role == "user" else "AI"
             suffix = f"\n失败：{message.error_message}" if message.status == "failed" else ""
-            lines.append(f"\n{role}\n{message.content_markdown}{suffix}")
+            try:
+                references = len(__import__("json").loads(message.reference_snapshot_json or "[]"))
+            except (ValueError, TypeError):
+                references = 0
+            reference_note = f"\n引用了 {references} 个区域" if references else ""
+            lines.append(f"\n{role}\n{message.content_markdown}{reference_note}{suffix}")
         self._set_chat_history("\n".join(lines))
 
     def _set_chat_history(self, content: str) -> None:
@@ -365,7 +524,8 @@ class ProblemDetailPage(QWidget):
             return
         self._set_chat_busy(True)
         self._set_chat_history("正在生成回答…（可继续浏览题目）")
-        worker = ProblemChatWorker(self.chat, conversation_id, content, self)
+        references = self.reference_canvas.references()
+        worker = ProblemChatWorker(self.chat, conversation_id, content, references, self)
         worker.finished_ok.connect(self._on_chat_completed)
         worker.failed.connect(self._on_chat_failed)
         worker.finished.connect(self._on_chat_worker_finished)
@@ -382,6 +542,7 @@ class ProblemDetailPage(QWidget):
         status = getattr(message, "status", "failed")
         if status == "complete":
             self.chat_input.clear()
+            self.reference_canvas.clear()
         self._load_conversation()
 
     def _on_chat_failed(self, error: str) -> None:

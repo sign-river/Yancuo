@@ -127,15 +127,17 @@ class ProblemChatWorker(QThread):
         service: ProblemChatService,
         conversation_id: str,
         content: str,
+        references=(),
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.service = service
         self.conversation_id = conversation_id
         self.content = content
+        self.references = references
 
     def run(self) -> None:
         try:
-            self.finished_ok.emit(self.service.send_message(self.conversation_id, self.content))
+            self.finished_ok.emit(self.service.send_message(self.conversation_id, self.content, self.references))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))

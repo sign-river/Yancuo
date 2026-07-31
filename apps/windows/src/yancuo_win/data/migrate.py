@@ -429,6 +429,19 @@ def _migrate_to_v20(engine: Engine) -> None:
     logger.info("migrated database to schema_version=20")
 
 
+def _migrate_to_v21(engine: Engine) -> None:
+    """Store immutable per-message visual reference snapshots."""
+
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(problem_messages)"))}
+        if "reference_snapshot_json" not in columns:
+            conn.execute(text("ALTER TABLE problem_messages ADD COLUMN reference_snapshot_json TEXT NOT NULL DEFAULT '[]'"))
+    with Session(engine) as session:
+        set_schema_version(session, 21)
+        session.commit()
+    logger.info("migrated database to schema_version=21")
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -493,6 +506,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     18: _migrate_to_v18,
     19: _migrate_to_v19,
     20: _migrate_to_v20,
+    21: _migrate_to_v21,
 }
 
 
