@@ -692,12 +692,14 @@ class NotePage(QWidget):
 
     def _build(self) -> None:
         self.setObjectName("PageRoot")
+        self.setMinimumSize(0, 0)
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 12)
         root.setSpacing(12)
         self.page_stack = QStackedWidget()
         root.addWidget(self.page_stack, stretch=1)
         self.library_page = QWidget()
+        self.library_page.setMinimumWidth(0)
         library_root = QVBoxLayout(self.library_page)
         library_root.setContentsMargins(0, 0, 0, 0)
         library_root.setSpacing(12)
@@ -746,6 +748,7 @@ class NotePage(QWidget):
         self.workspace = split
         split.setObjectName("NoteWorkspace")
         split.setChildrenCollapsible(False)
+        split.setMinimumWidth(0)
         split.setHandleWidth(10)
         split.setContentsMargins(8, 8, 8, 8)
 
@@ -755,7 +758,7 @@ class NotePage(QWidget):
         space.setMinimumWidth(200)
         space.setMaximumWidth(260)
         space.add_title("笔记空间")
-        self.space_back_button = ghost_button("返回笔记列表")
+        self.space_back_button = IconButton("chevron-left", "返回笔记列表")
         self.space_back_button.clicked.connect(self._show_narrow_content)
         self.space_back_button.hide()
         space.body.addWidget(self.space_back_button)
@@ -788,6 +791,10 @@ class NotePage(QWidget):
         self.collection_list.setObjectName("NoteCollectionList")
         self.collection_list.setAccessibleName("笔记合集")
         self.collection_list.setUniformItemSizes(True)
+        self.collection_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.collection_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.collection_list.setMouseTracking(True)
         self.collection_list.setItemDelegate(
             SoftItemDelegate(
@@ -800,6 +807,11 @@ class NotePage(QWidget):
         )
         self.collection_list.currentItemChanged.connect(self._select_collection)
         space.body.addWidget(self.collection_list, stretch=1)
+        self.collection_list_hint = QLabel()
+        self.collection_list_hint.setObjectName("MutedLabel")
+        self.collection_list_hint.setWordWrap(True)
+        self.collection_list_hint.hide()
+        space.body.addWidget(self.collection_list_hint)
         split.addWidget(space)
 
         middle = CardFrame()
@@ -830,6 +842,11 @@ class NotePage(QWidget):
         self.note_list.setAccessibleName("笔记列表")
         self.note_list.setAccessibleDescription("使用方向键选择笔记")
         self.note_list.setUniformItemSizes(True)
+        self.note_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.note_list.setWordWrap(True)
+        self.note_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.note_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
@@ -909,7 +926,7 @@ class NotePage(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
         if hasattr(self, "workspace"):
-            self._set_narrow_layout(self.width() < 900)
+            self._set_narrow_layout(self.width() < 960)
 
     def _set_narrow_layout(self, narrow: bool) -> None:
         if self._narrow_layout == narrow:
@@ -925,7 +942,7 @@ class NotePage(QWidget):
             self.space_pane.show()
             self.note_library_pane.show()
             self.detail_stack.show()
-            self.workspace.setSizes([220, 320, 900])
+            self.workspace.setSizes([220, 380, 820])
 
     def _show_narrow_space(self) -> None:
         if not self._narrow_layout:
@@ -1246,9 +1263,7 @@ class NotePage(QWidget):
             return
         self._loading = True
         self.note_list_hint.setObjectName("MutedLabel")
-        self.note_list_hint.setText(
-            "当前筛选下暂无笔记；可切换视图、合集或新建笔记。"
-        )
+        self.note_list_hint.setText(self._empty_note_message(query))
         self.note_list_hint.setVisible(not self._notes)
         self.note_count_label.setText(f"{len(self._notes)} 篇")
         selected_row = -1
@@ -1304,6 +1319,24 @@ class NotePage(QWidget):
             self._collection_filter_id = None
         self.collection_list.setCurrentRow(selected_row)
         self.collection_list.blockSignals(False)
+        self.collection_list_hint.setText(
+            "暂无自定义合集；可从这里新建，或在中栏浏览未归入合集的笔记。"
+        )
+        self.collection_list_hint.setVisible(not collections)
+
+    def _empty_note_message(self, query: str) -> str:
+        if query:
+            return "没有符合当前搜索条件的笔记；可调整关键词或搜索方式。"
+        if self._collection_filter_id == "__unfiled__":
+            return "未归入合集的笔记为空；可切换合集或新建笔记。"
+        if self._collection_filter_id:
+            return "当前合集暂无笔记；可切换合集或新建笔记。"
+        status = self.status_filter.currentData()
+        return {
+            "archived": "归档中暂无笔记；可切换视图或新建笔记。",
+            "trashed": "回收站为空；移入回收站的笔记会显示在这里。",
+            "inbox": "待整理笔记为空；可新建笔记或切换视图。",
+        }.get(status, "当前筛选下暂无笔记；可切换视图、合集或新建笔记。")
 
     def _select_collection(
         self, current: QListWidgetItem | None, _previous=None
@@ -1466,6 +1499,7 @@ class NotePage(QWidget):
             "search_mode": self.note_search_mode.currentData(),
             "note_id": note_id or (self._note.id if self._note else None),
             "scroll": self.note_list.verticalScrollBar().value(),
+            "collection_scroll": self.collection_list.verticalScrollBar().value(),
         }
 
     def _restore_library_state(self, select_note_id: str | None = None) -> None:
@@ -1487,9 +1521,14 @@ class NotePage(QWidget):
             or None
         )
         scroll = int(state.get("scroll", 0))
+        collection_scroll = int(state.get("collection_scroll", 0))
         QTimer.singleShot(
             0,
             lambda: self.note_list.verticalScrollBar().setValue(scroll),
+        )
+        QTimer.singleShot(
+            0,
+            lambda: self.collection_list.verticalScrollBar().setValue(collection_scroll),
         )
 
     def _has_unsaved_note_changes(self) -> bool:
