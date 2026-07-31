@@ -405,16 +405,26 @@ class ProblemDetailPage(QWidget):
         ImageViewerDialog(source, self).exec()
 
     def _toggle_chat(self) -> None:
+        if self.width() < 860 and self.chat_card.isVisible():
+            self.reader.setVisible(True)
+            self.chat_card.setVisible(False)
+            self.chat_button.setText("AI 讨论")
+            return
         self.chat_card.setVisible(not self.chat_card.isVisible())
         if self.chat_card.isVisible():
+            if self.width() < 860:
+                self.reader.setVisible(False)
+                self.chat_button.setText("查看题目")
             self.workspace.setSizes([760, 440])
             self._refresh_conversations()
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
-        self.workspace.setOrientation(
-            Qt.Orientation.Vertical if self.width() < 860 else Qt.Orientation.Horizontal
-        )
+        narrow = self.width() < 860
+        self.workspace.setOrientation(Qt.Orientation.Vertical if narrow else Qt.Orientation.Horizontal)
+        if not narrow:
+            self.reader.setVisible(True)
+            self.chat_button.setText("AI 讨论")
 
     def _configure_reference_source(self) -> None:
         self._reference_sources = self.chat.list_reference_sources(self.problem_id) if self.chat and self.problem_id else []
