@@ -284,6 +284,35 @@ def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
     assert not window.library_navigation_panel.isHidden()
 
 
+def test_problem_detail_toolbar_groups_actions_and_keeps_priority_controls(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    page = window.problem_detail_page
+
+    assert page.edit_button.objectName() == "PrimaryButton"
+    assert [action.text() for action in page.more_menu.actions()] == [
+        "归档",
+        "移入回收站",
+        "恢复到正式题库",
+    ]
+    assert page.trash_action.property("danger") is True
+
+    page.resize(1200, 720)
+    page._update_toolbar_layout(force=True)
+    app.processEvents()
+    assert page.toolbar_actions.direction() == QBoxLayout.Direction.LeftToRight
+    assert all(not divider.isHidden() for divider in page._toolbar_dividers)
+
+    page.resize(900, 720)
+    page._update_toolbar_layout(force=True)
+    app.processEvents()
+    assert page.toolbar_actions.direction() == QBoxLayout.Direction.TopToBottom
+    assert page._toolbar_priority_layout.itemAt(0).widget() is page.switch_group
+    assert page._toolbar_priority_layout.itemAt(2).widget() is page.management_group
+
+
 def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
     window: MainWindow,
 ) -> None:

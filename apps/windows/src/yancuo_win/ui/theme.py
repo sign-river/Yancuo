@@ -459,6 +459,12 @@ def app_stylesheet(theme: str = "light") -> str:
         border: 1px solid {t.border};
         border-radius: 10px;
     }}
+    QFrame#ToolbarDivider {{
+        background: {t.divider};
+        border: none;
+        min-height: 22px;
+        max-height: 28px;
+    }}
     QFrame#WorkflowStepBar {{
         min-height: 44px;
         max-height: 48px;

@@ -10,13 +10,16 @@ from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QPixmap, QShortc
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
+    QBoxLayout,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QInputDialog,
     QLineEdit,
     QLabel,
+    QMenu,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -36,6 +39,7 @@ from yancuo_win.ui.widgets import (
     primary_button,
     set_tab_order_chain,
 )
+from yancuo_win.ui.icons import bind_icon
 
 
 class _DetailImage(QLabel):
@@ -175,6 +179,55 @@ class ProblemDetailPage(QWidget):
     trash_requested = Signal(str)
     restore_requested = Signal(str)
 
+    @staticmethod
+    def _toolbar_group() -> QWidget:
+        group = QWidget()
+        layout = QHBoxLayout(group)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        return group
+
+    @staticmethod
+    def _toolbar_divider() -> QFrame:
+        divider = QFrame()
+        divider.setObjectName("ToolbarDivider")
+        divider.setFrameShape(QFrame.Shape.VLine)
+        divider.setFrameShadow(QFrame.Shadow.Plain)
+        divider.setFixedWidth(1)
+        return divider
+
+    @staticmethod
+    def _clear_layout(layout: QBoxLayout) -> None:
+        while layout.count():
+            layout.takeAt(0)
+
+    def _update_toolbar_layout(self, *, force: bool = False) -> None:
+        compact = self.width() < 980
+        if not force and compact == self._toolbar_compact:
+            return
+        self._toolbar_compact = compact
+        self._clear_layout(self.toolbar_actions)
+        self._clear_layout(self._toolbar_priority_layout)
+        if compact:
+            self.toolbar_actions.setDirection(QBoxLayout.Direction.TopToBottom)
+            self._toolbar_priority_layout.addWidget(self.switch_group)
+            self._toolbar_priority_layout.addStretch(1)
+            self._toolbar_priority_layout.addWidget(self.management_group)
+            self.toolbar_actions.addWidget(self._toolbar_priority_row)
+            self.toolbar_actions.addWidget(self.learning_group)
+            for divider in self._toolbar_dividers:
+                divider.setVisible(False)
+        else:
+            self.toolbar_actions.setDirection(QBoxLayout.Direction.LeftToRight)
+            self.toolbar_actions.addWidget(self.switch_group)
+            self.toolbar_actions.addWidget(self._toolbar_dividers[0])
+            self.toolbar_actions.addWidget(self.learning_group)
+            self.toolbar_actions.addStretch(1)
+            self.toolbar_actions.addWidget(self._toolbar_dividers[1])
+            self.toolbar_actions.addWidget(self.management_group)
+            for divider in self._toolbar_dividers:
+                divider.setVisible(True)
+
     def __init__(self, chat: ProblemChatService | None = None, parent=None) -> None:
         super().__init__(parent)
         self.chat = chat
@@ -205,41 +258,63 @@ class ProblemDetailPage(QWidget):
         header.add_leading(self.back_button)
         root.addWidget(header)
 
-        toolbar = QFrame()
-        toolbar.setObjectName("ContextBar")
-        actions = QHBoxLayout(toolbar)
-        actions.setContentsMargins(8, 6, 8, 6)
-        actions.setSpacing(8)
+        self.action_toolbar = QFrame()
+        self.action_toolbar.setObjectName("ContextBar")
+        self.action_toolbar.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        # The reader scrolls below this toolbar, so these controls stay available
+        # while navigating a long problem.
+        self.toolbar_actions = QBoxLayout(
+            QBoxLayout.Direction.LeftToRight, self.action_toolbar
+        )
+        self.toolbar_actions.setContentsMargins(10, 8, 10, 8)
+        self.toolbar_actions.setSpacing(16)
+
+        self.switch_group = self._toolbar_group()
         self.previous_button = QPushButton("上一题")
+        bind_icon(self.previous_button, "chevron-left")
         self.previous_button.clicked.connect(self.previous_requested.emit)
         self.next_button = QPushButton("下一题")
+        bind_icon(self.next_button, "chevron-right")
         self.next_button.clicked.connect(self.next_requested.emit)
-        actions.addWidget(self.previous_button)
-        actions.addWidget(self.next_button)
-        actions.addWidget(self.view_image_button)
-        actions.addWidget(self.chat_button)
+        self.switch_group.layout().addWidget(self.previous_button)
+        self.switch_group.layout().addWidget(self.next_button)
+
+        self.learning_group = self._toolbar_group()
+        bind_icon(self.view_image_button, "camera")
+        self.learning_group.layout().addWidget(self.view_image_button)
+        self.learning_group.layout().addWidget(self.chat_button)
         self.review_button = QPushButton("加入复习计划")
         self.review_button.clicked.connect(self._request_review)
         self.favorite_button = QPushButton("收藏")
         self.favorite_button.clicked.connect(self._request_favorite)
-        self.archive_button = QPushButton("归档")
-        self.archive_button.clicked.connect(self._request_archive)
-        self.trash_button = QPushButton("移入回收站")
-        self.trash_button.setObjectName("DangerButton")
-        self.trash_button.clicked.connect(self._request_trash)
-        self.restore_button = primary_button("恢复到正式题库")
-        self.restore_button.clicked.connect(self._request_restore)
-        for button in (
-            self.review_button,
-            self.favorite_button,
-            self.archive_button,
-            self.trash_button,
-            self.restore_button,
-        ):
-            actions.addWidget(button)
-        actions.addWidget(self.edit_button)
-        actions.addStretch(1)
-        root.addWidget(toolbar)
+        self.learning_group.layout().addWidget(self.review_button)
+        self.learning_group.layout().addWidget(self.favorite_button)
+
+        self.management_group = self._toolbar_group()
+        self.more_button = QPushButton("更多")
+        bind_icon(self.more_button, "more-horizontal")
+        self.more_menu = QMenu(self.more_button)
+        self.archive_action = self.more_menu.addAction("归档")
+        self.archive_action.triggered.connect(self._request_archive)
+        self.trash_action = self.more_menu.addAction("移入回收站")
+        self.trash_action.setProperty("danger", True)
+        self.trash_action.triggered.connect(self._request_trash)
+        self.restore_action = self.more_menu.addAction("恢复到正式题库")
+        self.restore_action.triggered.connect(self._request_restore)
+        self.more_button.setMenu(self.more_menu)
+        self.management_group.layout().addWidget(self.edit_button)
+        self.management_group.layout().addWidget(self.more_button)
+
+        self._toolbar_dividers = (self._toolbar_divider(), self._toolbar_divider())
+        self._toolbar_priority_row = QWidget()
+        self._toolbar_priority_layout = QHBoxLayout(self._toolbar_priority_row)
+        self._toolbar_priority_layout.setContentsMargins(0, 0, 0, 0)
+        self._toolbar_priority_layout.setSpacing(16)
+        self._toolbar_compact: bool | None = None
+        self._update_toolbar_layout(force=True)
+        root.addWidget(self.action_toolbar)
 
         self.reader = MathContentView()
         self.reader.set_adaptive_content_height(560)
@@ -323,9 +398,7 @@ class ProblemDetailPage(QWidget):
             self.next_button,
             self.review_button,
             self.favorite_button,
-            self.archive_button,
-            self.trash_button,
-            self.restore_button,
+            self.more_button,
             self.reader,
             self.conversation_combo,
             self.include_original_checkbox,
@@ -361,9 +434,10 @@ class ProblemDetailPage(QWidget):
         self.favorite_button.setVisible(not is_trashed)
         self.favorite_button.setText("取消收藏" if problem.is_favorite else "收藏")
         self.favorite_button.setProperty("targetFavorite", not problem.is_favorite)
-        self.archive_button.setVisible(problem.status in {"active", "inbox"})
-        self.trash_button.setVisible(not is_trashed)
-        self.restore_button.setVisible(is_trashed)
+        self.archive_action.setVisible(problem.status in {"active", "inbox"})
+        self.trash_action.setVisible(not is_trashed)
+        self.restore_action.setVisible(is_trashed)
+        self.more_button.setVisible(not is_trashed or self.restore_action.isVisible())
         fields: dict[str, Any] = {
             column: getattr(problem, column)
             for column in (
@@ -425,11 +499,16 @@ class ProblemDetailPage(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
+        self._update_toolbar_layout()
         narrow = self.width() < 860
         self.workspace.setOrientation(Qt.Orientation.Vertical if narrow else Qt.Orientation.Horizontal)
         if not narrow:
             self.reader.setVisible(True)
             self.chat_button.setText("AI 讨论")
+
+    def showEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().showEvent(event)
+        self._update_toolbar_layout()
 
     def _configure_reference_source(self) -> None:
         self._reference_sources = self.chat.list_reference_sources(self.problem_id) if self.chat and self.problem_id else []
