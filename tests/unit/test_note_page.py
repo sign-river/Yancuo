@@ -167,6 +167,35 @@ def test_note_editor_discloses_content_and_metadata_separately(
     assert not note_page.edit_button.isHidden()
 
 
+def test_note_page_reorders_blocks_and_disables_invalid_directions(note_page: NotePage) -> None:
+    note_page._create_note()
+    note_page._add_block("text")
+    note_page._add_block("formula")
+    assert note_page._note is not None
+    original_ids = [block.id for block in note_page._note.blocks]
+
+    note_page.block_list.setCurrentRow(0)
+    assert not note_page.move_block_up_button.isEnabled()
+    assert note_page.move_block_down_button.isEnabled()
+    note_page._persist_block_order(list(reversed(original_ids)))
+
+    reloaded = note_page.notes.get_note(note_page._note.id)
+    assert reloaded is not None
+    assert [block.id for block in reloaded.blocks] == list(reversed(original_ids))
+
+
+def test_note_page_reveals_bulk_actions_only_for_multiple_selection(note_page: NotePage) -> None:
+    first = note_page.notes.create_note(title="first", status="active")
+    note_page.notes.create_note(title="second", status="active")
+    note_page.reload(select_note_id=first.id)
+
+    note_page.note_list.item(0).setSelected(True)
+    note_page.note_list.item(1).setSelected(True)
+
+    assert not note_page.bulk_actions.isHidden()
+    assert "2" in note_page.bulk_selection_label.text()
+
+
 def test_note_intake_actions_open_dedicated_workflow_pages(note_page: NotePage) -> None:
     note_page._show_manual_create()
     assert note_page.page_stack.currentWidget() is note_page.manual_create_page

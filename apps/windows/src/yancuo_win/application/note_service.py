@@ -377,6 +377,73 @@ class NoteService:
             session.commit()
             return self._load(session, note_id)
 
+    def move_notes_to_collection(
+        self, note_ids: list[str], collection_id: str
+    ) -> list[NoteDocument]:
+        """Move a complete note selection into one collection atomically."""
+        if not note_ids or len(note_ids) != len(set(note_ids)):
+            raise DomainError("请选择至少一篇不重复的笔记")
+        with self.session() as session:
+            collection = session.get(NoteCollection, collection_id)
+            if collection is None:
+                raise DomainError("目标合集不存在")
+            notes = [
+                self._load(session, note_id, allow_missing=False, detach=False)
+                for note_id in note_ids
+            ]
+            for note in notes:
+                assert note is not None
+                self._assert_editable(note)
+                session.execute(
+                    delete(note_collection_documents).where(
+                        note_collection_documents.c.note_document_id == note.id
+                    )
+                )
+                session.execute(
+                    note_collection_documents.insert().values(
+                        collection_id=collection_id,
+                        note_document_id=note.id,
+                        sort_order=0,
+                    )
+                )
+                note.revision += 1
+                note.updated_at = utcnow()
+            session.commit()
+            return [self._load(session, note_id) for note_id in note_ids]
+
+    def update_notes_status(self, note_ids: list[str], status: str) -> list[NoteDocument]:
+        """Apply one lifecycle transition to a selection in a single commit."""
+        if not note_ids or len(note_ids) != len(set(note_ids)):
+            raise DomainError("请选择至少一篇不重复的笔记")
+        target = validate_status(status)
+        with self.session() as session:
+            notes = [
+                self._load(session, note_id, allow_missing=False, detach=False)
+                for note_id in note_ids
+            ]
+            for note in notes:
+                assert note is not None
+                self._assert_editable(note)
+                assert_transition(note.status, target)
+            for note in notes:
+                assert note is not None
+                note.status = target
+                note.deleted_at = utcnow() if target == "trashed" else None
+                note.revision += 1
+                note.updated_at = utcnow()
+                if target == "trashed":
+                    plan_ids = select(ReviewPlan.id).where(ReviewPlan.content_type == "note")
+                    session.execute(delete(ReviewWaitingItem).where(
+                        ReviewWaitingItem.content_type == "note",
+                        ReviewWaitingItem.source_id == note.id,
+                    ))
+                    session.execute(delete(ReviewPlanItem).where(
+                        ReviewPlanItem.plan_id.in_(plan_ids),
+                        ReviewPlanItem.source_id == note.id,
+                    ))
+            session.commit()
+            return [self._load(session, note_id) for note_id in note_ids]
+
     def trash_note(self, note_id: str) -> NoteDocument:
         note = self.update_note(note_id, {"status": "trashed"})
         self._remove_review_references(note_id)

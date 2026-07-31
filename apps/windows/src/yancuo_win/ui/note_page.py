@@ -121,6 +121,43 @@ class NoteDraftGroupTree(QTreeWidget):
         event.acceptProposedAction()
 
 
+class NoteBlockList(QListWidget):
+    """An editor-only ordered block list that reports a completed internal drop."""
+
+    blocks_reordered = Signal(list)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._drag_from_handle = False
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def mousePressEvent(self, event) -> None:
+        self._drag_from_handle = event.position().x() <= 28
+        super().mousePressEvent(event)
+
+    def startDrag(self, supported_actions) -> None:  # noqa: N802, ANN001
+        if self._drag_from_handle:
+            super().startDrag(supported_actions)
+
+    def dropEvent(self, event) -> None:
+        before = self._block_ids()
+        super().dropEvent(event)
+        after = self._block_ids()
+        if event.isAccepted() and after != before:
+            self.blocks_reordered.emit(after)
+
+    def _block_ids(self) -> list[str]:
+        return [
+            str(self.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(self.count())
+        ]
+
+
 class NoteExtractionDialog(QDialog):
     """Review the AI draft before it becomes a note document."""
 
@@ -791,6 +828,9 @@ class NotePage(QWidget):
         self.note_list.setAccessibleName("笔记列表")
         self.note_list.setAccessibleDescription("使用方向键选择笔记")
         self.note_list.setUniformItemSizes(True)
+        self.note_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.note_list.setMouseTracking(True)
         self.note_list.setItemDelegate(
             SoftItemDelegate(
@@ -802,7 +842,31 @@ class NotePage(QWidget):
             )
         )
         self.note_list.currentItemChanged.connect(self._select_note)
+        self.note_list.itemSelectionChanged.connect(self._update_bulk_actions)
         middle.body.addWidget(self.note_list, stretch=1)
+        self.bulk_actions = QFrame()
+        self.bulk_actions.setObjectName("ContextBar")
+        bulk_row = QHBoxLayout(self.bulk_actions)
+        bulk_row.setContentsMargins(8, 6, 8, 6)
+        self.bulk_selection_label = QLabel()
+        self.bulk_selection_label.setObjectName("MutedLabel")
+        self.bulk_move_button = ghost_button("移动到合集")
+        self.bulk_move_button.clicked.connect(self._move_selected_notes_to_collection)
+        self.bulk_archive_button = ghost_button("归档")
+        self.bulk_archive_button.clicked.connect(
+            lambda: self._update_selected_notes_status("archived")
+        )
+        self.bulk_trash_button = danger_button("移入回收站")
+        self.bulk_trash_button.clicked.connect(
+            lambda: self._update_selected_notes_status("trashed")
+        )
+        bulk_row.addWidget(self.bulk_selection_label)
+        bulk_row.addStretch(1)
+        bulk_row.addWidget(self.bulk_move_button)
+        bulk_row.addWidget(self.bulk_archive_button)
+        bulk_row.addWidget(self.bulk_trash_button)
+        self.bulk_actions.hide()
+        middle.body.addWidget(self.bulk_actions)
         set_tab_order_chain(
             self.note_search_edit,
             self.note_search_mode,
@@ -1085,17 +1149,20 @@ class NotePage(QWidget):
             )
             block_actions.addWidget(button)
         block_card.body.addLayout(block_actions)
-        self.block_list = QListWidget()
+        self.block_list = NoteBlockList()
         self.block_list.setObjectName("NoteBlockList")
         self.block_list.setAccessibleName("笔记内容块")
         self.block_list.setAccessibleDescription("使用方向键选择需要编辑的内容块")
         self.block_list.currentItemChanged.connect(self._select_block)
+        self.block_list.blocks_reordered.connect(self._persist_block_order)
         block_card.body.addWidget(self.block_list, stretch=1)
-        up = QPushButton("上移")
-        up.clicked.connect(lambda: self._move_block(-1))
-        down = QPushButton("下移")
-        down.clicked.connect(lambda: self._move_block(1))
-        block_card.body.addLayout(self._row(up, down))
+        self.move_block_up_button = QPushButton("上移")
+        self.move_block_up_button.clicked.connect(lambda: self._move_block(-1))
+        self.move_block_down_button = QPushButton("下移")
+        self.move_block_down_button.clicked.connect(lambda: self._move_block(1))
+        block_card.body.addLayout(
+            self._row(self.move_block_up_button, self.move_block_down_button)
+        )
         body.addWidget(block_card)
 
         self.block_editor = CardFrame()
@@ -1205,6 +1272,7 @@ class NotePage(QWidget):
             self._note = None
             self._block = None
             self.detail_stack.setCurrentIndex(0)
+        self._update_bulk_actions()
 
     def _reload_collections(self) -> None:
         collections = self.notes.list_collections()
@@ -1289,6 +1357,68 @@ class NotePage(QWidget):
                 return value.replace("\n", " ")[:60]
         return ""
 
+    def _selected_note_ids(self) -> list[str]:
+        return [
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.note_list.selectedItems()
+        ]
+
+    def _update_bulk_actions(self) -> None:
+        if not hasattr(self, "bulk_actions"):
+            return
+        selected = self._selected_note_ids()
+        visible = len(selected) > 1
+        self.bulk_actions.setVisible(visible)
+        if not visible:
+            return
+        selected_notes = [note for note in self._notes if note.id in selected]
+        editable = bool(selected_notes) and all(
+            note.status != "trashed" for note in selected_notes
+        )
+        self.bulk_selection_label.setText(f"已选择 {len(selected)} 篇")
+        for button in (
+            self.bulk_move_button,
+            self.bulk_archive_button,
+            self.bulk_trash_button,
+        ):
+            button.setEnabled(editable)
+
+    def _move_selected_notes_to_collection(self) -> None:
+        note_ids = self._selected_note_ids()
+        collections = self.notes.list_collections()
+        if not collections:
+            self.status_message.emit("请先创建目标合集")
+            return
+        labels = [collection.title for collection in collections]
+        label, accepted = QInputDialog.getItem(
+            self, "移动笔记", "移动到合集：", labels, 0, False
+        )
+        if not accepted:
+            return
+        collection = collections[labels.index(label)]
+        try:
+            self.notes.move_notes_to_collection(note_ids, collection.id)
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
+        self._collection_filter_id = collection.id
+        self.reload(select_note_id=note_ids[0])
+        self.status_message.emit(f"已将 {len(note_ids)} 篇笔记移动到“{collection.title}”")
+        self.notes_changed.emit()
+
+    def _update_selected_notes_status(self, status: str) -> None:
+        note_ids = self._selected_note_ids()
+        try:
+            self.notes.update_notes_status(note_ids, status)
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
+        self.reload()
+        self.status_message.emit(
+            f"已将 {len(note_ids)} 篇笔记移至{_STATUS_LABELS[status]}"
+        )
+        self.notes_changed.emit()
+
     def _select_note(self, current: QListWidgetItem | None, _previous=None) -> None:
         if self._loading or current is None:
             return
@@ -1349,8 +1479,9 @@ class NotePage(QWidget):
         for index, block in enumerate(note.blocks, start=1):
             value = block.content_latex if block.block_type == "formula" else block.content_markdown
             preview = value.replace("\n", " ")[:46] or "（空）"
-            item = QListWidgetItem(f"{index}. {_BLOCK_LABELS[block.block_type]} · {preview}")
+            item = QListWidgetItem(f":: {index}. {_BLOCK_LABELS[block.block_type]} · {preview}")
             item.setData(Qt.ItemDataRole.UserRole, block.id)
+            item.setToolTip("从左侧 :: 手柄拖动以调整顺序")
             self.block_list.addItem(item)
         self._loading = False
         if self.block_list.count():
@@ -1378,9 +1509,16 @@ class NotePage(QWidget):
         )
         self.block_content.setPlainText(content)
         editable = self._note.status != "trashed"
+        self.block_list.setDragEnabled(editable)
+        self.block_list.setAcceptDrops(editable)
         self.block_content.setReadOnly(not editable)
         self.save_block_button.setEnabled(editable)
         self.delete_block_button.setEnabled(editable)
+        index = self.block_list.currentRow()
+        self.move_block_up_button.setEnabled(editable and index > 0)
+        self.move_block_down_button.setEnabled(
+            editable and index >= 0 and index < self.block_list.count() - 1
+        )
 
     def _clear_block_editor(self) -> None:
         self._block = None
@@ -1389,6 +1527,8 @@ class NotePage(QWidget):
         self.block_content.setReadOnly(True)
         self.save_block_button.setEnabled(False)
         self.delete_block_button.setEnabled(False)
+        self.move_block_up_button.setEnabled(False)
+        self.move_block_down_button.setEnabled(False)
 
     def _show_library(self, *_args, select_note_id: str | None = None) -> None:
         self.page_stack.setCurrentWidget(self.library_page)
@@ -1691,18 +1831,30 @@ class NotePage(QWidget):
         if target < 0 or target >= len(ids):
             return
         ids[index], ids[target] = ids[target], ids[index]
+        self._persist_block_order(ids, selected_block_id=self._block.id)
+
+    def _persist_block_order(
+        self, block_ids: list[str], *, selected_block_id: str | None = None
+    ) -> None:
+        """Persist a complete same-note order; reload restores the DB order on failure."""
+        if self._note is None:
+            return
+        selected_id = selected_block_id or (
+            self._block.id if self._block is not None else None
+        )
         try:
-            self.notes.reorder_blocks(self._note.id, ids)
+            self.notes.reorder_blocks(self._note.id, block_ids)
         except DomainError as exc:
+            self.reload(select_note_id=self._note.id)
             self.status_message.emit(str(exc))
             return
-        block_id = self._block.id
         self.reload(select_note_id=self._note.id)
-        for row in range(self.block_list.count()):
-            item = self.block_list.item(row)
-            if item.data(Qt.ItemDataRole.UserRole) == block_id:
-                self.block_list.setCurrentItem(item)
-                break
+        if selected_id is not None:
+            for row in range(self.block_list.count()):
+                item = self.block_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == selected_id:
+                    self.block_list.setCurrentItem(item)
+                    break
         self.notes_changed.emit()
 
     def _set_mode(self, mode: str) -> None:

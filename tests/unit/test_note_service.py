@@ -156,3 +156,31 @@ def test_note_collection_validates_titles_and_membership(note_bundle) -> None:
     notes.trash_note(note.id)
     with pytest.raises(DomainError, match="不可编辑"):
         notes.set_note_collections(note.id, [collection.id])
+
+
+def test_bulk_note_actions_commit_a_complete_selection(note_bundle) -> None:
+    _runtime, _app, notes, _subject, _chapter = note_bundle
+    first = notes.create_note(title="first", status="active")
+    second = notes.create_note(title="second", status="active")
+    collection = notes.create_collection("batch")
+
+    moved = notes.move_notes_to_collection([first.id, second.id], collection.id)
+
+    assert [note.id for note in moved] == [first.id, second.id]
+    assert [item.id for item in notes.get_note(first.id).collections] == [collection.id]
+    assert [item.id for item in notes.get_note(second.id).collections] == [collection.id]
+    archived = notes.update_notes_status([first.id, second.id], "archived")
+    assert [note.status for note in archived] == ["archived", "archived"]
+
+
+def test_bulk_note_action_does_not_partially_apply_invalid_selection(note_bundle) -> None:
+    _runtime, _app, notes, _subject, _chapter = note_bundle
+    editable = notes.create_note(title="editable", status="active")
+    trashed = notes.create_note(title="trashed", status="active")
+    notes.trash_note(trashed.id)
+    collection = notes.create_collection("batch")
+
+    with pytest.raises(DomainError, match="不可编辑"):
+        notes.move_notes_to_collection([editable.id, trashed.id], collection.id)
+
+    assert notes.get_note(editable.id).collections == []
