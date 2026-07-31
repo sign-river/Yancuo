@@ -831,6 +831,28 @@ def app_stylesheet(theme: str = "light") -> str:
         min-height: 22px;
         selection-background-color: {t.list_selected};
     }}
+    QComboBox {{
+        padding-right: 32px;
+    }}
+    QComboBox:hover {{
+        background: {t.surface_subtle};
+        border-color: {t.hover_border};
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 28px;
+        border: none;
+        border-top-right-radius: {m.radius_control}px;
+        border-bottom-right-radius: {m.radius_control}px;
+    }}
+    QComboBox::drop-down:hover {{
+        background: {t.list_hover};
+    }}
+    QComboBox::down-arrow {{
+        width: 9px;
+        height: 9px;
+    }}
     QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
         border: 1px solid {t.focus_ring};
     }}
@@ -840,10 +862,26 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.input_disabled};
     }}
     QComboBox QAbstractItemView {{
-        background: {t.card};
+        background: {t.surface};
         color: {t.text};
-        border: 1px solid {t.border};
-        selection-background-color: {t.list_selected};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_surface}px;
+        outline: none;
+        padding: 4px;
+        selection-background-color: transparent;
+    }}
+    QComboBox QAbstractItemView::item {{
+        min-height: 30px;
+        padding: 0 10px;
+        margin: 1px 2px;
+        border-radius: {m.radius_control}px;
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background: {t.list_hover};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background: {t.list_selected};
+        color: {t.primary};
     }}
     QTreeWidget, QTableWidget, QTableView {{
         background: {t.card};
@@ -874,7 +912,7 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.surface_subtle};
         border: 1px solid {t.divider};
         border-radius: {m.radius_control}px;
-        padding: 5px 8px;
+        padding: 5px 30px 5px 8px;
         min-height: 20px;
     }}
     QLineEdit#SearchInput {{
