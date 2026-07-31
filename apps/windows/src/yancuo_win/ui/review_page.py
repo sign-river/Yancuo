@@ -32,6 +32,7 @@ from yancuo_win.data.models import NoteDocument, Problem
 from yancuo_win.domain.review_rules import REVIEW_GRADES
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.math_content import MathContentView
+from yancuo_win.ui.review_history_dialog import ReviewHistoryDialog, ReviewHistoryEntry
 from yancuo_win.ui.review_plan_builder import ReviewPlanBuilder
 from yancuo_win.ui.widgets import (
     CardFrame,
@@ -292,6 +293,10 @@ class ReviewPage(QWidget):
         self.plan_history.setMaximumHeight(120)
         plans.body.addWidget(QLabel("复习历史"))
         plans.body.addWidget(self.plan_history)
+        self.open_history_button = QPushButton("查看完整历史")
+        self.open_history_button.setAccessibleName("查看当前复习计划的完整历史")
+        self.open_history_button.clicked.connect(self._open_plan_history)
+        plans.body.addWidget(self.open_history_button)
         refresh_plans = ghost_button("刷新计划")
         refresh_plans.clicked.connect(self.show_home)
         self.start_selected_button = primary_button("开始复习")
@@ -544,12 +549,15 @@ class ReviewPage(QWidget):
             self.start_selected_button.setText("开始复习")
             self.start_selected_button.setEnabled(False)
             self.start_selected_button.setToolTip("请先选择复习计划")
+            self.open_history_button.setEnabled(False)
             return
         plan = self.services.get_review_plan(str(plan_id))
         if plan is None:
             self.plan_summary.setText("该复习计划已不存在。")
             self.start_selected_button.setEnabled(False)
+            self.open_history_button.setEnabled(False)
             return
+        self.open_history_button.setEnabled(True)
         content_label = "题目" if plan.content_type == "problem" else "笔记"
         self.plan_summary.setText(f"{plan.name}：{len(plan.items)} 项{content_label}。选择计划不会创建复习会话。")
         self.start_selected_button.setText(f"开始{content_label}复习")
@@ -580,6 +588,42 @@ class ReviewPage(QWidget):
         self.start_selected_button.setEnabled(bool(available_count))
         if not available_count:
             self.start_selected_button.setToolTip("计划没有可用内容，无法创建空会话")
+
+    def _open_plan_history(self) -> None:
+        plan_id = self.plan_combo.currentData()
+        if not plan_id:
+            return
+        plan = self.services.get_review_plan(str(plan_id))
+        if plan is None:
+            return
+        entries: list[ReviewHistoryEntry] = []
+        if plan.content_type == "problem":
+            for study_session in self.services.review_plan_study_sessions(plan.id):
+                records = self.services.study_session_records(study_session.id)
+                grades = " · ".join(
+                    f"{grade}分 {sum(record.grade == grade for record in records)}题"
+                    for grade in REVIEW_GRADES
+                    if any(record.grade == grade for record in records)
+                ) or "尚未评分"
+                entries.append(
+                    ReviewHistoryEntry(
+                        study_session.started_at,
+                        f"{study_session.status} · {study_session.problem_count} 题",
+                        f"状态：{study_session.status}\n计划题目：{study_session.problem_count} 题\n"
+                        f"已评分：{len(records)} 题\n评分分布：{grades}",
+                    )
+                )
+        else:
+            for record in self.services.review_plan_note_records(plan.id):
+                entries.append(
+                    ReviewHistoryEntry(
+                        record.completed_at,
+                        "已完成笔记阅读",
+                        f"完成时间：{record.completed_at.astimezone().strftime('%Y-%m-%d %H:%M')}\n"
+                        "记录类型：笔记阅读",
+                    )
+                )
+        ReviewHistoryDialog(plan.name, entries, self).exec()
 
     def start_session(self) -> None:
         self._session_grades.clear()
