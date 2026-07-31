@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 import yancuo_win.ui.problem_detail as problem_detail_module
 from yancuo_win.data.models import Problem
-from yancuo_win.ui.operation_results import TransferResultDialog
+from yancuo_win.ui.operation_results import TransferOperation, TransferResultDialog
 from yancuo_win.ui.widgets import OperationResultDialog
 
 
@@ -65,18 +65,32 @@ def test_transfer_result_copies_details_with_accessible_action() -> None:
         "快照未能恢复。",
         details="网络连接已中断",
         retry_text="重新尝试",
+        operation=TransferOperation.CLOUD,
     )
     dialog.show()
     app.processEvents()
 
     assert dialog.copy_button is not None
-    assert dialog.copy_button.accessibleName() == "复制操作结果详情"
+    assert dialog.accessibleName() == "云端操作结果：云端恢复失败"
+    assert dialog.summary_label.accessibleName() == "云端操作结果摘要"
+    assert dialog.details_view.accessibleName() == "云端操作结果详情"
+    assert dialog.copy_button.accessibleName() == "复制云端操作结果详情"
     dialog.copy_button.click()
     assert QApplication.clipboard().text() == "网络连接已中断"
     dialog.details_view.setFocus()
     QTest.keyClick(dialog, Qt.Key.Key_Tab)
     assert QApplication.focusWidget() is dialog.copy_button
     dialog.close()
+
+
+def test_transfer_operation_labels_cover_all_migrated_result_categories() -> None:
+    assert [operation.label for operation in TransferOperation] == [
+        "导入",
+        "导出",
+        "恢复",
+        "云端",
+        "同步",
+    ]
 
 
 def test_problem_detail_keyboard_path_and_accessible_names(
