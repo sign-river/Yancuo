@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -52,6 +52,7 @@ from yancuo_win.ui.icons import bind_icon
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
     CardFrame,
+    IconButton,
     PageHeader,
     ReadingCanvas,
     SearchInput,
@@ -334,9 +335,9 @@ class NoteDraftPreviewPage(QWidget):
         root.setContentsMargins(20, 20, 20, 16)
         root.setSpacing(12)
         header = PageHeader("确认 AI 笔记", "检查内容块与分类后再保存到笔记库。")
-        back = ghost_button("返回 AI 录入")
+        back = IconButton("chevron-left", "返回 AI 录入")
         back.clicked.connect(self.back_requested.emit)
-        header.add_action(back)
+        header.add_leading(back)
         root.addWidget(header)
         mode = "AI 识别并分组" if intake.classification_mode == "ai" else "自定义分类"
         root.addWidget(QLabel(f"{mode} · 草稿已暂存，尚未入库"))
@@ -685,6 +686,7 @@ class NotePage(QWidget):
         self.note_search_worker: NoteAiSearchWorker | None = None
         self._note_ai_search_ids: set[str] | None = None
         self.note_worker: NoteExtractionWorker | None = None
+        self._library_state: dict[str, object] | None = None
         self._build()
         self.reload()
 
@@ -843,6 +845,7 @@ class NotePage(QWidget):
         )
         self.note_list.currentItemChanged.connect(self._select_note)
         self.note_list.itemSelectionChanged.connect(self._update_bulk_actions)
+        self.note_list.itemDoubleClicked.connect(self._open_selected_note_detail)
         middle.body.addWidget(self.note_list, stretch=1)
         self.bulk_actions = QFrame()
         self.bulk_actions.setObjectName("ContextBar")
@@ -877,7 +880,7 @@ class NotePage(QWidget):
         self.empty_card = CardFrame()
         self.empty_card.setObjectName("NoteEmptyPane")
         self.empty_card.add_title("选择一篇笔记")
-        self.empty_card.add_hint("新建笔记后，可以按块写入标题、正文、公式或提示。")
+        self.empty_card.add_hint("双击列表中的笔记以打开阅读和编辑详情。")
         empty_new = primary_button("新建第一篇笔记")
         empty_new.clicked.connect(self._show_manual_create)
         empty_actions = QHBoxLayout()
@@ -888,7 +891,6 @@ class NotePage(QWidget):
         self.detail_stack = QStackedWidget()
         self.detail_stack.setObjectName("NoteDetailPane")
         self.detail_stack.addWidget(self.empty_card)
-        self.detail_stack.addWidget(self._build_detail())
         split.addWidget(self.detail_stack)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
@@ -896,6 +898,8 @@ class NotePage(QWidget):
         split.setSizes([220, 380, 820])
         library_root.addWidget(split, stretch=1)
         self.page_stack.addWidget(self.library_page)
+        self.note_detail_page = self._build_detail()
+        self.page_stack.addWidget(self.note_detail_page)
         self.manual_create_page = self._build_manual_create_page()
         self.ai_intake_page = self._build_ai_intake_page()
         self.page_stack.addWidget(self.manual_create_page)
@@ -947,9 +951,9 @@ class NotePage(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         header = PageHeader("新建笔记", "先建立笔记信息，再进入内容编辑。")
-        back = ghost_button("返回笔记库")
+        back = IconButton("chevron-left", "返回笔记库")
         back.clicked.connect(self._show_library)
-        header.add_action(back)
+        header.add_leading(back)
         layout.addWidget(header)
         form = CardFrame()
         form.add_title("笔记信息")
@@ -986,9 +990,9 @@ class NotePage(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         header = PageHeader("AI 图片录入笔记", "选择笔记图片，AI 会先整理为可确认的内容草稿。")
-        back = ghost_button("返回笔记库")
+        back = IconButton("chevron-left", "返回笔记库")
         back.clicked.connect(self._show_library)
-        header.add_action(back)
+        header.add_leading(back)
         layout.addWidget(header)
         form = CardFrame()
         form.add_title("识别设置")
@@ -1038,21 +1042,13 @@ class NotePage(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
-
-        detail_header = QFrame()
-        detail_header.setObjectName("NoteDetailHeader")
-        header = QHBoxLayout(detail_header)
-        header.setContentsMargins(8, 4, 8, 4)
-        header.setSpacing(4)
-        title_stack = QVBoxLayout()
-        title_stack.setSpacing(0)
-        self.note_title_label = QLabel("笔记详情")
-        self.note_title_label.setObjectName("PanelTitle")
-        title_stack.addWidget(self.note_title_label)
-        self.note_status = QLabel()
-        self.note_status.setObjectName("MutedLabel")
-        title_stack.addWidget(self.note_status)
-        header.addLayout(title_stack, stretch=1)
+        detail_header = PageHeader("笔记详情")
+        self.note_title_label = detail_header.title
+        self.note_status = detail_header.description
+        self.note_status.show()
+        self.detail_back_button = IconButton("chevron-left", "返回笔记库")
+        self.detail_back_button.clicked.connect(self._return_to_library)
+        detail_header.add_leading(self.detail_back_button)
         layout.addWidget(detail_header)
 
         self.mode_stack = QStackedWidget()
@@ -1086,6 +1082,9 @@ class NotePage(QWidget):
         actions.addWidget(self.edit_button)
         layout.addWidget(action_bar)
         self.read_button.hide()
+        self.detail_back_shortcut = QShortcut(QKeySequence("Alt+Left"), page)
+        self.detail_back_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.detail_back_shortcut.activated.connect(self._return_to_library)
         return page
 
     def _request_review(self) -> None:
@@ -1429,15 +1428,90 @@ class NotePage(QWidget):
         changed_note = self._note is None or self._note.id != note.id
         self._note = note
         self._block = None
-        self.detail_stack.setCurrentIndex(1)
         if changed_note:
             self._set_mode("read")
         self._render_note()
 
+    def _open_selected_note_detail(self, item: QListWidgetItem) -> None:
+        note_id = str(item.data(Qt.ItemDataRole.UserRole))
+        self._capture_library_state(note_id)
+        note = self.notes.get_note(note_id)
+        if note is None:
+            self.reload()
+            return
+        self._note = note
+        self._block = None
+        self._set_mode("read")
+        self._render_note()
+        self.page_stack.setCurrentWidget(self.note_detail_page)
+
+    def _return_to_library(self) -> None:
+        if self._has_unsaved_note_changes():
+            choice = QMessageBox.question(
+                self,
+                "未保存的笔记修改",
+                "当前笔记有未保存的修改。要放弃这些修改并返回笔记库吗？",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if choice != QMessageBox.StandardButton.Discard:
+                return
+        self._restore_library_state()
+
+    def _capture_library_state(self, note_id: str | None = None) -> None:
+        self._library_state = {
+            "collection_id": self._collection_filter_id,
+            "status": self.status_filter.currentData(),
+            "query": self.note_search_edit.text(),
+            "search_mode": self.note_search_mode.currentData(),
+            "note_id": note_id or (self._note.id if self._note else None),
+            "scroll": self.note_list.verticalScrollBar().value(),
+        }
+
+    def _restore_library_state(self, select_note_id: str | None = None) -> None:
+        state = self._library_state or {}
+        self._collection_filter_id = state.get("collection_id")  # type: ignore[assignment]
+        status = state.get("status")
+        index = self.status_filter.findData(status)
+        if index >= 0:
+            self.status_filter.setCurrentIndex(index)
+        search_mode = state.get("search_mode")
+        index = self.note_search_mode.findData(search_mode)
+        if index >= 0:
+            self.note_search_mode.setCurrentIndex(index)
+        self.note_search_edit.setText(str(state.get("query", "")))
+        self.page_stack.setCurrentWidget(self.library_page)
+        self.reload(
+            select_note_id=select_note_id
+            or str(state.get("note_id") or "")
+            or None
+        )
+        scroll = int(state.get("scroll", 0))
+        QTimer.singleShot(
+            0,
+            lambda: self.note_list.verticalScrollBar().setValue(scroll),
+        )
+
+    def _has_unsaved_note_changes(self) -> bool:
+        if self._note is None or self.mode_stack.currentIndex() != 0:
+            return False
+        if (
+            self.title_edit.text() != self._note.title
+            or self.summary_edit.toPlainText() != self._note.summary
+        ):
+            return True
+        if self._block is None:
+            return False
+        current = (
+            self._block.content_latex
+            if self._block.block_type == "formula"
+            else self._block.content_markdown
+        )
+        return self.block_content.toPlainText() != current
+
     def _render_note(self) -> None:
         note = self._note
         if note is None:
-            self.detail_stack.setCurrentIndex(0)
             return
         self._loading = True
         self.title_edit.setText(note.title)
@@ -1531,16 +1605,19 @@ class NotePage(QWidget):
         self.move_block_down_button.setEnabled(False)
 
     def _show_library(self, *_args, select_note_id: str | None = None) -> None:
-        self.page_stack.setCurrentWidget(self.library_page)
-        self.reload(select_note_id=select_note_id)
+        self._restore_library_state(select_note_id=select_note_id)
 
     def _show_manual_create(self) -> None:
+        if self.page_stack.currentWidget() is self.library_page:
+            self._capture_library_state()
         self.new_note_title.clear()
         self.new_note_summary.clear()
         self.page_stack.setCurrentWidget(self.manual_create_page)
         self.new_note_title.setFocus()
 
     def _show_ai_intake(self) -> None:
+        if self.page_stack.currentWidget() is self.library_page:
+            self._capture_library_state()
         self.ai_intake_status.setText("")
         self.page_stack.setCurrentWidget(self.ai_intake_page)
 
@@ -1565,7 +1642,9 @@ class NotePage(QWidget):
         except DomainError as exc:
             self.status_message.emit(str(exc))
             return
-        self._show_library(select_note_id=note.id)
+        self._capture_library_state(note.id)
+        self.reload(select_note_id=note.id)
+        self.page_stack.setCurrentWidget(self.note_detail_page)
         self._set_mode("edit")
         self.status_message.emit("已新建笔记，可以开始添加内容块")
         self.notes_changed.emit()

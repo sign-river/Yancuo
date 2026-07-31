@@ -99,6 +99,43 @@ def test_note_library_uses_space_list_detail_hierarchy(note_page: NotePage) -> N
     assert note_page.note_list.accessibleName() == "笔记列表"
 
 
+def test_note_detail_is_opened_by_double_click_and_restores_library_state(
+    note_page: NotePage,
+) -> None:
+    notes = [
+        note_page.notes.create_note(title=f"note {index}", status="active")
+        for index in range(9)
+    ]
+    collection = note_page.notes.create_collection("calculus")
+    note_page.notes.set_note_collections(notes[4].id, [collection.id])
+    note_page.reload(select_note_id=notes[4].id)
+    collection_item = next(
+        note_page.collection_list.item(row)
+        for row in range(note_page.collection_list.count())
+        if note_page.collection_list.item(row).data(Qt.ItemDataRole.UserRole)
+        == collection.id
+    )
+    note_page.collection_list.setCurrentItem(collection_item)
+    item = note_page.note_list.item(0)
+    note_page._open_selected_note_detail(item)
+
+    assert note_page.page_stack.currentWidget() is note_page.note_detail_page
+    assert note_page.detail_back_button.accessibleName() == "返回笔记库"
+
+    note_page._return_to_library()
+
+    assert note_page.page_stack.currentWidget() is note_page.library_page
+    assert note_page.collection_list.currentItem().data(Qt.ItemDataRole.UserRole) == collection.id
+    assert note_page.note_list.currentItem().data(Qt.ItemDataRole.UserRole) == notes[4].id
+
+
+def test_note_secondary_pages_use_icon_back_entries(note_page: NotePage) -> None:
+    note_page._show_manual_create()
+    assert isinstance(note_page.manual_create_page.findChild(note_page_module.IconButton), note_page_module.IconButton)
+    note_page._show_ai_intake()
+    assert isinstance(note_page.ai_intake_page.findChild(note_page_module.IconButton), note_page_module.IconButton)
+
+
 def test_empty_note_filter_explains_the_next_action(note_page: NotePage) -> None:
     note_page.reload()
 
