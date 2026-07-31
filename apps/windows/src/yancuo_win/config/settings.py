@@ -20,7 +20,7 @@ from pydantic_settings import (
 class ApplicationConfig(BaseModel):
     language: str = "zh_CN"
     theme: str = "system"
-    preview_zoom_scale: float = Field(default=0.96, ge=0.8, le=1.0)
+    preview_zoom_scale: float = Field(default=0.96, ge=0.8, le=1.5)
     auto_save_seconds: int = Field(default=30, ge=1)
     confirm_before_delete: bool = True
     schema_version: int = Field(default=1, ge=1)
@@ -301,7 +301,7 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
         if "preview_zoom_scale" in application:
             try:
                 preview_zoom_scale = float(application["preview_zoom_scale"])
-                if not 0.8 <= preview_zoom_scale <= 1.0:
+                if not 0.8 <= preview_zoom_scale <= 1.5:
                     raise ValueError
                 settings.application.preview_zoom_scale = preview_zoom_scale
             except (TypeError, ValueError) as exc:
@@ -334,6 +334,9 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
             name = str(repository.get("name") or "").strip()
             if name:
                 settings.cloud.repository.name = name
+            branch = str(repository.get("branch") or "").strip()
+            if branch:
+                settings.cloud.repository.branch = branch
         settings.cloud.local_root = str(cloud.get("local_root") or "").strip()
         if "enabled" in cloud:
             settings.cloud.enabled = bool(cloud["enabled"])
@@ -388,6 +391,7 @@ def save_cloud_preferences(
     owner: str,
     repository: str,
     local_root: str,
+    branch: str = "",
     enabled: bool = True,
 ) -> Path:
     """Persist non-sensitive cloud fields without writing access tokens."""
@@ -414,6 +418,7 @@ def save_cloud_preferences(
         "repository": {
             "owner": owner.strip(),
             "name": repository,
+            "branch": branch.strip() or "sync",
         },
         "local_root": local_root.strip(),
     }
@@ -462,7 +467,7 @@ def save_theme_preference(data_root: Path, theme: str) -> Path:
 def save_preview_zoom_preference(data_root: Path, scale: float) -> Path:
     """Persist the shared reader scale without replacing other preferences."""
 
-    normalized = max(0.8, min(1.0, float(scale)))
+    normalized = max(0.8, min(1.5, float(scale)))
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "preferences.json"

@@ -302,6 +302,28 @@ def app_stylesheet(theme: str = "light") -> str:
         background: transparent;
         border: none;
     }}
+    QListWidget#SettingsNavigation {{
+        background: {t.surface};
+        border: 1px solid {t.border};
+        border-radius: {m.radius_surface}px;
+        padding: 6px;
+        outline: none;
+    }}
+    QListWidget#SettingsNavigation::item {{
+        min-height: 36px;
+        padding: 7px 10px;
+        margin: 1px 0;
+        border-radius: {m.radius_control}px;
+        color: {t.text};
+    }}
+    QListWidget#SettingsNavigation::item:hover {{
+        background: {t.list_hover};
+    }}
+    QListWidget#SettingsNavigation::item:selected {{
+        background: {t.list_selected};
+        color: {t.primary};
+        font-weight: 600;
+    }}
     QFrame#CardFrame[surfaceRole="settings"],
     QFrame#CardFrame[surfaceRole="data"] {{
         background: {t.surface};

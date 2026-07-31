@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QDateTime, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -62,8 +63,8 @@ class ServiceSettingsPage(QWidget):
 
     _SECTIONS = {
         "ai": ("AI 服务", "配置 AI 提供商、模型与凭据。"),
-        "appearance": ("外观", "调整应用主题与界面呈现方式。"),
-        "cloud": ("云端连接", "配置用于备份和同步的云端提供商与凭据。"),
+        "appearance": ("外观与显示", "调整应用主题与界面呈现方式。"),
+        "cloud": ("云端同步", "配置用于备份和同步的云端提供商与凭据。"),
     }
 
     def __init__(self, runtime: RuntimeContext, section: str, parent=None) -> None:
@@ -74,6 +75,8 @@ class ServiceSettingsPage(QWidget):
         self.runtime = runtime
         self.section = section
         self._ai_model_worker: AIModelListWorker | None = None
+        self._dirty = False
+        self._last_connection_test = "尚未测试"
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 20)
@@ -88,6 +91,7 @@ class ServiceSettingsPage(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         body = QWidget()
         body.setObjectName("SettingsContent")
+        body.setMaximumWidth(1080)
         layout = QVBoxLayout(body)
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 4, 0)
@@ -101,6 +105,8 @@ class ServiceSettingsPage(QWidget):
             appearance.add_title("主题")
             appearance.add_hint("可跟随 Windows，也可固定使用浅色或深色；保存后立即应用。")
             appearance_form = QFormLayout()
+            appearance_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            appearance_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
             self.theme_mode = QComboBox()
             describe_field(self.theme_mode, "主题模式")
             self.theme_mode.addItem("跟随系统", "system")
@@ -108,23 +114,57 @@ class ServiceSettingsPage(QWidget):
             self.theme_mode.addItem("深色", "dark")
             theme_index = self.theme_mode.findData(s.application.theme)
             self.theme_mode.setCurrentIndex(max(0, theme_index))
-            appearance_form.addRow("主题", self.theme_mode)
-            self.theme_status = QLabel("")
-            self.theme_status.setObjectName("MutedLabel")
-            appearance_form.addRow("当前状态", self.theme_status)
+            self.theme_mode.setVisible(False)
+            theme_choices = QWidget()
+            theme_row = QHBoxLayout(theme_choices)
+            theme_row.setContentsMargins(0, 0, 0, 0)
+            theme_row.setSpacing(6)
+            self.theme_button_group = QButtonGroup(self)
+            self.theme_buttons: dict[str, QPushButton] = {}
+            for label, mode in (("跟随系统", "system"), ("浅色", "light"), ("深色", "dark")):
+                button = QPushButton(label)
+                button.setCheckable(True)
+                button.setProperty("themeMode", mode)
+                self.theme_button_group.addButton(button)
+                self.theme_buttons[mode] = button
+                theme_row.addWidget(button)
+            self.theme_buttons[str(self.theme_mode.currentData())].setChecked(True)
+            self.theme_button_group.idClicked.connect(self._select_theme_button)
+            theme_row.addStretch(1)
+            appearance_form.addRow("主题", theme_choices)
             self.preview_zoom = QSpinBox()
             describe_field(
                 self.preview_zoom,
                 "预览缩放",
                 "调整题目、答案和解析等阅读预览的缩放比例",
             )
-            self.preview_zoom.setRange(80, 100)
+            self.preview_zoom.setRange(80, 150)
             self.preview_zoom.setSingleStep(1)
             self.preview_zoom.setSuffix("%")
             self.preview_zoom.setValue(round(s.application.preview_zoom_scale * 100))
-            appearance_form.addRow("所有预览缩放", self.preview_zoom)
+            self.preview_zoom.valueChanged.connect(
+                lambda value: set_preview_zoom_scale(value / 100)
+            )
+            zoom_control = QWidget()
+            zoom_row = QHBoxLayout(zoom_control)
+            zoom_row.setContentsMargins(0, 0, 0, 0)
+            zoom_row.setSpacing(6)
+            zoom_down = QPushButton("−")
+            zoom_down.setAccessibleName("减小预览缩放")
+            zoom_down.clicked.connect(lambda: self.preview_zoom.stepDown())
+            zoom_up = QPushButton("+")
+            zoom_up.setAccessibleName("增大预览缩放")
+            zoom_up.clicked.connect(lambda: self.preview_zoom.stepUp())
+            zoom_reset = QPushButton("恢复默认")
+            zoom_reset.clicked.connect(lambda: self.preview_zoom.setValue(100))
+            zoom_row.addWidget(zoom_down)
+            zoom_row.addWidget(self.preview_zoom)
+            zoom_row.addWidget(zoom_up)
+            zoom_row.addWidget(zoom_reset)
+            zoom_row.addStretch(1)
+            appearance_form.addRow("所有预览缩放", zoom_control)
             appearance.body.addLayout(appearance_form)
-            self.apply_theme_button = primary_button("保存并应用外观")
+            self.apply_theme_button = primary_button("保存更改")
             self.apply_theme_button.clicked.connect(self._apply_theme)
             appearance.body.addLayout(button_row(self.apply_theme_button))
             set_tab_order_chain(
@@ -133,7 +173,6 @@ class ServiceSettingsPage(QWidget):
                 self.apply_theme_button,
             )
             layout.addWidget(appearance)
-            self._refresh_theme_status()
 
         # —— AI ——
         ai_card = CardFrame()
@@ -144,6 +183,8 @@ class ServiceSettingsPage(QWidget):
             "也可手动输入模型 ID，并请确认支持图片输入。"
         )
         ai_form = QFormLayout()
+        ai_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        ai_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.ai_provider = QComboBox()
         describe_field(self.ai_provider, "AI 提供商")
         self.ai_provider.addItem("Faro API（真实识图）", "openai_compatible")
@@ -193,33 +234,44 @@ class ServiceSettingsPage(QWidget):
         describe_field(self.ai_token_edit, "新 AI 密钥")
         self.ai_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.ai_token_edit.setPlaceholderText("粘贴 Faro sk-faro-… 后点保存")
-        ai_form.addRow("新 AI 密钥", self.ai_token_edit)
+        ai_token_control = QWidget()
+        ai_token_row = QHBoxLayout(ai_token_control)
+        ai_token_row.setContentsMargins(0, 0, 0, 0)
+        ai_token_row.setSpacing(6)
+        self.ai_token_visibility_button = QPushButton("显示")
+        self.ai_token_visibility_button.setAccessibleName("显示或隐藏 AI 密钥")
+        self.ai_token_visibility_button.clicked.connect(
+            lambda: self._toggle_secret_visibility(
+                self.ai_token_edit, self.ai_token_visibility_button
+            )
+        )
+        ai_token_row.addWidget(self.ai_token_edit, stretch=1)
+        ai_token_row.addWidget(self.ai_token_visibility_button)
+        ai_form.addRow("新 AI 密钥", ai_token_control)
         ai_card.body.addLayout(ai_form)
 
-        self.save_ai_button = primary_button("保存 AI 密钥")
-        self.save_ai_button.clicked.connect(self._save_ai_token)
         self.clear_ai_button = QPushButton("清除 AI 密钥")
         self.clear_ai_button.clicked.connect(self._clear_ai_token)
         self.test_ai_button = QPushButton("测试 Faro 连接")
         self.test_ai_button.clicked.connect(self._test_ai_connection)
-        self.fetch_ai_models = QPushButton("获取可用模型")
+        self.fetch_ai_models = QPushButton("刷新模型")
         self.fetch_ai_models.clicked.connect(self._fetch_ai_models)
-        self.apply_ai_button = QPushButton("保存并应用 AI 设置")
+        self.apply_ai_button = primary_button("保存更改")
         self.apply_ai_button.clicked.connect(self._apply_ai_session)
         ai_card.body.addLayout(
             button_row(
-                self.save_ai_button,
                 self.clear_ai_button,
                 self.fetch_ai_models,
                 self.test_ai_button,
             )
         )
         ai_card.body.addLayout(button_row(self.apply_ai_button))
+        self.ai_connection_notice = StateNotice("尚未测试连接。", "disabled")
+        ai_card.body.addWidget(self.ai_connection_notice)
         set_tab_order_chain(
             self.ai_provider,
             self.ai_model,
             self.ai_token_edit,
-            self.save_ai_button,
             self.clear_ai_button,
             self.fetch_ai_models,
             self.test_ai_button,
@@ -231,9 +283,12 @@ class ServiceSettingsPage(QWidget):
         # —— 云端 ——
         cloud_card = CardFrame()
         cloud_card.setProperty("surfaceRole", "settings")
-        cloud_card.add_title("云端备份（非实时同步）")
+        cloud_card.add_title("云端连接")
         cloud_card.add_hint("完整备份/迁移；令牌不写入 TOML。")
         cloud_form = QFormLayout()
+        cloud_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        cloud_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        self.cloud_form = cloud_form
         self.provider = QComboBox()
         describe_field(self.provider, "云端提供商")
         self.provider.addItem("本地文件夹（推荐先测通）", "local_folder")
@@ -248,10 +303,13 @@ class ServiceSettingsPage(QWidget):
 
         self.owner_edit = QLineEdit(s.cloud.repository.owner)
         self.repo_edit = QLineEdit(s.cloud.repository.name)
+        self.branch_edit = QLineEdit(s.cloud.repository.branch)
         describe_field(self.owner_edit, "仓库 owner")
         describe_field(self.repo_edit, "仓库 name")
+        describe_field(self.branch_edit, "同步分支")
         cloud_form.addRow("仓库 owner", self.owner_edit)
         cloud_form.addRow("仓库 name", self.repo_edit)
+        cloud_form.addRow("同步分支", self.branch_edit)
 
         self.local_root = QLineEdit(_default_local_root(runtime))
         describe_field(self.local_root, "本地云目录")
@@ -267,22 +325,32 @@ class ServiceSettingsPage(QWidget):
         describe_field(self.token_edit, "新云端令牌")
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.token_edit.setPlaceholderText("粘贴新令牌后点保存")
-        cloud_form.addRow("新令牌", self.token_edit)
+        self.token_control = QWidget()
+        token_row = QHBoxLayout(self.token_control)
+        token_row.setContentsMargins(0, 0, 0, 0)
+        token_row.setSpacing(6)
+        self.token_visibility_button = QPushButton("显示")
+        self.token_visibility_button.setAccessibleName("显示或隐藏云端令牌")
+        self.token_visibility_button.clicked.connect(
+            lambda: self._toggle_secret_visibility(
+                self.token_edit, self.token_visibility_button
+            )
+        )
+        token_row.addWidget(self.token_edit, stretch=1)
+        token_row.addWidget(self.token_visibility_button)
+        cloud_form.addRow("新令牌", self.token_control)
         self.cloud_permission_notice = StateNotice()
         cloud_form.addRow("", self.cloud_permission_notice)
         cloud_card.body.addLayout(cloud_form)
 
-        self.save_cloud_token_button = primary_button("保存云令牌")
-        self.save_cloud_token_button.clicked.connect(self._save_token)
         self.clear_cloud_token_button = QPushButton("清除云令牌")
         self.clear_cloud_token_button.clicked.connect(self._clear_token)
         self.test_cloud_button = QPushButton("测试云连接")
         self.test_cloud_button.clicked.connect(self._test_cloud)
-        self.apply_cloud_button = QPushButton("应用云端到当前会话")
-        self.apply_cloud_button.clicked.connect(self._apply_session_provider)
+        self.apply_cloud_button = primary_button("保存更改")
+        self.apply_cloud_button.clicked.connect(self._save_cloud_settings)
         cloud_card.body.addLayout(
             button_row(
-                self.save_cloud_token_button,
                 self.clear_cloud_token_button,
                 self.test_cloud_button,
             )
@@ -292,10 +360,10 @@ class ServiceSettingsPage(QWidget):
             self.provider,
             self.owner_edit,
             self.repo_edit,
+            self.branch_edit,
             self.local_root,
             self.browse_local_button,
             self.token_edit,
-            self.save_cloud_token_button,
             self.clear_cloud_token_button,
             self.test_cloud_button,
             self.apply_cloud_button,
@@ -318,16 +386,68 @@ class ServiceSettingsPage(QWidget):
         if section == "cloud":
             self._refresh_token_ui()
 
+        tracked = (
+            (self.theme_mode, self.preview_zoom)
+            if section == "appearance"
+            else (self.ai_provider, self.ai_model, self.ai_token_edit)
+            if section == "ai"
+            else (self.provider, self.owner_edit, self.repo_edit, self.branch_edit, self.local_root, self.token_edit)
+        )
+        for field in tracked:
+            for signal_name in (
+                "textChanged",
+                "currentTextChanged",
+                "currentIndexChanged",
+                "valueChanged",
+            ):
+                signal = getattr(field, signal_name, None)
+                if signal is not None:
+                    signal.connect(self._mark_dirty)
+        self._set_save_enabled(False)
+
+    def _mark_dirty(self, *_args: object) -> None:
+        self._dirty = True
+        self._set_save_enabled(True)
+
+    @staticmethod
+    def _toggle_secret_visibility(field: QLineEdit, button: QPushButton) -> None:
+        showing = field.echoMode() == QLineEdit.EchoMode.Normal
+        field.setEchoMode(
+            QLineEdit.EchoMode.Password if showing else QLineEdit.EchoMode.Normal
+        )
+        button.setText("显示" if showing else "隐藏")
+
+    @property
+    def has_unsaved_changes(self) -> bool:
+        return self._dirty
+
+    def discard_unsaved_changes(self) -> None:
+        """Mark the current in-memory form as intentionally abandoned."""
+
+        self._dirty = False
+        self._set_save_enabled(False)
+
+    def _set_save_enabled(self, enabled: bool) -> None:
+        button = getattr(self, "apply_ai_button", None) or getattr(self, "apply_cloud_button", None) or getattr(self, "apply_theme_button", None)
+        if button is not None:
+            button.setEnabled(enabled)
+
     def _refresh_theme_status(self) -> None:
+        for mode, button in self.theme_buttons.items():
+            button.setChecked(mode == str(self.theme_mode.currentData()))
+
+    def _select_theme_button(self, button_id: int) -> None:
+        button = self.theme_button_group.button(button_id)
+        if button is None:
+            return
+        mode = str(button.property("themeMode"))
+        self.theme_mode.setCurrentIndex(self.theme_mode.findData(mode))
+        self._refresh_theme_status()
         app = QApplication.instance()
-        manager = get_theme_manager(app)
-        resolved = manager.resolved if manager else "light"
-        selected = str(self.theme_mode.currentData())
-        label = {"light": "浅色", "dark": "深色"}.get(resolved, resolved)
-        if selected == "system":
-            self.theme_status.setText(f"跟随系统（当前为{label}）")
-        else:
-            self.theme_status.setText(f"当前为{label}")
+        if app is not None:
+            manager = get_theme_manager(app)
+            if manager is not None:
+                manager.set_mode(mode)
 
     def _apply_theme(self) -> None:
         mode = str(self.theme_mode.currentData())
@@ -346,6 +466,7 @@ class ServiceSettingsPage(QWidget):
                 else:
                     manager.set_mode(mode)
             self._refresh_theme_status()
+            self.discard_unsaved_changes()
             self.status_message.emit("外观设置已保存并应用")
         except (ConfigError, ValueError) as exc:
             QMessageBox.warning(self, "外观设置未保存", str(exc))
@@ -354,23 +475,27 @@ class ServiceSettingsPage(QWidget):
         cfg = self.runtime.settings.ai.providers.get("openai_compatible")
         return (cfg.credential_key if cfg else None) or "yancuo_ai_api_key"
 
-    def _save_ai_token(self) -> None:
+    def _save_ai_token(self) -> bool:
         key = self._ai_credential_key()
         token = self.ai_token_edit.text().strip()
         if not token:
-            QMessageBox.warning(self, "提示", "请先粘贴 AI 密钥")
-            return
+            return True
         try:
             set_secret(key, token)
             self.ai_token_edit.clear()
             self.ai_token_status.setText(mask_secret(get_secret(key)))
             self.status_message.emit("AI 密钥已保存到系统凭据")
+            return True
         except DomainError as exc:
             QMessageBox.warning(self, "失败", str(exc))
+            return False
 
     def _clear_ai_token(self) -> None:
+        if QMessageBox.question(self, "清除 AI 密钥", "确定要从系统凭据中清除 AI 密钥吗？") != QMessageBox.StandardButton.Yes:
+            return
         delete_secret(self._ai_credential_key())
         self.ai_token_status.setText(mask_secret(None))
+        self._mark_dirty()
         self.status_message.emit("AI 密钥已从系统凭据中清除")
 
     def _apply_ai_session(self) -> None:
@@ -380,6 +505,8 @@ class ServiceSettingsPage(QWidget):
             QMessageBox.warning(self, "模型未设置", "请填写 Faro 模型广场中的图片模型 ID")
             return
         try:
+            if not self._save_ai_token():
+                return
             provider = get_provider(self.runtime.settings, name)
             provider.validate_configuration()
             save_ai_preferences(
@@ -392,6 +519,7 @@ class ServiceSettingsPage(QWidget):
             self.runtime.settings.ai.enabled = True
             self.runtime.settings.ai.default_vision_model = model
             self.runtime.settings.ai.default_text_model = model
+            self.discard_unsaved_changes()
             provider_label = "Faro API" if name == "openai_compatible" else "Mock"
             self.status_message.emit(f"AI 设置已保存：{provider_label} / {model}")
         except (ConfigError, DomainError) as exc:
@@ -403,6 +531,8 @@ class ServiceSettingsPage(QWidget):
             self.status_message.emit("Mock 不访问网络；连接测试请先选择 Faro API")
             return
         model = self.ai_model.currentText().strip()
+        self.test_ai_button.setEnabled(False)
+        self.test_ai_button.setText("正在测试…")
         try:
             provider = get_provider(self.runtime.settings, name)
             provider.validate_configuration()
@@ -411,21 +541,28 @@ class ServiceSettingsPage(QWidget):
                 raise DomainError("当前提供商不支持连接测试")
             models = list_models(timeout_seconds=20)
         except DomainError as exc:
+            self._last_connection_test = f"连接失败：{exc}"
+            self.ai_connection_notice.set_state(self._last_connection_test, "error")
             QMessageBox.warning(self, "Faro 连接失败", str(exc))
-            return
-
-        if model and model not in models:
-            sample = "、".join(models[:8]) or "（服务未返回模型）"
-            QMessageBox.warning(
-                self,
-                "连接成功，但模型未找到",
-                f"Faro 身份验证成功，但模型列表中没有“{model}”。\n"
-                f"请从模型广场重新复制 ID。当前返回示例：{sample}",
+        else:
+            self._last_connection_test = f"连接成功，最后测试：{QDateTime.currentDateTime().toString('yyyy-MM-dd HH:mm')}"
+            self.ai_connection_notice.set_state(
+                "连接成功，模型列表获取正常。" if not model or model in models else "连接成功，但当前模型不在返回列表中。",
+                "success" if not model or model in models else "info",
             )
-            return
-        self.status_message.emit(
-            f"Faro 连接成功，已在模型列表中找到“{model}”"
-        )
+            if model and model not in models:
+                sample = "、".join(models[:8]) or "（服务未返回模型）"
+                QMessageBox.warning(
+                    self,
+                    "连接成功，但模型未找到",
+                    f"Faro 身份验证成功，但模型列表中没有“{model}”。\n"
+                    f"请从模型广场重新复制 ID。当前返回示例：{sample}",
+                )
+            else:
+                self.status_message.emit(f"Faro 连接成功，已在模型列表中找到“{model}”")
+        finally:
+            self.test_ai_button.setEnabled(True)
+            self.test_ai_button.setText("测试 Faro 连接")
 
     def _fetch_ai_models(self) -> None:
         name = self.ai_provider.currentData()
@@ -532,6 +669,10 @@ class ServiceSettingsPage(QWidget):
                 "本地文件夹提供商不需要云端令牌。",
                 "disabled",
             )
+        remote = name in {"gitlink", "github"}
+        for field in (self.owner_edit, self.repo_edit, self.branch_edit, self.token_status, self.token_control, self.cloud_permission_notice):
+            self.cloud_form.setRowVisible(field, remote)
+        self.clear_cloud_token_button.setVisible(remote)
 
     def _set_cloud_permission_state(self, key: str | None) -> None:
         self.token_edit.setToolTip("")
@@ -581,6 +722,35 @@ class ServiceSettingsPage(QWidget):
         self._set_cloud_permission_state(key)
         self.status_message.emit("云令牌已从系统凭据中清除")
 
+    def _save_cloud_settings(self) -> None:
+        key = self._credential_key_for_provider()
+        token = self.token_edit.text().strip()
+        if key and token:
+            try:
+                set_secret(key, token)
+                self.token_edit.clear()
+                self.token_status.setText(mask_secret(get_secret(key)))
+                self._set_cloud_permission_state(key)
+            except DomainError as exc:
+                QMessageBox.warning(self, "云令牌未保存", str(exc))
+                return
+        self._apply_session_provider(notify=False)
+        try:
+            save_cloud_preferences(
+                self.runtime.paths.root,
+                provider=str(self.provider.currentData()),
+                owner=self.owner_edit.text(),
+                repository=self.repo_edit.text(),
+                local_root=self.local_root.text(),
+                branch=self.branch_edit.text(),
+                enabled=True,
+            )
+        except (ConfigError, OSError) as exc:
+            QMessageBox.warning(self, "云端设置未保存", str(exc))
+            return
+        self.discard_unsaved_changes()
+        self.status_message.emit("云端设置已保存")
+
     def _apply_session_provider(self, *, notify: bool = True) -> None:
         name = self.provider.currentData()
         self.runtime.settings.cloud.default_provider = name
@@ -588,6 +758,7 @@ class ServiceSettingsPage(QWidget):
         self.runtime.settings.cloud.repository.name = (
             self.repo_edit.text().strip() or "graduate-mistake-book-data"
         )
+        self.runtime.settings.cloud.repository.branch = self.branch_edit.text().strip() or "sync"
         self.runtime.settings.cloud.enabled = True
         local_root = self.local_root.text().strip()
         self.runtime.settings.cloud.local_root = local_root
@@ -597,6 +768,8 @@ class ServiceSettingsPage(QWidget):
             self.status_message.emit(f"当前会话已应用云端提供商：{name}")
 
     def _test_cloud(self) -> None:
+        self.test_cloud_button.setEnabled(False)
+        self.test_cloud_button.setText("正在测试…")
         self._apply_session_provider(notify=False)
         try:
             root = (
@@ -605,32 +778,37 @@ class ServiceSettingsPage(QWidget):
                 else None
             )
             provider = get_cloud_provider(self.runtime.settings, local_root=root)
-            result = provider.test_connection()
+            provider.test_connection()
         except DomainError as exc:
+            self.cloud_permission_notice.set_state(f"连接失败：{exc}", "error")
             QMessageBox.warning(self, "连接失败", str(exc))
-            return
-        try:
-            save_cloud_preferences(
-                self.runtime.paths.root,
-                provider=str(self.provider.currentData()),
-                owner=self.owner_edit.text(),
-                repository=self.repo_edit.text(),
-                local_root=self.local_root.text(),
-                enabled=True,
-            )
-        except (ConfigError, OSError) as exc:
-            QMessageBox.warning(
-                self,
-                "连接成功但保存失败",
-                f"云端连接有效，但当前字段未能写入本地偏好：{exc}",
-            )
-            return
-        QMessageBox.information(
-            self,
-            "连接成功",
-            "当前云端字段已保存，下次启动会自动恢复。\n\n"
-            + json.dumps(result, ensure_ascii=False, indent=2),
-        )
+        else:
+            try:
+                save_cloud_preferences(
+                    self.runtime.paths.root,
+                    provider=str(self.provider.currentData()),
+                    owner=self.owner_edit.text(),
+                    repository=self.repo_edit.text(),
+                    local_root=self.local_root.text(),
+                    branch=self.branch_edit.text(),
+                    enabled=True,
+                )
+            except (ConfigError, OSError) as exc:
+                QMessageBox.warning(
+                    self,
+                    "连接成功但保存失败",
+                    f"云端连接有效，但当前字段未能写入本地偏好：{exc}",
+                )
+            else:
+                self.cloud_permission_notice.set_state(
+                    "连接测试成功，设置已保存。最后测试："
+                    + QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm"),
+                    "success",
+                )
+                self.status_message.emit("云端连接测试成功")
+        finally:
+            self.test_cloud_button.setEnabled(True)
+            self.test_cloud_button.setText("测试云连接")
 
     def _open_data_root(self) -> None:
         path = self.runtime.paths.root

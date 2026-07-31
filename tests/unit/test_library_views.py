@@ -9,7 +9,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QLineEdit, QMessageBox, QWidget
 
 import yancuo_win.ui.intake_page as intake_page_module
 import yancuo_win.ui.note_page as note_page_module
@@ -123,18 +123,17 @@ def test_settings_page_consolidates_account_services_and_data(window: MainWindow
     assert len(items) == 1
 
     window.main_nav.setCurrentItem(items[0])
-    assert [
-        window.settings_tabs.tabText(index)
-        for index in range(window.settings_tabs.count())
-    ] == ["账户与身份", "AI 服务", "外观", "本机与数据", "云端备份与同步"]
+    assert [window.settings_nav.item(index).text() for index in range(window.settings_nav.count())] == [
+        "账户与设备", "AI 服务", "外观与显示", "本地数据", "云端同步"
+    ]
 
-    window.settings_tabs.setCurrentIndex(0)
+    window.settings_nav.setCurrentRow(0)
 
     assert "离线模式" in window.account_identity_summary.text()
-    assert window.runtime.identity.user_id in window.account_identity_summary.text()
+    assert window.runtime.identity.user_id in window.account_diagnostics.text()
 
     window._open_settings()
-    assert window.settings_tabs.currentIndex() == 1
+    assert window.settings_pages.currentIndex() == 1
 
 
 def test_primary_navigation_and_large_views_are_keyboard_accessible(
@@ -794,3 +793,43 @@ def test_settings_expose_loading_failure_disabled_and_permission_states(
     )
     assert cloud_settings.cloud_permission_notice.property("state") == "disabled"
     assert not cloud_settings.token_edit.isEnabled()
+
+
+def test_settings_secrets_are_hidden_by_default_and_can_be_revealed(
+    window: MainWindow,
+) -> None:
+    ai_settings = window.ai_settings_page
+    assert ai_settings.ai_token_edit.echoMode() == QLineEdit.EchoMode.Password
+    ai_settings.ai_token_visibility_button.click()
+    assert ai_settings.ai_token_edit.echoMode() == QLineEdit.EchoMode.Normal
+    assert ai_settings.ai_token_visibility_button.text() == "隐藏"
+
+    cloud_settings = window.cloud_settings_page
+    cloud_settings.provider.setCurrentIndex(
+        cloud_settings.provider.findData("github")
+    )
+    assert cloud_settings.token_edit.echoMode() == QLineEdit.EchoMode.Password
+    cloud_settings.token_visibility_button.click()
+    assert cloud_settings.token_edit.echoMode() == QLineEdit.EchoMode.Normal
+
+
+def test_unsaved_settings_require_confirmation_before_leaving(
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window.main_nav.setCurrentRow(4)
+    settings = window.ai_settings_page
+    assert not settings.apply_ai_button.isEnabled()
+    settings.ai_model.setCurrentText("changed-model")
+    assert settings.has_unsaved_changes
+    assert settings.apply_ai_button.isEnabled()
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.No,
+    )
+
+    window.main_nav.setCurrentRow(0)
+
+    assert window.stack.currentIndex() == 5
+    assert settings.has_unsaved_changes

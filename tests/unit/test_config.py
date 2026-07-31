@@ -105,6 +105,7 @@ def test_cloud_preferences_roundtrip_without_token(tmp_path: Path) -> None:
         "repository": {
             "owner": "student-user",
             "name": "mistake-book-data",
+            "branch": "sync",
         },
         "local_root": r"D:\backups\yancuo",
     }

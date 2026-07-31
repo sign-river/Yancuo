@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QPoint, QSize, QTimer, Qt, QUrl
+from PySide6.QtCore import QDateTime, QPoint, QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -35,7 +35,6 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStatusBar,
-    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -53,7 +52,7 @@ from yancuo_win.application.cloud_service import CloudBackupService
 from yancuo_win.application.intake_service import ProblemIntakeService
 from yancuo_win.application.note_service import NoteService
 from yancuo_win.application.problem_chat_service import ProblemChatService
-from yancuo_win.application.search_service import SearchIndexService
+from yancuo_win.application.search_service import SearchIndexHealth, SearchIndexService
 from yancuo_win.application.search_spec import SearchBoundary
 from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.application.sync_service import SyncService
@@ -472,6 +471,21 @@ class MainWindow(QMainWindow):
             return
         item = self.main_nav.item(row)
         page = item.data(Qt.ItemDataRole.UserRole) if item else _PAGE_LIBRARY
+        if (
+            self.stack.currentIndex() == _PAGE_SETTINGS
+            and int(page) != _PAGE_SETTINGS
+            and not self._confirm_discard_settings()
+        ):
+            self.main_nav.blockSignals(True)
+            self.main_nav.setCurrentRow(
+                next(
+                    index
+                    for index in range(self.main_nav.count())
+                    if self.main_nav.item(index).data(Qt.ItemDataRole.UserRole) == _PAGE_SETTINGS
+                )
+            )
+            self.main_nav.blockSignals(False)
+            return
         self.stack.setCurrentIndex(int(page))
         if page == _PAGE_DASHBOARD:
             self._refresh_focus_pages()
@@ -485,6 +499,28 @@ class MainWindow(QMainWindow):
         elif page == _PAGE_SETTINGS:
             self._refresh_focus_pages()
             self._refresh_account_page()
+
+    def _confirm_discard_settings(self) -> bool:
+        pages = (
+            getattr(self, "ai_settings_page", None),
+            getattr(self, "appearance_settings_page", None),
+            getattr(self, "cloud_settings_page", None),
+        )
+        dirty = [page for page in pages if page is not None and page.has_unsaved_changes]
+        if not dirty:
+            return True
+        choice = QMessageBox.question(
+            self,
+            "放弃未保存设置",
+            "当前设置尚未保存，是否放弃修改？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return False
+        for settings_page in dirty:
+            settings_page.discard_unsaved_changes()
+        return True
 
     def _on_main_nav_clicked(self, item: QListWidgetItem) -> None:
         """Re-open an already selected section when a nested page is active."""
@@ -1274,22 +1310,37 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        layout.addWidget(
-            PageHeader("设置", "按身份、AI、外观、本机数据和云端备份分别管理。")
-        )
+        layout.addWidget(PageHeader("设置", "管理本机资料、AI、显示方式与云端同步。"))
 
-        self.settings_tabs = QTabWidget()
-        self.settings_tabs.addTab(self._build_account_page(), "账户与身份")
-        self.ai_settings_page = ServiceSettingsPage(self.runtime, "ai")
-        self.ai_settings_page.status_message.connect(self._show_status_toast)
-        self.settings_tabs.addTab(self.ai_settings_page, "AI 服务")
-        self.appearance_settings_page = ServiceSettingsPage(self.runtime, "appearance")
-        self.appearance_settings_page.status_message.connect(self._show_status_toast)
-        self.settings_tabs.addTab(self.appearance_settings_page, "外观")
-        self.settings_tabs.addTab(self._build_data_page(), "本机与数据")
-        self.cloud_settings_page = self._build_cloud_sync_page()
-        self.settings_tabs.addTab(self.cloud_settings_page, "云端备份与同步")
-        layout.addWidget(self.settings_tabs, stretch=1)
+        content = QHBoxLayout()
+        content.setSpacing(20)
+        self.settings_nav = QListWidget()
+        self.settings_nav.setObjectName("SettingsNavigation")
+        self.settings_nav.setFixedWidth(204)
+        self.settings_nav.setAccessibleName("设置栏目")
+        self.settings_pages = QStackedWidget()
+        self.settings_pages.setObjectName("SettingsContentPages")
+        for label, settings_page in (
+            ("账户与设备", self._build_account_page()),
+            ("AI 服务", ServiceSettingsPage(self.runtime, "ai")),
+            ("外观与显示", ServiceSettingsPage(self.runtime, "appearance")),
+            ("本地数据", self._build_data_page()),
+            ("云端同步", self._build_cloud_sync_page()),
+        ):
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, self.settings_pages.count())
+            self.settings_nav.addItem(item)
+            self.settings_pages.addWidget(settings_page)
+        self.ai_settings_page = self.settings_pages.widget(1)
+        self.appearance_settings_page = self.settings_pages.widget(2)
+        self.cloud_settings_page = self.settings_pages.widget(4)
+        for service_page in (self.ai_settings_page, self.appearance_settings_page, self.cloud_settings_page):
+            service_page.status_message.connect(self._show_status_toast)
+        self.settings_nav.currentRowChanged.connect(self.settings_pages.setCurrentIndex)
+        self.settings_nav.setCurrentRow(0)
+        content.addWidget(self.settings_nav)
+        content.addWidget(self.settings_pages, stretch=1)
+        layout.addLayout(content, stretch=1)
         return page
 
     def _build_data_page(self) -> QWidget:
@@ -1299,9 +1350,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(16)
 
-        lay.addWidget(
-            PageHeader("本机与数据", "管理本机存储、索引、备份、导入导出与工作区。")
-        )
+        lay.addWidget(PageHeader("本地数据", "管理本机存储、备份、导入导出与数据维护。"))
         workspace = QGridLayout()
         workspace.setHorizontalSpacing(16)
         workspace.setVerticalSpacing(16)
@@ -1310,23 +1359,27 @@ class MainWindow(QMainWindow):
 
         pack = CardFrame()
         pack.setProperty("surfaceRole", "data")
-        pack.add_title("完整备份包")
-        pack.add_hint("推荐使用 ebpack；zip 为旧版兼容。")
-        p1 = primary_button("导出 ebpack")
+        pack.add_title("备份与恢复")
+        pack.add_hint("完整备份格式：.ebpack；ZIP 仅用于旧版兼容。")
+        self.local_backup_summary = QLabel("尚未在本次会话中创建完整备份。")
+        self.local_backup_summary.setObjectName("MutedLabel")
+        self.local_backup_summary.setWordWrap(True)
+        pack.body.addWidget(self.local_backup_summary)
+        p1 = primary_button("导出完整备份")
         p1.clicked.connect(self._export_ebpack)
-        p2 = QPushButton("导入 ebpack")
+        p2 = QPushButton("导入完整备份")
         p2.clicked.connect(self._import_ebpack)
-        p3 = QPushButton("备份 (zip)")
+        p3 = QPushButton("创建 ZIP 备份")
         p3.clicked.connect(self._backup)
-        p4 = QPushButton("恢复 zip")
+        p4 = QPushButton("从 ZIP 恢复")
         p4.clicked.connect(self._restore_backup)
         pack.body.addLayout(button_row(p1, p2, p3, p4))
         workspace.addWidget(pack, 0, 0, 1, 2)
 
         share = CardFrame()
         share.setProperty("surfaceRole", "data")
-        share.add_title("分享与工作区")
-        share.add_hint("分享包会脱敏；工作区用于外部编辑 Markdown。")
+        share.add_title("导入与导出")
+        share.add_hint("分享包适合发送给其他用户；工作区适合使用 Markdown 外部编辑。")
         s1 = QPushButton("导出分享包")
         s1.clicked.connect(self._export_gmshare)
         s2 = QPushButton("导入分享包")
@@ -1348,11 +1401,13 @@ class MainWindow(QMainWindow):
         local_form.addWidget(QLabel(self.runtime.settings.application.language), 0, 1)
         local_form.addWidget(QLabel("数据根目录"), 1, 0)
         self.data_path_label = QLabel(str(self.runtime.paths.root))
-        self.data_path_label.setWordWrap(True)
+        self.data_path_label.setToolTip(str(self.runtime.paths.root))
+        self.data_path_label.setMaximumWidth(680)
         local_form.addWidget(self.data_path_label, 1, 1)
         local_form.addWidget(QLabel("数据库"), 2, 0)
         database_path = QLabel(str(self.runtime.paths.database))
-        database_path.setWordWrap(True)
+        database_path.setToolTip(str(self.runtime.paths.database))
+        database_path.setMaximumWidth(680)
         local_form.addWidget(database_path, 2, 1)
         path_card.body.addLayout(local_form)
         open_data = ghost_button("打开数据目录")
@@ -1361,14 +1416,19 @@ class MainWindow(QMainWindow):
 
         search_card = CardFrame()
         search_card.setProperty("surfaceRole", "data")
-        search_card.add_title("本地搜索索引")
-        self.search_index_summary = QLabel(self.search.check_consistency().summary)
+        search_card.add_title("数据维护")
+        self.search_index_summary = QLabel()
         self.search_index_summary.setObjectName("MutedLabel")
         self.search_index_summary.setWordWrap(True)
         search_card.body.addWidget(self.search_index_summary)
-        rebuild_search = ghost_button("检查并重建搜索索引")
-        rebuild_search.clicked.connect(self._rebuild_search_index)
-        search_card.body.addLayout(button_row(rebuild_search))
+        self._refresh_search_index_summary()
+        self.check_search_button = ghost_button("检查索引")
+        self.check_search_button.clicked.connect(self._check_search_index)
+        self.rebuild_search_button = ghost_button("检查并重建索引")
+        self.rebuild_search_button.clicked.connect(self._rebuild_search_index)
+        search_card.body.addLayout(
+            button_row(self.check_search_button, self.rebuild_search_button)
+        )
         workspace.addWidget(search_card, 1, 1)
         workspace.addWidget(path_card, 2, 0, 1, 2)
         lay.addLayout(workspace)
@@ -1386,8 +1446,8 @@ class MainWindow(QMainWindow):
         self.account_remote_summary.setObjectName("MutedLabel")
         self.account_remote_summary.setWordWrap(True)
         profiles.body.addWidget(self.account_remote_summary)
-        inspect_profiles = primary_button("查看云端资料")
-        inspect_profiles.clicked.connect(self._inspect_cloud_profiles)
+        self.inspect_cloud_profiles_button = primary_button("查看云端资料")
+        self.inspect_cloud_profiles_button.clicked.connect(self._inspect_cloud_profiles)
         restore_profile = QPushButton("恢复指定资料…")
         restore_profile.clicked.connect(self._restore_cloud_profile)
         preview_merge = ghost_button("预检资料合并…")
@@ -1395,21 +1455,21 @@ class MainWindow(QMainWindow):
         merge_profile = ghost_button("合并指定资料…")
         merge_profile.clicked.connect(self._merge_cloud_profile)
         profiles.body.addLayout(
-            button_row(inspect_profiles, restore_profile, preview_merge, merge_profile)
+            button_row(self.inspect_cloud_profiles_button, restore_profile, preview_merge, merge_profile)
         )
         operations = CardFrame()
         operations.setProperty("surfaceRole", "settings")
         operations.add_title("备份与同步操作")
         operations.add_hint("云备份创建完整快照；增量推拉不会逐题实时上传。")
-        backup = primary_button("云备份")
-        backup.clicked.connect(self._cloud_backup)
-        restore = QPushButton("云恢复")
-        restore.clicked.connect(self._cloud_restore)
-        push = QPushButton("推送增量")
-        push.clicked.connect(self._sync_push)
-        pull = QPushButton("拉取合并")
-        pull.clicked.connect(self._sync_pull)
-        operations.body.addLayout(button_row(backup, restore, push, pull))
+        self.cloud_backup_button = primary_button("云备份")
+        self.cloud_backup_button.clicked.connect(self._cloud_backup)
+        self.cloud_restore_button = danger_button("云恢复")
+        self.cloud_restore_button.clicked.connect(self._cloud_restore)
+        self.sync_push_button = QPushButton("推送增量")
+        self.sync_push_button.clicked.connect(self._sync_push)
+        self.sync_pull_button = QPushButton("拉取合并")
+        self.sync_pull_button.clicked.connect(self._sync_pull)
+        operations.body.addLayout(button_row(self.cloud_backup_button, self.cloud_restore_button, self.sync_push_button, self.sync_pull_button))
         insert_at = max(0, page.content_layout.count() - 1)
         page.content_layout.insertWidget(insert_at, profiles)
         page.content_layout.insertWidget(insert_at + 1, operations)
@@ -1422,9 +1482,9 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(16)
 
-        title = QLabel("账户")
+        title = QLabel("账户与设备")
         title.setObjectName("PageTitle")
-        hint = QLabel("当前以本地资料离线使用。登录不会影响录题、复习、笔记或已保存的 AI 对话。")
+        hint = QLabel("当前以本地资料离线使用；不需要登录账户。")
         hint.setObjectName("PageHint")
         hint.setWordWrap(True)
         lay.addWidget(title)
@@ -1436,7 +1496,30 @@ class MainWindow(QMainWindow):
         self.account_identity_summary.setObjectName("MutedLabel")
         self.account_identity_summary.setWordWrap(True)
         identity.body.addWidget(self.account_identity_summary)
+        open_data = ghost_button("打开数据目录")
+        open_data.clicked.connect(self._open_data_root)
+        identity.body.addLayout(button_row(open_data))
         lay.addWidget(identity)
+
+        diagnostics = CardFrame()
+        diagnostics.add_title("高级诊断信息")
+        diagnostics.add_hint("资料和设备标识仅用于排查本机资料问题。")
+        self.account_diagnostics = QLabel()
+        self.account_diagnostics.setObjectName("MutedLabel")
+        self.account_diagnostics.setWordWrap(True)
+        diagnostics.body.addWidget(self.account_diagnostics)
+        diagnostics.setVisible(False)
+        self.account_diagnostics_card = diagnostics
+        diagnostics_toggle = ghost_button("显示高级诊断信息")
+        diagnostics_toggle.setCheckable(True)
+        diagnostics_toggle.toggled.connect(
+            lambda visible: (
+                self.account_diagnostics_card.setVisible(visible),
+                diagnostics_toggle.setText("隐藏高级诊断信息" if visible else "显示高级诊断信息"),
+            )
+        )
+        lay.addWidget(diagnostics_toggle)
+        lay.addWidget(diagnostics)
 
         cloud_profiles = CardFrame()
         cloud_profiles.add_title("云端资料")
@@ -1476,9 +1559,13 @@ class MainWindow(QMainWindow):
         self.account_identity_summary.setText(
             "离线模式\n"
             f"显示名称：{identity.display_name}\n"
+            "当前设备：Windows 设备\n"
+            "数据状态：数据保存在本机"
+        )
+        self.account_diagnostics.setText(
             f"资料 ID：{identity.profile_id}\n"
             f"本地身份：{identity.user_id}\n"
-            f"当前设备：{identity.device_id}\n"
+            f"设备 ID：{identity.device_id}\n"
             f"数据目录：{self.runtime.paths.root}"
         )
         if not hasattr(self, "account_connection_summary"):
@@ -1502,6 +1589,7 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.runtime.paths.root)))
 
     def _inspect_cloud_profiles(self) -> None:
+        self._set_settings_action_busy(self.inspect_cloud_profiles_button, "正在检查…")
         try:
             self.cloud = CloudBackupService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
@@ -1519,9 +1607,13 @@ class MainWindow(QMainWindow):
                 lines.append("检测到另一设备已更新当前资料：已暂停上传，需恢复或合并确认。")
             if not profiles:
                 lines.append("云端尚无资料快照。")
-            self.account_remote_summary.setText("\n".join(lines))
+            self.account_remote_summary.setText(
+                "\n".join(lines) + "\n最后检查：" + QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm")
+            )
         except DomainError as exc:
             self.account_remote_summary.setText(f"无法读取云端资料：{exc}")
+        finally:
+            self._set_settings_action_idle(self.inspect_cloud_profiles_button, "查看云端资料")
 
     def _restore_cloud_profile(self) -> None:
         try:
@@ -3077,6 +3169,7 @@ class MainWindow(QMainWindow):
     def _backup(self) -> None:
         try:
             dest = self.services.create_backup()
+            self._set_local_backup_summary(Path(dest), "ZIP 本机备份")
             self._show_operation_result(
                 "备份完成",
                 "本机备份已生成。",
@@ -3102,6 +3195,7 @@ class MainWindow(QMainWindow):
             return
         try:
             dest = self.ebpack.export_ebpack(Path(path))
+            self._set_local_backup_summary(Path(dest), "完整 .ebpack 备份")
             self._show_operation_result(
                 "完整备份包导出完成",
                 "ebpack 已生成。",
@@ -3115,6 +3209,18 @@ class MainWindow(QMainWindow):
                 retry=self._export_ebpack,
                 is_error=True,
             )
+
+    def _set_local_backup_summary(self, path: Path, kind: str) -> None:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            self.local_backup_summary.setText(f"最近备份：{kind}（文件大小暂不可读取）")
+            return
+        self.local_backup_summary.setText(
+            f"最近备份：{kind} · {size / 1024 / 1024:.1f} MB · "
+            f"{QDateTime.currentDateTime().toString('yyyy-MM-dd HH:mm')}\n"
+            "包含本地数据库、附件与可恢复元数据。"
+        )
 
     def _import_ebpack(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -3214,6 +3320,7 @@ class MainWindow(QMainWindow):
             )
 
     def _cloud_backup(self) -> None:
+        self._set_settings_action_busy(self.cloud_backup_button, "正在备份…")
         try:
             self.cloud = CloudBackupService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
@@ -3237,6 +3344,8 @@ class MainWindow(QMainWindow):
                 retry=self._cloud_backup,
                 is_error=True,
             )
+        finally:
+            self._set_settings_action_idle(self.cloud_backup_button, "云备份")
 
     def _cloud_restore(self) -> None:
         target = QFileDialog.getExistingDirectory(
@@ -3244,6 +3353,7 @@ class MainWindow(QMainWindow):
         )
         if not target:
             return
+        self._set_settings_action_busy(self.cloud_restore_button, "正在恢复…")
         try:
             self.cloud = CloudBackupService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
@@ -3286,8 +3396,11 @@ class MainWindow(QMainWindow):
                 retry=self._cloud_restore,
                 is_error=True,
             )
+        finally:
+            self._set_settings_action_idle(self.cloud_restore_button, "云恢复")
 
     def _sync_push(self) -> None:
+        self._set_settings_action_busy(self.sync_push_button, "正在推送…")
         try:
             self.sync = SyncService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
@@ -3306,8 +3419,11 @@ class MainWindow(QMainWindow):
                 retry=self._sync_push,
                 is_error=True,
             )
+        finally:
+            self._set_settings_action_idle(self.sync_push_button, "推送增量")
 
     def _sync_pull(self) -> None:
+        self._set_settings_action_busy(self.sync_pull_button, "正在拉取…")
         try:
             self.sync = SyncService(
                 self.runtime, get_cloud_provider(self.runtime.settings)
@@ -3341,6 +3457,8 @@ class MainWindow(QMainWindow):
                 retry=self._sync_pull,
                 is_error=True,
             )
+        finally:
+            self._set_settings_action_idle(self.sync_pull_button, "拉取合并")
 
     def _restore_backup(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -3371,20 +3489,19 @@ class MainWindow(QMainWindow):
                 retry=self._restore_backup,
                 is_error=True,
             )
-
     def _open_settings(self) -> None:
         self._show_navigation_page(_PAGE_SETTINGS)
-        self.settings_tabs.setCurrentIndex(1)
+        self.settings_nav.setCurrentRow(1)
         self._refresh_focus_pages()
 
     def _rebuild_search_index(self) -> None:
+        self._set_settings_action_busy(self.rebuild_search_button, "正在重建…")
         self.search_index_summary.setText("正在检查并重建本地索引…")
         self.status.showMessage("正在重建本地搜索索引")
         QApplication.processEvents()
         try:
             count = self.search.rebuild()
-            health = self.search.check_consistency()
-            self.search_index_summary.setText(health.summary)
+            health = self._refresh_search_index_summary()
             if self.search_edit.text().strip():
                 self.refresh_problems()
             self._show_status_toast(
@@ -3394,6 +3511,37 @@ class MainWindow(QMainWindow):
             self.search_index_summary.setText(f"重建失败：{exc}")
             self.status.showMessage("本地搜索索引重建失败", 5000)
             QMessageBox.warning(self, "搜索索引重建失败", str(exc))
+        finally:
+            self._set_settings_action_idle(self.rebuild_search_button, "检查并重建索引")
+
+    def _check_search_index(self) -> None:
+        self._set_settings_action_busy(self.check_search_button, "正在检查…")
+        try:
+            self._refresh_search_index_summary()
+            self._show_status_toast("本地搜索索引检查完成")
+        except Exception as exc:  # noqa: BLE001
+            self.search_index_summary.setText(f"索引检查失败：{exc}")
+        finally:
+            self._set_settings_action_idle(self.check_search_button, "检查索引")
+
+    def _refresh_search_index_summary(self) -> SearchIndexHealth:
+        health = self.search.check_consistency()
+        self.search_index_summary.setText(
+            f"索引状态：{health.summary}\n"
+            "最后检查：" + QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm")
+        )
+        return health
+
+    @staticmethod
+    def _set_settings_action_busy(button: QPushButton, text: str) -> None:
+        button.setEnabled(False)
+        button.setText(text)
+        QApplication.processEvents()
+
+    @staticmethod
+    def _set_settings_action_idle(button: QPushButton, text: str) -> None:
+        button.setEnabled(True)
+        button.setText(text)
 
     def _ai_recognize(self) -> None:
         ids = self._selected_ids()
