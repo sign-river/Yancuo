@@ -19,6 +19,16 @@ python tools/performance_baseline.py --samples 5
 样本数、中位数、范围与 Tukey 异常值。冷启动表示新解释器内的第一次
 `bootstrap_runtime`，不会尝试清空操作系统文件缓存。
 
+## `sync_release_matrix.py`
+
+发布前从仓库根目录运行：
+
+```powershell
+python tools/sync_release_matrix.py
+```
+
+该入口只使用临时数据目录和测试内的 LocalFolder/GitHub 模拟实现，不读取真实用户资料，也不访问远端仓库。它覆盖完整 `.ebpack` 快照的发布失败、校验与恢复回滚，以及 LocalFolder/GitHub Operation 的重复拉取、附件篡改、配置索引异常和跨资料档案隔离。
+
 ## `probe_gitlink.py`
 
 运行：
