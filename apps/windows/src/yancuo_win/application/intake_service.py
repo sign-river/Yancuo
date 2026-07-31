@@ -14,6 +14,7 @@ dedicated intake tables without changing this public workflow API.
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1757,7 +1758,10 @@ class ProblemIntakeService:
                 with self.runtime.session_factory() as session:
                     stored = session.get(Problem, problem.id)
                     if stored is not None:
-                        stored.question_content_json = json.dumps(content_blocks, ensure_ascii=False)
+                        stored.question_content_json = json.dumps(
+                            self._materialize_figure_assets(session, stored, content_blocks),
+                            ensure_ascii=False,
+                        )
                         session.commit()
             with self.runtime.session_factory() as session:
                 current = session.get(
@@ -1827,6 +1831,38 @@ class ProblemIntakeService:
         if committed is None:
             raise DomainError("题目入库失败")
         return committed
+
+    def _materialize_figure_assets(self, session, problem: Problem, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Create immutable derived crops; never replace the original source asset."""
+        originals = sorted((asset for asset in problem.assets if asset.role == "original"), key=lambda asset: (asset.created_at, asset.id))
+        result: list[dict[str, Any]] = []
+        for block in blocks:
+            copied, region = dict(block), normalize_region(block.get("source_region"))
+            index = int(copied.get("source_image_index", 0))
+            if copied.get("type") != "figure" or not region or not 0 <= index < len(originals):
+                result.append(copied)
+                continue
+            source = originals[index]
+            image = QImage(str(self.store.resolve(source.relative_path)))
+            if image.isNull():
+                result.append(copied)
+                continue
+            rect = QRect(round(image.width() * region["x"]), round(image.height() * region["y"]), max(1, round(image.width() * region["width"])), max(1, round(image.height() * region["height"]))).intersected(image.rect())
+            crop = image.copy(rect)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+                temp_path = Path(handle.name)
+            try:
+                if not crop.save(str(temp_path), "PNG"):
+                    result.append(copied)
+                    continue
+                derived = self.store.store_copy(temp_path, role="derived_figure")
+            finally:
+                temp_path.unlink(missing_ok=True)
+            asset = Asset(id=new_id("asset"), role="derived_figure", sha256=derived.sha256, relative_path=derived.relative_path, mime_type=derived.mime_type, size_bytes=derived.size_bytes, width=crop.width(), height=crop.height(), is_immutable=True)
+            problem.assets.append(asset)
+            copied.update(derived_asset_id=asset.id, source_asset_id=source.id)
+            result.append(copied)
+        return result
 
     def reject_ai_candidate(self, review_item_id: str) -> None:
         with self.runtime.session_factory() as session:
