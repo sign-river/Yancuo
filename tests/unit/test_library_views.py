@@ -313,6 +313,22 @@ def test_problem_detail_toolbar_groups_actions_and_keeps_priority_controls(
     assert page._toolbar_priority_layout.itemAt(2).widget() is page.management_group
 
 
+def test_service_settings_use_a_compact_aligned_form_surface(
+    window: MainWindow,
+) -> None:
+    ai_settings = window.ai_settings_page
+    appearance_settings = window.appearance_settings_page
+    cloud_settings = window.cloud_settings_page
+
+    for page in (ai_settings, appearance_settings, cloud_settings):
+        assert page.settings_content.maximumWidth() == 800
+
+    assert all(button.isCheckable() for button in appearance_settings.theme_buttons.values())
+    assert ai_settings.fetch_ai_models.parentWidget() is ai_settings.ai_model.parentWidget()
+    assert ai_settings.clear_ai_button.objectName() == "DangerButton"
+    assert cloud_settings.clear_cloud_token_button.objectName() == "DangerButton"
+
+
 def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
     window: MainWindow,
 ) -> None:

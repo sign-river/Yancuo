@@ -1120,6 +1120,33 @@ def app_stylesheet(theme: str = "light") -> str:
     QFrame#StateNotice[state="permission"] QLabel {{
         color: {t.fallback_text};
     }}
+    QFrame#CompactStateNotice {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.divider};
+        border-radius: {m.radius_control}px;
+    }}
+    QFrame#CompactStateNotice[state="loading"] {{
+        background: {t.progress_bg};
+        border-color: {t.focus_ring};
+    }}
+    QFrame#CompactStateNotice[state="success"] {{
+        background: {t.chip_bg};
+        border-color: {t.focus_ring};
+    }}
+    QFrame#CompactStateNotice[state="error"] {{
+        background: {t.danger_bg};
+        border-color: {t.danger_border};
+    }}
+    QFrame#CompactStateNotice[state="error"] QLabel {{
+        color: {t.danger};
+    }}
+    QFrame#CompactStateNotice[state="disabled"] {{
+        background: {t.input_disabled};
+        border-color: {t.border};
+    }}
+    QFrame#CompactStateNotice[state="disabled"] QLabel {{
+        color: {t.muted};
+    }}
     QFrame#SkeletonLineLong, QFrame#SkeletonLineShort {{
         background: {t.input_disabled};
         border: none;

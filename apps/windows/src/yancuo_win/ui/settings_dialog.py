@@ -49,6 +49,7 @@ from yancuo_win.ui.widgets import (
     PageHeader,
     StateNotice,
     button_row,
+    danger_button,
     describe_field,
     primary_button,
     set_tab_order_chain,
@@ -67,6 +68,27 @@ class ServiceSettingsPage(QWidget):
         "appearance": ("外观与显示", "调整应用主题与界面呈现方式。"),
         "cloud": ("云端同步", "配置用于备份和同步的云端提供商与凭据。"),
     }
+
+    @staticmethod
+    def _settings_form() -> QFormLayout:
+        form = QFormLayout()
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
+        return form
+
+    @staticmethod
+    def _save_row(button: QPushButton) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 2, 0, 0)
+        row.addStretch(1)
+        row.addWidget(button)
+        return row
 
     def __init__(self, runtime: RuntimeContext, section: str, parent=None) -> None:
         super().__init__(parent)
@@ -94,10 +116,11 @@ class ServiceSettingsPage(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         body = QWidget()
         body.setObjectName("SettingsContent")
-        body.setMaximumWidth(1080)
+        body.setMaximumWidth(800)
+        self.settings_content = body
         layout = QVBoxLayout(body)
-        layout.setSpacing(12)
-        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(14)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout = layout
 
         s = runtime.settings
@@ -107,9 +130,7 @@ class ServiceSettingsPage(QWidget):
             appearance.setProperty("surfaceRole", "settings")
             appearance.add_title("主题")
             appearance.add_hint("可跟随 Windows，也可固定使用浅色或深色；保存后立即应用。")
-            appearance_form = QFormLayout()
-            appearance_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            appearance_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+            appearance_form = self._settings_form()
             self.theme_mode = QComboBox()
             describe_field(self.theme_mode, "主题模式")
             self.theme_mode.addItem("跟随系统", "system")
@@ -169,7 +190,7 @@ class ServiceSettingsPage(QWidget):
             appearance.body.addLayout(appearance_form)
             self.apply_theme_button = primary_button("保存更改")
             self.apply_theme_button.clicked.connect(self._apply_theme)
-            appearance.body.addLayout(button_row(self.apply_theme_button))
+            appearance.body.addLayout(self._save_row(self.apply_theme_button))
             set_tab_order_chain(
                 self.theme_mode,
                 self.preview_zoom,
@@ -180,14 +201,12 @@ class ServiceSettingsPage(QWidget):
         # —— AI ——
         ai_card = CardFrame()
         ai_card.setProperty("surfaceRole", "settings")
-        ai_card.add_title("AI（Faro / OpenAI 兼容）")
+        ai_card.add_title("服务商配置")
         ai_card.add_hint(
             "默认直连 Faro API。密钥只进系统凭据；可从 API 获取模型列表，"
             "也可手动输入模型 ID，并请确认支持图片输入。"
         )
-        ai_form = QFormLayout()
-        ai_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        ai_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        ai_form = self._settings_form()
         self.ai_provider = QComboBox()
         describe_field(self.ai_provider, "AI 提供商")
         self.ai_provider.addItem("Faro API（真实识图）", "openai_compatible")
@@ -216,12 +235,22 @@ class ServiceSettingsPage(QWidget):
         self.ai_model.lineEdit().setPlaceholderText(
             "从 API 获取或手动输入支持图片的模型 ID"
         )
-        ai_form.addRow("图片模型 ID", self.ai_model)
+        self.fetch_ai_models = QPushButton("刷新模型")
+        self.fetch_ai_models.clicked.connect(self._fetch_ai_models)
+        ai_model_control = QWidget()
+        ai_model_row = QHBoxLayout(ai_model_control)
+        ai_model_row.setContentsMargins(0, 0, 0, 0)
+        ai_model_row.setSpacing(6)
+        ai_model_row.addWidget(self.ai_model, stretch=1)
+        ai_model_row.addWidget(self.fetch_ai_models)
+        ai_form.addRow("图片模型 ID", ai_model_control)
         self._add_field_error(ai_form, "ai_model")
         self.ai_model_status = StateNotice(
             "可从 API 获取账户可用模型；请自行确认支持图片输入。",
             "info",
         )
+        self.ai_model_status.setObjectName("CompactStateNotice")
+        self.ai_model_status.layout().setContentsMargins(8, 4, 8, 4)
         ai_form.addRow("", self.ai_model_status)
 
         self._ai_cred_key = (
@@ -233,7 +262,15 @@ class ServiceSettingsPage(QWidget):
             or "yancuo_ai_api_key"
         )
         self.ai_token_status = QLabel(mask_secret(get_secret(self._ai_cred_key)))
-        ai_form.addRow("AI 密钥状态", self.ai_token_status)
+        self.clear_ai_button = danger_button("清除 AI 密钥")
+        self.clear_ai_button.clicked.connect(self._clear_ai_token)
+        ai_token_status_control = QWidget()
+        ai_token_status_row = QHBoxLayout(ai_token_status_control)
+        ai_token_status_row.setContentsMargins(0, 0, 0, 0)
+        ai_token_status_row.setSpacing(6)
+        ai_token_status_row.addWidget(self.ai_token_status, stretch=1)
+        ai_token_status_row.addWidget(self.clear_ai_button)
+        ai_form.addRow("密钥配置", ai_token_status_control)
         self.ai_token_edit = QLineEdit()
         describe_field(self.ai_token_edit, "新 AI 密钥")
         self.ai_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -255,24 +292,19 @@ class ServiceSettingsPage(QWidget):
         self._add_field_error(ai_form, "ai_token")
         ai_card.body.addLayout(ai_form)
 
-        self.clear_ai_button = QPushButton("清除 AI 密钥")
-        self.clear_ai_button.clicked.connect(self._clear_ai_token)
         self.test_ai_button = QPushButton("测试 Faro 连接")
         self.test_ai_button.clicked.connect(self._test_ai_connection)
-        self.fetch_ai_models = QPushButton("刷新模型")
-        self.fetch_ai_models.clicked.connect(self._fetch_ai_models)
         self.apply_ai_button = primary_button("保存更改")
         self.apply_ai_button.clicked.connect(self._apply_ai_session)
-        ai_card.body.addLayout(
-            button_row(
-                self.clear_ai_button,
-                self.fetch_ai_models,
-                self.test_ai_button,
-            )
-        )
-        ai_card.body.addLayout(button_row(self.apply_ai_button))
         self.ai_connection_notice = StateNotice("尚未测试连接。", "disabled")
-        ai_card.body.addWidget(self.ai_connection_notice)
+        self.ai_connection_notice.setObjectName("CompactStateNotice")
+        self.ai_connection_notice.layout().setContentsMargins(8, 4, 8, 4)
+        ai_connection_row = QHBoxLayout()
+        ai_connection_row.setSpacing(8)
+        ai_connection_row.addWidget(self.ai_connection_notice, stretch=1)
+        ai_connection_row.addWidget(self.test_ai_button)
+        ai_card.body.addLayout(ai_connection_row)
+        ai_card.body.addLayout(self._save_row(self.apply_ai_button))
         set_tab_order_chain(
             self.ai_provider,
             self.ai_model,
@@ -288,11 +320,9 @@ class ServiceSettingsPage(QWidget):
         # —— 云端 ——
         cloud_card = CardFrame()
         cloud_card.setProperty("surfaceRole", "settings")
-        cloud_card.add_title("云端连接")
+        cloud_card.add_title("连接设置")
         cloud_card.add_hint("完整备份/迁移；令牌不写入 TOML。")
-        cloud_form = QFormLayout()
-        cloud_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        cloud_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        cloud_form = self._settings_form()
         self.cloud_form = cloud_form
         self.provider = QComboBox()
         describe_field(self.provider, "云端提供商")
@@ -320,11 +350,16 @@ class ServiceSettingsPage(QWidget):
 
         self.local_root = QLineEdit(_default_local_root(runtime))
         describe_field(self.local_root, "本地云目录")
-        cloud_form.addRow("本地云目录", self.local_root)
-        self._add_field_error(cloud_form, "cloud_root")
         self.browse_local_button = QPushButton("浏览…")
         self.browse_local_button.clicked.connect(self._browse_local)
-        cloud_form.addRow("", self.browse_local_button)
+        local_root_control = QWidget()
+        local_root_row = QHBoxLayout(local_root_control)
+        local_root_row.setContentsMargins(0, 0, 0, 0)
+        local_root_row.setSpacing(6)
+        local_root_row.addWidget(self.local_root, stretch=1)
+        local_root_row.addWidget(self.browse_local_button)
+        cloud_form.addRow("本地云目录", local_root_control)
+        self._add_field_error(cloud_form, "cloud_root")
 
         self.token_label = QLabel("令牌")
         self.token_status = QLabel("")
@@ -352,19 +387,19 @@ class ServiceSettingsPage(QWidget):
         cloud_form.addRow("", self.cloud_permission_notice)
         cloud_card.body.addLayout(cloud_form)
 
-        self.clear_cloud_token_button = QPushButton("清除云令牌")
+        self.clear_cloud_token_button = danger_button("清除云令牌")
         self.clear_cloud_token_button.clicked.connect(self._clear_token)
         self.test_cloud_button = QPushButton("测试云连接")
         self.test_cloud_button.clicked.connect(self._test_cloud)
         self.apply_cloud_button = primary_button("保存更改")
         self.apply_cloud_button.clicked.connect(self._save_cloud_settings)
-        cloud_card.body.addLayout(
-            button_row(
-                self.clear_cloud_token_button,
-                self.test_cloud_button,
-            )
-        )
-        cloud_card.body.addLayout(button_row(self.apply_cloud_button))
+        cloud_actions = QHBoxLayout()
+        cloud_actions.setSpacing(8)
+        cloud_actions.addWidget(self.clear_cloud_token_button)
+        cloud_actions.addWidget(self.test_cloud_button)
+        cloud_actions.addStretch(1)
+        cloud_actions.addWidget(self.apply_cloud_button)
+        cloud_card.body.addLayout(cloud_actions)
         set_tab_order_chain(
             self.provider,
             self.owner_edit,
@@ -390,6 +425,9 @@ class ServiceSettingsPage(QWidget):
         layout.addStretch(1)
 
         scroll.setWidget(body)
+        scroll.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        )
         outer.addWidget(scroll, stretch=1)
 
         if section == "cloud":
