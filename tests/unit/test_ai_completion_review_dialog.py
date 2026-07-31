@@ -1,0 +1,68 @@
+"""UI-116 coverage for the staged AI completion review flow."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from PySide6.QtWidgets import QApplication
+
+from yancuo_win.ui.review_dialog import ReviewDialog
+
+
+class _AIStub:
+    def __init__(self) -> None:
+        self.item = SimpleNamespace(id="internal-review-id")
+        self.applied: dict[str, str] | None = None
+        self.undone: list[str] | None = None
+
+    def list_open_review_items(self):
+        return [self.item]
+
+    def list_jobs(self, *, limit: int):
+        assert limit == 1
+        return []
+
+    def review_presentation(self, item_id: str):
+        assert item_id == self.item.id
+        return {
+            "title": "极限练习",
+            "source": "AI 补全建议",
+            "status": "等待确认",
+            "diffs": [{"field": "title", "before": "", "after": "极限练习"}],
+            "warnings": ["题干：请核对符号"],
+        }
+
+    def apply_review_decisions(self, decisions):
+        self.applied = decisions
+        return {"accepted_problem_ids": ["problem-private-id"], "rejected_item_ids": []}
+
+    def undo_review_accepts(self, problem_ids):
+        self.undone = problem_ids
+        return len(problem_ids)
+
+
+def test_review_dialog_stages_decisions_and_hides_internal_identifiers(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    ai = _AIStub()
+    dialog = ReviewDialog(ai, SimpleNamespace())
+    dialog._begin_review()
+    dialog.list.setCurrentRow(0)
+
+    assert "internal-review-id" not in dialog.list.item(0).text()
+    assert "problem-private-id" not in dialog.meta.text()
+    assert not dialog.apply_button.isEnabled()
+
+    dialog._decide("accept")
+    assert ai.applied is None
+    assert dialog.apply_button.isEnabled()
+
+    monkeypatch.setattr(
+        "yancuo_win.ui.review_dialog.ConfirmDialog.ask", lambda *_args: True
+    )
+    dialog._apply()
+    assert ai.applied == {"internal-review-id": "accept"}
+    assert dialog.complete_summary.text().startswith("已采纳 1 项")
+
+    dialog._undo()
+    assert ai.undone == ["problem-private-id"]
+    dialog.close()

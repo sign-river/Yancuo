@@ -140,6 +140,33 @@ def test_mock_recognize_review_accept_reject_undo(
     assert undone.question_markdown == old_q
 
 
+def test_review_decisions_wait_for_final_apply_and_return_safe_presentation(
+    services: AppServices, ai: AIService, tmp_path: Path
+) -> None:
+    image = tmp_path / "final-apply.jpg"
+    image.write_bytes(b"\xff\xd8\xfffinal-apply")
+    problem_id = services.import_images([image])["created"][0]
+    before = services.get_problem(problem_id)
+    assert before is not None
+
+    job = ai.create_structure_job([problem_id])
+    ai.run_job(job.id)
+    item = ai.list_review_items_for_job(job.id)[0]
+    card = ai.review_presentation(item.id)
+    assert card["source"] == "AI 补全建议"
+    assert problem_id not in str(card)
+    assert "relative_path" not in str(card)
+
+    # Recording a decision itself must leave the formal problem untouched.
+    assert services.get_problem(problem_id).revision == before.revision  # type: ignore[union-attr]
+    result = ai.apply_review_decisions({item.id: "accept"})
+    assert result["accepted_problem_ids"] == [problem_id]
+    assert services.get_problem(problem_id).revision == before.revision + 1  # type: ignore[union-attr]
+
+    assert ai.undo_review_accepts(result["accepted_problem_ids"]) == 1
+    assert services.get_problem(problem_id).revision == before.revision + 2  # type: ignore[union-attr]
+
+
 def test_ai_cannot_delete_and_filters_forbidden_fields() -> None:
     with pytest.raises(DomainError):
         validate_and_filter_proposal(

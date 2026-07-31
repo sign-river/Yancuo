@@ -1485,6 +1485,74 @@ class AIService:
             )
             s.commit()
 
+    def review_presentation(self, review_item_id: str) -> dict[str, Any]:
+        """Return a user-facing review card without storage implementation details."""
+
+        item = self.get_review_item(review_item_id)
+        if item is None:
+            raise DomainError("审核项不存在")
+        problem = None
+        with self.session() as s:
+            problem = s.get(Problem, item.problem_id)
+            session = s.get(ReviewSession, item.session_id)
+            source = session.source if session else "external"
+            if problem:
+                s.expunge(problem)
+        try:
+            proposed = json.loads(item.proposed_json)
+            uncertain = json.loads(item.uncertain_json)
+        except json.JSONDecodeError as exc:
+            raise DomainError("审核建议无法读取") from exc
+        if not isinstance(proposed, dict) or not isinstance(uncertain, list):
+            raise DomainError("审核建议格式不正确")
+
+        source_labels = {
+            "ai": "AI 补全建议",
+            "workspace": "导入建议",
+            "sync": "同步建议",
+        }
+        warnings = []
+        for value in uncertain:
+            if not isinstance(value, dict):
+                continue
+            field = str(value.get("field") or "部分内容")
+            reason = str(value.get("reason") or "需要人工确认")
+            warnings.append(f"{field}：{reason}")
+        return {
+            "title": str(proposed.get("title") or (problem.title if problem else "未命名题目")),
+            "source": source_labels.get(source, "待确认建议"),
+            "status": "存在并发变更" if item.status == "conflict" else "等待确认",
+            "diffs": self.review_diffs(review_item_id),
+            "warnings": warnings,
+        }
+
+    def apply_review_decisions(self, decisions: dict[str, str]) -> dict[str, list[str]]:
+        """Materialize explicit human decisions only when the final apply step runs."""
+
+        accepted: list[str] = []
+        rejected: list[str] = []
+        for item_id, decision in decisions.items():
+            if decision == "accept":
+                self.accept_review_item(item_id)
+                item = self.get_review_item(item_id)
+                if item:
+                    accepted.append(item.problem_id)
+            elif decision == "reject":
+                self.reject_review_item(item_id)
+                rejected.append(item_id)
+            else:
+                raise DomainError("审核决定无效")
+        return {"accepted_problem_ids": accepted, "rejected_item_ids": rejected}
+
+    def undo_review_accepts(self, problem_ids: list[str]) -> int:
+        """Undo accepted AI changes from one completed review run."""
+
+        undone = 0
+        for problem_id in dict.fromkeys(problem_ids):
+            self.undo_last_ai_accept(problem_id)
+            undone += 1
+        return undone
+
     def undo_last_ai_accept(self, problem_id: str) -> None:
         """撤销最近一次已接受的 AI 变更，恢复到接受前快照。"""
         from yancuo_win.application.sync_service import SyncService, sync_snapshot
