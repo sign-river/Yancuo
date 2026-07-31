@@ -224,3 +224,15 @@ def test_note_session_completes_and_skips_trashed_notes(monkeypatch) -> None:
     page.start_session()
     assert page.stack.currentWidget() is page.home_page
     page.close()
+
+
+def test_session_shortcut_hints_match_the_active_content_type(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    page = review_page_module.ReviewPage(_ServicesStub())
+    page.plan_combo.setCurrentIndex(0)
+    page.start_session()
+
+    assert "Right 暂时跳过" in page.keyboard_hint.text()
+    assert page.keyboard_hint.accessibleDescription() == page.keyboard_hint.text()
+    page.close()

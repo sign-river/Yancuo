@@ -728,7 +728,7 @@ class ReviewPage(QWidget):
 
     def _render(self) -> None:
         if self._content_type == "note":
-            self.keyboard_hint.setText("键盘：Enter 标记已阅读并继续。")
+            self._set_keyboard_hint("键盘：Enter 标记已阅读并继续。")
             note = self._current_note()
             self.grade_card.setVisible(False)
             self.detail_button.setVisible(False)
@@ -751,7 +751,9 @@ class ReviewPage(QWidget):
             )
             return
         problem = self._current()
-        self.keyboard_hint.setText("键盘：Space 显示或隐藏答案；1-5 评分；Left/Right 切换题目。")
+        self._set_keyboard_hint(
+            "键盘：Space 显示或隐藏答案；1-5 评分；Left 上一题；Right 暂时跳过并进入下一题。"
+        )
         self.grade_card.setVisible(True)
         self.detail_button.setVisible(True)
         self.note_complete_button.setVisible(False)
@@ -800,6 +802,11 @@ class ReviewPage(QWidget):
             tag_names=[tag.name for tag in (problem.tags or [])],
             include_answers=self._answer_visible,
         )
+
+    def _set_keyboard_hint(self, text: str) -> None:
+        """Keep the visual shortcut legend and screen-reader wording identical."""
+        self.keyboard_hint.setText(text)
+        self.keyboard_hint.setAccessibleDescription(text)
 
     def _complete_note(self) -> None:
         if not self._note_queue:
