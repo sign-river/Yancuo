@@ -749,9 +749,16 @@ class ProblemIntakeService:
         *,
         keywords: str = "",
     ) -> str:
-        """Extract only a user's written answer from one selected image."""
+        return self.recognize_user_answer_images([image_path], keywords=keywords)
 
-        if not image_path.is_file():
+    def recognize_user_answer_images(
+        self, image_paths: list[Path], *, keywords: str = ""
+    ) -> str:
+        """Extract one ordered user answer from one or more source images."""
+
+        if not image_paths:
+            raise DomainError("请先选择包含作答的图片")
+        if any(not path.is_file() for path in image_paths):
             raise DomainError("作答图片不存在")
         provider = get_provider(self.runtime.settings)
         provider.validate_configuration()
@@ -763,8 +770,8 @@ class ProblemIntakeService:
         )
         if keywords.strip():
             prompt += "\n用户提供的定位关键词：" + keywords.strip()
-        result = provider.structure_from_image(
-            image_path=str(image_path),
+        result = provider.structure_from_images(
+            image_paths=[str(path) for path in image_paths],
             prompt=prompt,
             model=self.runtime.settings.ai.default_vision_model,
             timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,

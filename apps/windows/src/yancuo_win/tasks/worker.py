@@ -115,19 +115,19 @@ class UserAnswerRecognitionWorker(QThread):
     def __init__(
         self,
         intake: ProblemIntakeService,
-        image_path: str,
+        image_paths: list[str],
         keywords: str,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.intake = intake
-        self.image_path = image_path
+        self.image_paths = image_paths
         self.keywords = keywords
 
     def run(self) -> None:
         try:
-            answer = self.intake.recognize_user_answer_image(
-                Path(self.image_path), keywords=self.keywords
+            answer = self.intake.recognize_user_answer_images(
+                [Path(value) for value in self.image_paths], keywords=self.keywords
             )
             self.finished_ok.emit(answer)
         except Exception as exc:  # noqa: BLE001

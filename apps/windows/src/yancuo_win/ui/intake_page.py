@@ -940,6 +940,7 @@ class IntakePage(QWidget):
         self.region_worker: RegionRecognitionWorker | None = None
         self.answer_recognition_worker: UserAnswerRecognitionWorker | None = None
         self.answer_image: Path | None = None
+        self.answer_images: list[Path] = []
         self._ai_image_viewer: ImageViewerDialog | None = None
         self._answer_image_viewer: ImageViewerDialog | None = None
         self.ai_candidates: list[IntakeCandidate] = []
@@ -1407,23 +1408,33 @@ class IntakePage(QWidget):
         answer_actions = QVBoxLayout()
         self.answer_image_actions = answer_actions
         choose = primary_button("选择图片")
-        choose.setFixedWidth(240)
         choose.clicked.connect(self._choose_answer_image)
+        remove = QPushButton("移除选中")
+        remove.clicked.connect(self._remove_answer_images)
         answer_actions.addWidget(choose)
-        self.answer_image_name = QLabel("尚未选择图片")
-        self.answer_image_name.setObjectName("MutedLabel")
-        self.answer_image_name.setWordWrap(True)
-        self.answer_image_name.setMaximumWidth(240)
-        answer_actions.addWidget(self.answer_image_name)
+        answer_actions.addWidget(remove)
         answer_actions.addStretch(1)
         answer_image_row.addLayout(answer_actions)
-        self.answer_image_preview = ClickableImagePreviewLabel(
-            "选择作答图片后将在这里预览"
-        )
-        self.answer_image_preview.setFixedSize(240, 160)
-        self.answer_image_preview.clicked.connect(self._toggle_answer_image_viewer)
-        answer_image_row.addWidget(self.answer_image_preview)
-        answer_image_row.addStretch(1)
+        self.answer_image_list = QListWidget()
+        self.answer_image_list.setObjectName("AnswerImageList")
+        self.answer_image_list.setAccessibleName("待识别作答图片")
+        self.answer_image_list.setViewMode(QListView.ViewMode.IconMode)
+        self.answer_image_list.setFlow(QListView.Flow.LeftToRight)
+        self.answer_image_list.setWrapping(False)
+        self.answer_image_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.answer_image_list.setMovement(QListView.Movement.Static)
+        self.answer_image_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.answer_image_list.setIconSize(QSize(144, 104))
+        self.answer_image_list.setGridSize(QSize(170, 138))
+        self.answer_image_list.setFixedHeight(156)
+        self.answer_image_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.answer_image_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.answer_image_list.itemClicked.connect(self._toggle_answer_image_viewer)
+        answer_image_row.addWidget(self.answer_image_list, stretch=1, alignment=Qt.AlignmentFlag.AlignTop)
+        # Retain these fields while callers migrate to the ordered image list.
+        self.answer_image_preview = None
+        self.answer_image_name = QLabel()
+        self.answer_image_name.hide()
         source.body.addLayout(answer_image_row)
         layout.addWidget(source)
 
@@ -1490,23 +1501,36 @@ class IntakePage(QWidget):
         self.ai_result_tabs.setCurrentIndex(1)
 
     def _choose_answer_image(self) -> None:
-        selected, _ = QFileDialog.getOpenFileName(
+        selected, _ = QFileDialog.getOpenFileNames(
             self,
             "选择作答图片",
             "",
             "Images (*.png *.jpg *.jpeg *.webp);;All (*.*)",
         )
-        if not selected:
+        for value in selected:
+            path = Path(value)
+            if path in self.answer_images:
+                continue
+            pixmap = QPixmap(str(path))
+            if pixmap.isNull():
+                continue
+            self.answer_images.append(path)
+            item = QListWidgetItem(
+                QIcon(pixmap.scaled(self.answer_image_list.iconSize(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)),
+                path.name,
+            )
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            item.setToolTip(str(path))
+            self.answer_image_list.addItem(item)
+        self.answer_image = self.answer_images[0] if self.answer_images else None
+        if not self.answer_images:
             return
-        self.answer_image = Path(selected)
-        self.answer_image_preview.set_path(self.answer_image)
-        self.answer_image_name.setText(self.answer_image.name)
-        self.answer_recognition_status.setText("图片已选择，可以开始识别。")
+        self.answer_recognition_status.setText(f"已选择 {len(self.answer_images)} 张图片，可以开始识别。")
         self.answer_recognition_result.clear()
         self.answer_apply_button.setEnabled(False)
 
     def _start_answer_recognition(self) -> None:
-        if self.answer_image is None:
+        if not self.answer_images:
             self.answer_recognition_status.setText("请先选择包含作答的图片。")
             self.status_message.emit("请先选择包含作答的图片")
             return
@@ -1521,7 +1545,7 @@ class IntakePage(QWidget):
         self.answer_recognition_status.setText("正在识别作答内容…")
         self.answer_recognition_worker = UserAnswerRecognitionWorker(
             self.intake,
-            str(self.answer_image),
+            [str(path) for path in self.answer_images],
             self.answer_keywords.toPlainText(),
             self,
         )
@@ -1910,17 +1934,24 @@ class IntakePage(QWidget):
             self._ai_image_viewer.close()
             self._ai_image_viewer = None
 
-    def _toggle_answer_image_viewer(self) -> None:
-        if self.answer_image is None:
+    def _remove_answer_images(self) -> None:
+        for row in sorted({self.answer_image_list.row(item) for item in self.answer_image_list.selectedItems()}, reverse=True):
+            self.answer_image_list.takeItem(row)
+            self.answer_images.pop(row)
+        self.answer_image = self.answer_images[0] if self.answer_images else None
+
+    def _toggle_answer_image_viewer(self, item: QListWidgetItem) -> None:
+        if not self.answer_images:
             return
         if self._answer_image_viewer is not None and self._answer_image_viewer.isVisible():
             self._answer_image_viewer.close()
             self._answer_image_viewer = None
             return
-        pixmap = QPixmap(str(self.answer_image))
+        row = self.answer_image_list.row(item)
+        pixmap = QPixmap(str(self.answer_images[row]))
         if pixmap.isNull():
             return
-        viewer = ImageViewerDialog(pixmap, self)
+        viewer = ImageViewerDialog(pixmap, self, image_paths=self.answer_images, image_index=row)
         viewer.finished.connect(
             lambda *_args: setattr(self, "_answer_image_viewer", None)
         )
