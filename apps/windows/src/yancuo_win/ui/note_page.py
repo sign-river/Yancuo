@@ -818,7 +818,6 @@ class NotePage(QWidget):
         middle.setObjectName("NoteLibraryPane")
         self.note_library_pane = middle
         middle.setMinimumWidth(320)
-        middle.setMaximumWidth(480)
         self.space_toggle_button = ghost_button("空间与合集")
         self.space_toggle_button.clicked.connect(self._show_narrow_space)
         self.space_toggle_button.hide()
@@ -894,25 +893,9 @@ class NotePage(QWidget):
         )
         split.addWidget(middle)
 
-        self.empty_card = CardFrame()
-        self.empty_card.setObjectName("NoteEmptyPane")
-        self.empty_card.add_title("选择一篇笔记")
-        self.empty_card.add_hint("双击列表中的笔记以打开阅读和编辑详情。")
-        empty_new = primary_button("新建第一篇笔记")
-        empty_new.clicked.connect(self._show_manual_create)
-        empty_actions = QHBoxLayout()
-        empty_actions.addWidget(empty_new)
-        empty_actions.addStretch(1)
-        self.empty_card.body.addLayout(empty_actions)
-
-        self.detail_stack = QStackedWidget()
-        self.detail_stack.setObjectName("NoteDetailPane")
-        self.detail_stack.addWidget(self.empty_card)
-        split.addWidget(self.detail_stack)
         split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)
-        split.setStretchFactor(2, 4)
-        split.setSizes([220, 380, 820])
+        split.setStretchFactor(1, 4)
+        split.setSizes([220, 1000])
         library_root.addWidget(split, stretch=1)
         self.page_stack.addWidget(self.library_page)
         self.note_detail_page = self._build_detail()
@@ -941,8 +924,7 @@ class NotePage(QWidget):
             self.space_pane.setMaximumWidth(260)
             self.space_pane.show()
             self.note_library_pane.show()
-            self.detail_stack.show()
-            self.workspace.setSizes([220, 380, 820])
+            self.workspace.setSizes([220, 1000])
 
     def _show_narrow_space(self) -> None:
         if not self._narrow_layout:
@@ -951,8 +933,7 @@ class NotePage(QWidget):
         self.space_pane.setMaximumWidth(16777215)
         self.space_pane.show()
         self.note_library_pane.hide()
-        self.detail_stack.hide()
-        self.workspace.setSizes([max(320, self.width()), 0, 0])
+        self.workspace.setSizes([max(320, self.width()), 0])
 
     def _show_narrow_content(self) -> None:
         if not self._narrow_layout:
@@ -960,8 +941,7 @@ class NotePage(QWidget):
         self._narrow_space_open = False
         self.space_pane.hide()
         self.note_library_pane.show()
-        self.detail_stack.show()
-        self.workspace.setSizes([0, 320, max(360, self.width() - 320)])
+        self.workspace.setSizes([0, max(360, self.width())])
 
     def _build_manual_create_page(self) -> QWidget:
         page = QWidget()
@@ -1285,7 +1265,6 @@ class NotePage(QWidget):
         else:
             self._note = None
             self._block = None
-            self.detail_stack.setCurrentIndex(0)
         self._update_bulk_actions()
 
     def _reload_collections(self) -> None:

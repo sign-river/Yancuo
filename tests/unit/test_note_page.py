@@ -71,13 +71,13 @@ def test_note_page_creates_edits_and_reads_blocks(note_page: NotePage) -> None:
     assert "sin x" in note_page.reader.last_blocks[0]["content_latex"]
 
 
-def test_note_library_uses_space_list_detail_hierarchy(note_page: NotePage) -> None:
+def test_note_library_uses_space_and_expanded_list_hierarchy(note_page: NotePage) -> None:
     first = note_page.notes.create_note(title="第一篇", status="active")
     note_page.notes.create_note(title="第二篇", status="active")
 
     note_page.reload(select_note_id=first.id)
 
-    assert note_page.workspace.count() == 3
+    assert note_page.workspace.count() == 2
     assert note_page.workspace.handleWidth() == 10
     assert note_page.workspace.contentsMargins().left() == 8
     assert isinstance(note_page.collection_list.itemDelegate(), SoftItemDelegate)
@@ -177,6 +177,7 @@ def test_note_library_narrow_breakpoint_keeps_list_and_discloses_space(
     assert note_page._narrow_layout
     assert note_page.space_pane.isHidden()
     assert not note_page.note_library_pane.isHidden()
+    assert note_page.workspace.count() == 2
     assert isinstance(note_page.space_back_button, note_page_module.IconButton)
 
 
@@ -188,14 +189,13 @@ def test_narrow_note_layout_discloses_space_separately(note_page: NotePage) -> N
     app.processEvents()
     assert note_page.space_pane.isHidden()
     assert not note_page.note_library_pane.isHidden()
-    assert not note_page.detail_stack.isHidden()
+    assert note_page.workspace.count() == 2
     assert not note_page.space_toggle_button.isHidden()
 
     note_page._show_narrow_space()
     app.processEvents()
     assert not note_page.space_pane.isHidden()
     assert note_page.note_library_pane.isHidden()
-    assert note_page.detail_stack.isHidden()
 
     note_page._show_narrow_content()
     assert note_page.space_pane.isHidden()
