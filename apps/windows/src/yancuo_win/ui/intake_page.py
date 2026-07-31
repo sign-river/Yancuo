@@ -1061,7 +1061,7 @@ class IntakePage(QWidget):
         layout.addWidget(
             self._header(
                 "AI 录题 · 上传",
-                "",
+                "上传题目图片，可补充定位说明；识别结果将在确认后写入题库。",
                 self.dashboard_requested.emit,
             )
         )
