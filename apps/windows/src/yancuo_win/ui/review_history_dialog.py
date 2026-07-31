@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
@@ -38,6 +38,7 @@ class ReviewHistoryDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._previous_focus = parent.focusWidget() if parent is not None else None
         self.setObjectName("ReviewHistoryDialog")
         self.setWindowTitle("复习历史")
         self.setAccessibleName(f"{plan_name}的复习历史")
@@ -65,6 +66,8 @@ class ReviewHistoryDialog(QDialog):
         layout.addWidget(self.details_view)
         self.copy_button = QPushButton("复制详情")
         self.copy_button.setAccessibleName("复制复习历史详情")
+        self.copy_button.setAccessibleDescription("将当前复习历史详情复制到剪贴板")
+        self.copy_button.setToolTip("复制详情")
         self.copy_button.clicked.connect(self._copy_details)
         layout.addWidget(self.copy_button)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -76,6 +79,7 @@ class ReviewHistoryDialog(QDialog):
         set_tab_order_chain(
             self.history_list, self.details_view, self.copy_button, self.close_button
         )
+        self.finished.connect(self._restore_previous_focus)
         self._populate(entries)
 
     def _populate(self, entries: list[ReviewHistoryEntry]) -> None:
@@ -101,3 +105,7 @@ class ReviewHistoryDialog(QDialog):
     def _copy_details(self) -> None:
         QGuiApplication.clipboard().setText(self.details_view.toPlainText())
         self.copy_button.setText("已复制详情")
+
+    def _restore_previous_focus(self, _result: int) -> None:
+        if self._previous_focus is not None and self._previous_focus.isVisible():
+            QTimer.singleShot(0, self._previous_focus.setFocus)

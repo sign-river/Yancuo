@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAccessible
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 import yancuo_win.ui.problem_detail as problem_detail_module
 from yancuo_win.data.models import Problem
@@ -91,6 +91,23 @@ def test_transfer_operation_labels_cover_all_migrated_result_categories() -> Non
         "云端",
         "同步",
     ]
+
+
+def test_transfer_result_restores_focus_to_its_invoker() -> None:
+    app = _application()
+    parent = QWidget()
+    invoker = QPushButton("导入", parent)
+    parent.show()
+    invoker.setFocus()
+    app.processEvents()
+    dialog = TransferResultDialog("导入完成", "资料已导入。", parent=parent)
+
+    dialog.done(0)
+    app.processEvents()
+
+    assert QApplication.focusWidget() is invoker
+    dialog.close()
+    parent.close()
 
 
 def test_problem_detail_keyboard_path_and_accessible_names(

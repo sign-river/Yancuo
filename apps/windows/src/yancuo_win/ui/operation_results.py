@@ -55,10 +55,12 @@ class TransferResultDialog(OperationResultDialog):
             parent=parent,
         )
         self.operation = operation
+        self._previous_focus = parent.focusWidget() if parent is not None else None
         self.setObjectName(f"{operation.label}结果窗口")
         self.setAccessibleName(f"{operation.label}操作结果：{title}")
         self.summary_label.setAccessibleName(f"{operation.label}操作结果摘要")
         self.details_view.setAccessibleName(f"{operation.label}操作结果详情")
+        self.finished.connect(self._restore_previous_focus)
         self.copy_button: QPushButton | None = None
         if not details:
             return
@@ -82,6 +84,10 @@ class TransferResultDialog(OperationResultDialog):
     def _copy_details(self) -> None:
         QGuiApplication.clipboard().setText(self.details_view.toPlainText())
         self.copy_button.setText("已复制详情")
+
+    def _restore_previous_focus(self, _result: int) -> None:
+        if self._previous_focus is not None and self._previous_focus.isVisible():
+            QTimer.singleShot(0, self._previous_focus.setFocus)
 
 
 def show_transfer_result(
