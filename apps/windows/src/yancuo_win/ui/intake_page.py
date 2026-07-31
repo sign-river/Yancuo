@@ -1060,7 +1060,7 @@ class IntakePage(QWidget):
         layout.addWidget(
             self._header(
                 "AI 录题 · 上传",
-                "添加图片并说明目标特征，例如“红圈处是错题”或“只提取第 3 题”。",
+                "",
                 self.dashboard_requested.emit,
             )
         )
@@ -1130,7 +1130,6 @@ class IntakePage(QWidget):
         mode = CardFrame()
         mode.setObjectName("IntakeSecondarySurface")
         mode.add_title("2. 选择识别方式")
-        mode.add_hint("自动模式保持逐图识别；多图一题会按上传顺序将全部图片作为同一次视觉请求发送。")
         self.ai_recognition_mode = QComboBox()
         describe_field(self.ai_recognition_mode, "AI 识别方式")
         self.ai_recognition_mode.addItem("自动（逐图识别，仅提示结构建议）", "auto")
@@ -1143,7 +1142,6 @@ class IntakePage(QWidget):
         prompt = CardFrame()
         prompt.setObjectName("IntakeSecondarySurface")
         prompt.add_title("3. 告诉 AI 如何定位题目")
-        prompt.add_hint("这是本批图片的补充说明；程序仍会强制结构化输出和字段安全规则。")
         self.ai_instruction = QTextEdit()
         describe_field(self.ai_instruction, "AI 题目定位说明")
         self.ai_instruction.setPlaceholderText(
