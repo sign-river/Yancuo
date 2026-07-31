@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 from PySide6.QtCore import (
@@ -400,34 +400,105 @@ class ErrorState(QWidget):
 
 
 class ToastMessage(QFrame):
-    """Non-blocking confirmation for short, reversible success feedback."""
+    """Reusable top-right slide notification with an optional click action."""
+
+    activated = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("ToastMessage")
         self.setAccessibleName("操作反馈")
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.setMinimumWidth(300)
+        self.setMaximumWidth(420)
         self.setVisible(False)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
+        self._on_activated: Callable[[], None] | None = None
+        self._duration_ms = 2800
+        self._remaining_ms = self._duration_ms
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.content = QFrame()
+        self.content.setObjectName("ToastContent")
+        content_layout = QHBoxLayout(self.content)
+        content_layout.setContentsMargins(14, 10, 14, 10)
         self.label = QLabel("")
         self.label.setObjectName("ToastText")
-        layout.addWidget(self.label)
+        self.label.setWordWrap(True)
+        content_layout.addWidget(self.label)
+        self.progress_frame = QFrame()
+        self.progress_frame.setObjectName("ToastProgressFrame")
+        progress_layout = QVBoxLayout(self.progress_frame)
+        progress_layout.setContentsMargins(3, 2, 3, 2)
+        self.progress = QProgressBar()
+        self.progress.setObjectName("ToastProgress")
+        self.progress.setTextVisible(False)
+        self.progress.setInvertedAppearance(True)
+        progress_layout.addWidget(self.progress)
+        layout.addWidget(self.content)
+        layout.addWidget(self.progress_frame)
         self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self.hide)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._advance)
+        self._slide = QPropertyAnimation(self, b"pos", self)
+        self._slide.setDuration(180)
+        self._slide.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-    def show_message(self, message: str, duration_ms: int = 2800) -> None:
+    def show_message(
+        self,
+        message: str,
+        duration_ms: int = 2800,
+        on_activated: Callable[[], None] | None = None,
+    ) -> None:
         parent = self.parentWidget()
         if parent is None:
             return
         self.label.setText(message)
         self.setAccessibleDescription(message)
+        self._on_activated = on_activated
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if on_activated is not None
+            else Qt.CursorShape.ArrowCursor
+        )
+        self._duration_ms = max(600, duration_ms)
+        self._remaining_ms = self._duration_ms
+        self.progress.setRange(0, self._duration_ms)
+        self.progress.setValue(self._remaining_ms)
         self.adjustSize()
-        x = max(12, (parent.width() - self.width()) // 2)
-        self.move(x, 68)
+        target_x = max(12, parent.width() - self.width() - 20)
+        target_y = 48
+        self.move(parent.width() + 8, target_y)
         self.raise_()
         self.show()
-        self._timer.start(duration_ms)
+        self._slide.stop()
+        self._slide.setStartValue(self.pos())
+        self._slide.setEndValue(QPoint(target_x, target_y))
+        self._slide.start()
+        self._timer.start()
+
+    def _advance(self) -> None:
+        self._remaining_ms = max(0, self._remaining_ms - self._timer.interval())
+        self.progress.setValue(self._remaining_ms)
+        if self._remaining_ms == 0:
+            self._dismiss()
+
+    def _dismiss(self) -> None:
+        self._timer.stop()
+        self._slide.stop()
+        self.hide()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
+        if event.button() == Qt.MouseButton.LeftButton and self._on_activated:
+            callback = self._on_activated
+            self._on_activated = None
+            self._dismiss()
+            self.activated.emit()
+            callback()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class CompletionNotification(QFrame):

@@ -1092,9 +1092,32 @@ def app_stylesheet(theme: str = "light") -> str:
         border-radius: 8px;
     }}
     QFrame#ToastMessage {{
+        background: transparent;
+        border: none;
+    }}
+    QFrame#ToastContent {{
         background: {t.card};
-        border: 1px solid {t.border};
-        border-radius: 6px;
+        border: 1px solid {t.border_strong};
+        border-bottom: none;
+        border-top-left-radius: {m.radius_floating}px;
+        border-top-right-radius: {m.radius_floating}px;
+    }}
+    QFrame#ToastProgressFrame {{
+        background: {t.card};
+        border: 1px solid {t.border_strong};
+        border-bottom-left-radius: {m.radius_floating}px;
+        border-bottom-right-radius: {m.radius_floating}px;
+    }}
+    QProgressBar#ToastProgress {{
+        min-height: 4px;
+        max-height: 4px;
+        border: none;
+        border-radius: 2px;
+        background: {t.progress_bg};
+    }}
+    QProgressBar#ToastProgress::chunk {{
+        border-radius: 2px;
+        background: #7c5cff;
     }}
     QFrame#CompletionNotification {{
         background: {t.card};
