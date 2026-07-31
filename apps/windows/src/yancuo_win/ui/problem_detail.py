@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
@@ -114,6 +114,15 @@ class _ReferenceCanvas(QWidget):
         self.changed.emit()
         self.update()
 
+    def add_normalized_region(self, x: float, y: float, width: float, height: float) -> None:
+        if not self._asset_id:
+            return
+        self._regions.append(
+            ProblemReference(self._asset_id, self._page_index, x, y, width, height)
+        )
+        self.changed.emit()
+        self.update()
+
     def begin_selection(self) -> None:
         self._selection_enabled = not self._pixmap.isNull()
         self.setCursor(Qt.CursorShape.CrossCursor if self._selection_enabled else Qt.CursorShape.ArrowCursor)
@@ -164,6 +173,83 @@ class _ReferenceCanvas(QWidget):
             self._regions.append(ProblemReference(self._asset_id, self._page_index, (rect.x() - image.x()) / image.width(), (rect.y() - image.y()) / image.height(), rect.width() / image.width(), rect.height() / image.height()))
             self.changed.emit()
         self.update()
+
+
+class _ReaderReferenceOverlay(QWidget):
+    """Transparent selection layer shown over the rendered problem reader."""
+
+    region_selected = Signal(float, float, float, float)
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._selecting = False
+        self._start = QPoint()
+        self._draft = QRect()
+        self._regions: list[QRect] = []
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.hide()
+
+    def begin_selection(self) -> None:
+        self._selecting = True
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.show()
+        self.raise_()
+
+    def clear_regions(self) -> None:
+        self._regions.clear()
+        self._draft = QRect()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001, N802
+        del event
+        if not self._selecting and not self._regions:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor("#3370FF"), 2))
+        painter.setBrush(QColor(51, 112, 255, 35))
+        for region in self._regions:
+            painter.drawRect(region)
+        if not self._draft.isEmpty():
+            painter.drawRect(self._draft.normalized())
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001, N802
+        if self._selecting and event.button() == Qt.MouseButton.LeftButton:
+            self._start = event.position().toPoint()
+            self._draft = QRect(self._start, self._start)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001, N802
+        if self._selecting:
+            self._draft = QRect(self._start, event.position().toPoint())
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
+        if not self._selecting or event.button() != Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        region = self._draft.normalized().intersected(self.rect())
+        self._draft = QRect()
+        self._selecting = False
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        if region.width() >= 8 and region.height() >= 8:
+            self._regions.append(region)
+            self.region_selected.emit(
+                region.x() / max(1, self.width()),
+                region.y() / max(1, self.height()),
+                region.width() / max(1, self.width()),
+                region.height() / max(1, self.height()),
+            )
+        self.update()
+        event.accept()
 
 
 class ProblemDetailPage(QWidget):
@@ -325,6 +411,9 @@ class ProblemDetailPage(QWidget):
             "题目正文与解析",
             "只读题目内容；可使用方向键或翻页键浏览长内容",
         )
+        self.reader.setMinimumWidth(0)
+        self.reference_overlay = _ReaderReferenceOverlay(self.reader)
+        self.reference_overlay.region_selected.connect(self._add_reader_reference)
         self.workspace = QSplitter(Qt.Orientation.Horizontal)
         self.workspace.setChildrenCollapsible(False)
         self.workspace.setHandleWidth(10)
@@ -332,8 +421,10 @@ class ProblemDetailPage(QWidget):
         root.addWidget(self.workspace, stretch=1)
 
         self.chat_card = CardFrame()
+        self.chat_card.setMinimumWidth(360)
         self.chat_card.add_title("AI 讨论")
-        chat_toolbar = QHBoxLayout()
+        chat_toolbar = QVBoxLayout()
+        chat_toolbar.setSpacing(8)
         self.conversation_combo = QComboBox()
         describe_field(self.conversation_combo, "AI 讨论会话", "选择已保存的题目讨论")
         self.conversation_combo.currentIndexChanged.connect(self._load_conversation)
@@ -349,10 +440,23 @@ class ProblemDetailPage(QWidget):
         delete_chat.clicked.connect(self._delete_conversation)
         self.include_original_checkbox = QCheckBox("授权附带原图")
         self.include_original_checkbox.setToolTip("仅在新建对话时发送一次原图授权")
-        for widget in (self.conversation_combo, new_chat, rename_chat, save_chat, export_chat, delete_chat, self.include_original_checkbox):
-            chat_toolbar.addWidget(widget)
+        conversation_row = QHBoxLayout()
+        conversation_row.setSpacing(6)
+        conversation_row.addWidget(self.conversation_combo, stretch=1)
+        conversation_row.addWidget(new_chat)
+        conversation_row.addWidget(rename_chat)
+        conversation_row.addWidget(save_chat)
+        management_row = QHBoxLayout()
+        management_row.setSpacing(6)
+        management_row.addWidget(export_chat)
+        management_row.addWidget(delete_chat)
+        management_row.addWidget(self.include_original_checkbox)
+        management_row.addStretch(1)
+        chat_toolbar.addLayout(conversation_row)
+        chat_toolbar.addLayout(management_row)
         self.chat_card.body.addLayout(chat_toolbar)
         self.chat_history = MathContentView()
+        self.chat_history.setMinimumWidth(0)
         self.chat_history.setMinimumHeight(180)
         self.chat_history.set_accessible_content(
             "AI 讨论记录",
@@ -375,7 +479,6 @@ class ProblemDetailPage(QWidget):
         self.chat_card.body.addLayout(reference_row)
         self.reference_canvas = _ReferenceCanvas()
         self.reference_canvas.changed.connect(self._update_reference_summary)
-        self.chat_card.body.addWidget(self.reference_canvas)
         prompt_row = QHBoxLayout()
         self.chat_input = QLineEdit()
         self.chat_input.setPlaceholderText("向当前题目提问")
@@ -388,7 +491,9 @@ class ProblemDetailPage(QWidget):
         self.chat_card.body.addLayout(prompt_row)
         self.chat_card.setVisible(False)
         self.workspace.addWidget(self.chat_card)
-        self.workspace.setSizes([760, 440])
+        self.workspace.setStretchFactor(0, 2)
+        self.workspace.setStretchFactor(1, 1)
+        self.workspace.setSizes([800, 400])
         self.back_shortcut = QShortcut(QKeySequence("Alt+Left"), self)
         self.back_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.back_shortcut.activated.connect(self.back_requested.emit)
@@ -488,17 +593,21 @@ class ProblemDetailPage(QWidget):
             if self.width() < 860:
                 self.reader.setVisible(False)
                 self.chat_button.setText("查看题目")
-            self.workspace.setSizes([760, 440])
+            self._set_chat_split_sizes()
             self._refresh_conversations()
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
+        self.reference_overlay.setGeometry(self.reader.rect())
+        self.reference_overlay.raise_()
         self._update_toolbar_layout()
         narrow = self.width() < 860
         self.workspace.setOrientation(Qt.Orientation.Vertical if narrow else Qt.Orientation.Horizontal)
         if not narrow:
             self.reader.setVisible(True)
             self.chat_button.setText("AI 讨论")
+            if self.chat_card.isVisible():
+                self._set_chat_split_sizes()
 
     def showEvent(self, event) -> None:  # noqa: ANN001, N802
         super().showEvent(event)
@@ -527,14 +636,32 @@ class ProblemDetailPage(QWidget):
             int(source["page_index"]) if source else 0,
             source["path"] if source else None,
         )
+        self.reference_canvas.hide()
+        self.reference_overlay.clear_regions()
 
     def _enable_reference_mode(self) -> None:
-        if self.reference_canvas.isVisible():
-            self.reference_canvas.setFocus(Qt.FocusReason.OtherFocusReason)
-            self.reference_canvas.begin_selection()
+        if self.reference_source_combo.currentData() is None:
+            return
+        self.reference_overlay.setGeometry(self.reader.rect())
+        self.reference_overlay.begin_selection()
+        self.add_reference_button.setText("请在题目上拖拽框选")
+
+    def _add_reader_reference(
+        self, x: float, y: float, width: float, height: float
+    ) -> None:
+        self.reference_canvas.add_normalized_region(x, y, width, height)
+        self.add_reference_button.setText("添加框选")
 
     def _clear_references(self) -> None:
         self.reference_canvas.clear()
+        self.reference_overlay.clear_regions()
+
+    def _set_chat_split_sizes(self) -> None:
+        if self.workspace.orientation() != Qt.Orientation.Horizontal:
+            return
+        available = max(1, self.workspace.width() - self.workspace.handleWidth())
+        self.workspace.setSizes([available * 2 // 3, available // 3])
+        QTimer.singleShot(0, self.reader.fit_to_width)
 
     def _update_reference_summary(self) -> None:
         count = len(self.reference_canvas.references())

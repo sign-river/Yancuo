@@ -47,6 +47,9 @@ class _ReaderStub(QWidget):
     def set_adaptive_content_height(self, maximum_height, **_kwargs) -> None:
         self.adaptive_height_limit = maximum_height
 
+    def fit_to_width(self) -> None:
+        pass
+
     def set_zoom_scale(self, *_args, **_kwargs) -> None:
         pass
 
@@ -314,6 +317,25 @@ def test_problem_detail_toolbar_groups_actions_and_keeps_priority_controls(
     assert page.toolbar_actions.direction() == QBoxLayout.Direction.TopToBottom
     assert page._toolbar_priority_layout.itemAt(0).widget() is page.switch_group
     assert page._toolbar_priority_layout.itemAt(2).widget() is page.management_group
+
+
+def test_problem_detail_chat_prefers_reader_width_and_selection_overlay(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    page = window.problem_detail_page
+    page.resize(1200, 720)
+    page.workspace.setGeometry(0, 0, 1100, 600)
+    page._set_chat_split_sizes()
+    app.processEvents()
+
+    left, right = page.workspace.sizes()
+    assert left > right
+    assert page.chat_card.minimumWidth() == 360
+
+    page.reference_overlay.setGeometry(page.reader.rect())
+    assert page.reference_overlay.geometry().size() == page.reader.size()
 
 
 def test_service_settings_use_a_compact_aligned_form_surface(

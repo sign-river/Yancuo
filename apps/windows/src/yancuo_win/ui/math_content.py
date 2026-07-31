@@ -563,6 +563,11 @@ class MathContentView(QWidget):
         self.setFocusProxy(self._view)
         self._view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+    def fit_to_width(self) -> None:
+        """Reapply width fitting after an enclosing splitter changes size."""
+
+        self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+
     def _apply_canvas_background(self, theme: str | None = None) -> None:
         background = QColor(theme_tokens(theme or current_theme_name()).bg)
         palette = self._view.palette()
