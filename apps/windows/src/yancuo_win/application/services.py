@@ -1683,6 +1683,26 @@ class AppServices:
             s.expunge_all()
             return records
 
+    def review_plan_study_sessions(self, review_plan_id: str) -> list[StudySession]:
+        """Return problem-review sessions started from one named plan."""
+
+        with self.session() as session:
+            sessions = list(
+                session.scalars(
+                    select(StudySession).order_by(StudySession.started_at.desc())
+                ).all()
+            )
+            matching = []
+            for study_session in sessions:
+                try:
+                    selection = json.loads(study_session.selection_json)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if selection.get("review_plan_id") == review_plan_id:
+                    matching.append(study_session)
+            session.expunge_all()
+            return matching
+
     def record_note_review(
         self, note_id: str, *, review_plan_id: str | None = None
     ) -> NoteStudyRecord:
@@ -1711,6 +1731,20 @@ class AppServices:
                 session.scalars(
                     select(NoteStudyRecord)
                     .where(NoteStudyRecord.note_id == note_id)
+                    .order_by(NoteStudyRecord.completed_at.desc())
+                ).all()
+            )
+            session.expunge_all()
+            return records
+
+    def review_plan_note_records(self, review_plan_id: str) -> list[NoteStudyRecord]:
+        """Return note completions recorded from one named plan."""
+
+        with self.session() as session:
+            records = list(
+                session.scalars(
+                    select(NoteStudyRecord)
+                    .where(NoteStudyRecord.review_plan_id == review_plan_id)
                     .order_by(NoteStudyRecord.completed_at.desc())
                 ).all()
             )

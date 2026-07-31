@@ -72,6 +72,12 @@ class _ServicesStub:
 
         return _Session(), [self.problem] if problem_ids else []
 
+    def review_plan_study_sessions(self, _plan_id):
+        return []
+
+    def review_plan_note_records(self, _plan_id):
+        return []
+
     def record_review(self, problem_id: str, grade: int, **_kwargs) -> dict[str, str]:
         self.recorded.append((problem_id, grade))
         return {
@@ -155,6 +161,23 @@ def test_review_workbench_collects_session_options(monkeypatch) -> None:
     assert page.limit_spin.value() == 20
     assert page.type_checks
 
+    page.close()
+
+
+def test_selecting_a_plan_only_updates_preview_until_start(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    services = _ServicesStub()
+    page = review_page_module.ReviewPage(services)
+
+    assert not page.start_selected_button.isEnabled()
+    page.plan_combo.setCurrentIndex(0)
+
+    assert page.start_selected_button.isEnabled()
+    assert page.start_selected_button.text() == "开始题目复习"
+    assert page.plan_preview.count() == 1
+    assert page.stack.currentWidget() is page.home_page
+    assert page._study_session_id is None
     page.close()
 
 

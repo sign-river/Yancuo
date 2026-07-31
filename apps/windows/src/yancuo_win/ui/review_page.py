@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
     QCheckBox,
@@ -68,6 +68,7 @@ class ReviewPage(QWidget):
         self._study_session_id: str | None = None
         self._answer_viewed_at: datetime | None = None
         self._selected_plan_id: str | None = None
+        self._session_shortcuts: list[QShortcut] = []
         self._build()
         self.show_home()
 
@@ -89,7 +90,27 @@ class ReviewPage(QWidget):
         self.stack.addWidget(self.plan_select_page)
         self.stack.addWidget(self.plan_builder_page)
         self.stack.addWidget(self.session_page)
+        self._install_session_shortcuts()
         root.addWidget(self.stack)
+
+    def _install_session_shortcuts(self) -> None:
+        bindings = [
+            ("Space", self._toggle_answer),
+            ("Left", self._previous),
+            ("Right", self._skip),
+            ("Return", self._complete_note),
+            ("Enter", self._complete_note),
+        ]
+        bindings.extend((str(grade), lambda value=grade: self._grade(value)) for grade in REVIEW_GRADES)
+        for sequence, callback in bindings:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(
+                lambda action=callback: action()
+                if self.stack.currentWidget() is self.session_page
+                else None
+            )
+            self._session_shortcuts.append(shortcut)
 
     def _open_created_plan(self, plan_id: str) -> None:
         self.show_home()
@@ -124,8 +145,8 @@ class ReviewPage(QWidget):
         action_grid.setVerticalSpacing(14)
         select = CardFrame()
         select.setObjectName("ReviewActionCard")
-        select.add_title("选择并开始复习")
-        select.add_hint("选择已有的题目或笔记复习计划，开始本轮复习。")
+        select.add_title("选择复习计划")
+        select.add_hint("先查看计划内容和历史记录，再单独开始本轮复习。")
         button = primary_button("选择复习计划")
         button.clicked.connect(lambda: self.stack.setCurrentWidget(self.plan_select_page))
         select.body.addWidget(button)
@@ -178,6 +199,12 @@ class ReviewPage(QWidget):
         self.session_finish_button.clicked.connect(self.show_home)
         self.session_finish_button.setVisible(False)
         root.addWidget(self.session_finish_button)
+
+        self.keyboard_hint = QLabel()
+        self.keyboard_hint.setObjectName("PageHint")
+        self.keyboard_hint.setWordWrap(True)
+        self.keyboard_hint.setAccessibleName("复习会话键盘提示")
+        root.addWidget(self.keyboard_hint)
 
         self.grade_card = CardFrame()
         self.grade_card.setObjectName("ReviewGradeSurface")
@@ -248,10 +275,26 @@ class ReviewPage(QWidget):
         plans.add_hint("必须选择一个题目或笔记复习计划后，才能开始本轮复习。")
         self.plan_combo = QComboBox()
         describe_field(self.plan_combo, "复习计划")
+        self.plan_combo.currentIndexChanged.connect(self._update_selected_plan_details)
         plans.body.addWidget(self.plan_combo)
+        self.plan_summary = QLabel("请选择一个复习计划以查看内容。")
+        self.plan_summary.setObjectName("PageHint")
+        self.plan_summary.setWordWrap(True)
+        plans.body.addWidget(self.plan_summary)
+        self.plan_preview = QListWidget()
+        self.plan_preview.setObjectName("ReviewPlanPreview")
+        self.plan_preview.setAccessibleName("复习计划内容预览")
+        self.plan_preview.setMaximumHeight(144)
+        plans.body.addWidget(self.plan_preview)
+        self.plan_history = QListWidget()
+        self.plan_history.setObjectName("ReviewPlanHistory")
+        self.plan_history.setAccessibleName("复习计划历史")
+        self.plan_history.setMaximumHeight(120)
+        plans.body.addWidget(QLabel("复习历史"))
+        plans.body.addWidget(self.plan_history)
         refresh_plans = ghost_button("刷新计划")
         refresh_plans.clicked.connect(self.show_home)
-        self.start_selected_button = primary_button("开始所选计划")
+        self.start_selected_button = primary_button("开始复习")
         self.start_selected_button.clicked.connect(self.start_session)
         plans.body.addLayout(self._actions(refresh_plans, self.start_selected_button))
 
@@ -474,6 +517,7 @@ class ReviewPage(QWidget):
                 self.plan_combo.setCurrentIndex(index)
         else:
             self.plan_combo.setCurrentIndex(-1)
+        self._update_selected_plan_details()
         self._refresh_plan_builder()
         self.review_overview.setText(
             f"今日待复习 {len(candidates)} 题 · 已启用题目 {len(types)} 题"
@@ -488,6 +532,54 @@ class ReviewPage(QWidget):
             self.type_row.insertWidget(self.type_row.count() - 1, check)
             self.type_checks.append(check)
         self.stack.setCurrentWidget(self.home_page)
+
+    def _update_selected_plan_details(self) -> None:
+        """Selecting is read-only; session creation remains an explicit next action."""
+
+        self.plan_preview.clear()
+        self.plan_history.clear()
+        plan_id = self.plan_combo.currentData()
+        if not plan_id:
+            self.plan_summary.setText("请选择一个复习计划以查看内容。")
+            self.start_selected_button.setText("开始复习")
+            self.start_selected_button.setEnabled(False)
+            self.start_selected_button.setToolTip("请先选择复习计划")
+            return
+        plan = self.services.get_review_plan(str(plan_id))
+        if plan is None:
+            self.plan_summary.setText("该复习计划已不存在。")
+            self.start_selected_button.setEnabled(False)
+            return
+        content_label = "题目" if plan.content_type == "problem" else "笔记"
+        self.plan_summary.setText(f"{plan.name}：{len(plan.items)} 项{content_label}。选择计划不会创建复习会话。")
+        self.start_selected_button.setText(f"开始{content_label}复习")
+        self.start_selected_button.setToolTip(f"开始当前选中的{content_label}复习计划")
+        available_count = 0
+        if plan.content_type == "problem":
+            problems = {problem.id: problem for problem in self.services.list_problems_by_ids([item.source_id for item in plan.items])}
+            for item in plan.items:
+                problem = problems.get(item.source_id)
+                label = problem.title if problem and problem.title else "已移除的题目"
+                self.plan_preview.addItem(label)
+                available_count += problem is not None
+            sessions = self.services.review_plan_study_sessions(plan.id)
+            for study_session in sessions[:8]:
+                started = study_session.started_at.astimezone().strftime("%Y-%m-%d %H:%M")
+                self.plan_history.addItem(f"{started} · {study_session.status} · {study_session.problem_count} 题")
+        else:
+            for item in plan.items:
+                note = self.notes.get_note(item.source_id) if self.notes is not None else None
+                label = note.title if note is not None else "已移除的笔记"
+                self.plan_preview.addItem(label)
+                available_count += note is not None and note.status == "active"
+            for record in self.services.review_plan_note_records(plan.id)[:8]:
+                completed = record.completed_at.astimezone().strftime("%Y-%m-%d %H:%M")
+                self.plan_history.addItem(f"{completed} · 已完成笔记阅读")
+        if not self.plan_history.count():
+            self.plan_history.addItem("暂无复习历史")
+        self.start_selected_button.setEnabled(bool(available_count))
+        if not available_count:
+            self.start_selected_button.setToolTip("计划没有可用内容，无法创建空会话")
 
     def start_session(self) -> None:
         self._session_grades.clear()
@@ -592,6 +684,7 @@ class ReviewPage(QWidget):
 
     def _render(self) -> None:
         if self._content_type == "note":
+            self.keyboard_hint.setText("键盘：Enter 标记已阅读并继续。")
             note = self._current_note()
             self.grade_card.setVisible(False)
             self.detail_button.setVisible(False)
@@ -614,6 +707,7 @@ class ReviewPage(QWidget):
             )
             return
         problem = self._current()
+        self.keyboard_hint.setText("键盘：Space 显示或隐藏答案；1-5 评分；Left/Right 切换题目。")
         self.grade_card.setVisible(True)
         self.detail_button.setVisible(True)
         self.note_complete_button.setVisible(False)
@@ -822,6 +916,10 @@ class ReviewPage(QWidget):
             return
         if key == Qt.Key_Left:
             self._previous()
+            event.accept()
+            return
+        if key in (Qt.Key_Return, Qt.Key_Enter) and self._content_type == "note":
+            self._complete_note()
             event.accept()
             return
         super().keyPressEvent(event)
