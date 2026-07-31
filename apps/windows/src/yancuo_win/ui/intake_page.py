@@ -1405,12 +1405,15 @@ class IntakePage(QWidget):
         self.answer_image_row_layout = answer_image_row
         answer_image_row.setSpacing(12)
         answer_actions = QVBoxLayout()
+        self.answer_image_actions = answer_actions
         choose = primary_button("选择图片")
+        choose.setFixedWidth(240)
         choose.clicked.connect(self._choose_answer_image)
         answer_actions.addWidget(choose)
         self.answer_image_name = QLabel("尚未选择图片")
         self.answer_image_name.setObjectName("MutedLabel")
         self.answer_image_name.setWordWrap(True)
+        self.answer_image_name.setMaximumWidth(240)
         answer_actions.addWidget(self.answer_image_name)
         answer_actions.addStretch(1)
         answer_image_row.addLayout(answer_actions)
@@ -1420,6 +1423,7 @@ class IntakePage(QWidget):
         self.answer_image_preview.setFixedSize(240, 160)
         self.answer_image_preview.clicked.connect(self._toggle_answer_image_viewer)
         answer_image_row.addWidget(self.answer_image_preview)
+        answer_image_row.addStretch(1)
         source.body.addLayout(answer_image_row)
         layout.addWidget(source)
 

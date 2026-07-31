@@ -235,6 +235,8 @@ def test_narrow_window_hides_sidebar_and_switches_plan_draft_view(
         window.intake_page.answer_image_row_layout.direction()
         == QBoxLayout.Direction.TopToBottom
     )
+    assert window.intake_page.answer_image_preview.width() == 240
+    assert window.intake_page.answer_image_actions.itemAt(0).widget().width() == 240
     assert window.sidebar.isHidden()
     assert not window.library_navigation_panel.isHidden()
 
