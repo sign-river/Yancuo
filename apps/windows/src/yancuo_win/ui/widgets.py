@@ -688,11 +688,13 @@ class PageHeader(QWidget):
         self.description = QLabel(description)
         self.description.setObjectName("PageHint")
         self.description.setWordWrap(True)
+        self.description.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         if not description:
             self.description.hide()
         labels.addWidget(self.description)
-        layout.addLayout(labels)
-        layout.addStretch(1)
+        layout.addLayout(labels, stretch=1)
         self.actions = QHBoxLayout()
         self.actions.setSpacing(8)
         layout.addLayout(self.actions)

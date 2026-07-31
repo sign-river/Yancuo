@@ -34,6 +34,18 @@ def test_page_header_does_not_show_children_during_construction(monkeypatch) -> 
     app.processEvents()
 
 
+def test_page_header_allocates_remaining_width_to_description() -> None:
+    app = QApplication.instance() or QApplication([])
+    header = widgets_module.PageHeader("标题", "一行说明文字应在宽窗口保持单行。")
+    header.resize(900, 100)
+    header.show()
+    app.processEvents()
+
+    assert header.description.width() > 500
+    assert header.description.height() <= header.description.fontMetrics().height() + 4
+    header.close()
+
+
 def test_workflow_step_bar_exposes_current_completed_and_upcoming_states() -> None:
     app = QApplication.instance() or QApplication([])
     bar = widgets_module.WorkflowStepBar(("上传", "处理", "确认"), 1)
