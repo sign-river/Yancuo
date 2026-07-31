@@ -1076,6 +1076,7 @@ class IntakePage(QWidget):
         upload_content.setContentsMargins(0, 0, 0, 0)
         upload_content.setSpacing(12)
         file_actions = QVBoxLayout()
+        self.ai_upload_file_actions = file_actions
         file_actions.setSpacing(8)
         add = primary_button("选择图片")
         add.setFixedWidth(104)
@@ -1083,6 +1084,7 @@ class IntakePage(QWidget):
         remove = QPushButton("移除选中")
         remove.setFixedWidth(104)
         remove.clicked.connect(self._remove_ai_files)
+        file_actions.addStretch(1)
         file_actions.addWidget(add)
         file_actions.addWidget(remove)
         file_actions.addStretch(1)
