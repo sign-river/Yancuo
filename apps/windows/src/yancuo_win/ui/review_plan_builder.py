@@ -31,6 +31,7 @@ from yancuo_win.ui.widgets import (
     SearchInput,
     SoftItemDelegate,
     StatusTag,
+    apply_themed_tree_branches,
     describe_field,
     deferred_view_updates,
     ghost_button,
@@ -131,6 +132,7 @@ class ReviewPlanBuilder(QWidget):
         self.folder_tree.setAccessibleName("复习资料目录")
         self.folder_tree.setUniformRowHeights(True)
         self.folder_tree.setHeaderHidden(True)
+        apply_themed_tree_branches(self.folder_tree)
         self.folder_tree.setMouseTracking(True)
         self.folder_tree.setItemDelegate(
             SoftItemDelegate(

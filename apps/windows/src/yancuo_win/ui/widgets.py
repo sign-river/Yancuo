@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QProxyStyle,
     QSizePolicy,
     QStyle,
     QStyledItemDelegate,
@@ -72,6 +73,47 @@ def describe_field(
     if description:
         widget.setAccessibleDescription(description)
     return widget
+
+
+class ThemedTreeBranchStyle(QProxyStyle):
+    """Draw the shared, theme-aware disclosure chevrons for tree controls."""
+
+    def drawPrimitive(self, element, option, painter, widget=None) -> None:  # noqa: N802, ANN001
+        if element != QStyle.PrimitiveElement.PE_IndicatorBranch:
+            super().drawPrimitive(element, option, painter, widget)
+            return
+
+        if not option.state & QStyle.StateFlag.State_Children:
+            return
+
+        from yancuo_win.ui.theme import current_theme_name, theme_tokens
+
+        tokens = theme_tokens(current_theme_name())
+        rect = option.rect
+        center_x = rect.center().x()
+        center_y = rect.center().y()
+        offset = 3
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(tokens.muted), 1.8))
+        if option.state & QStyle.StateFlag.State_Open:
+            painter.drawLine(center_x - offset, center_y - 1, center_x, center_y + 2)
+            painter.drawLine(center_x, center_y + 2, center_x + offset, center_y - 1)
+        else:
+            painter.drawLine(center_x - 1, center_y - offset, center_x + 2, center_y)
+            painter.drawLine(center_x + 2, center_y, center_x - 1, center_y + offset)
+        painter.restore()
+
+
+def apply_themed_tree_branches(tree: QAbstractItemView) -> QAbstractItemView:
+    """Use a transparent disclosure area with the common chevron treatment."""
+
+    # A null base style delegates to the application style without taking
+    # ownership of it when this individual tree is destroyed.
+    style = ThemedTreeBranchStyle()
+    tree.setStyle(style)
+    tree._yancuo_tree_branch_style = style  # type: ignore[attr-defined]
+    return tree
 
 
 def primary_button(text: str, parent: QWidget | None = None) -> QPushButton:

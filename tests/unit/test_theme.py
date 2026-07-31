@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QListWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QListWidget, QTreeWidget, QVBoxLayout, QWidget
 
 import yancuo_win.ui.widgets as widgets_module
 from yancuo_win.ui.theme import (
@@ -202,3 +202,25 @@ def test_soft_visual_tokens_and_library_surfaces_are_rendered() -> None:
     assert 'QFrame#StateNotice[state="loading"]' in rendered
     assert 'QFrame#StateNotice[state="error"]' in rendered
     assert 'QFrame#StateNotice[state="permission"]' in rendered
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_library_and_search_switches_share_all_interaction_states(mode: str) -> None:
+    rendered = app_stylesheet(mode)
+
+    assert "QPushButton#SearchModeButton, QPushButton#LibraryViewButton" in rendered
+    assert "QPushButton#SearchModeButton:hover:!checked:!disabled" in rendered
+    assert "QPushButton#SearchModeButton:checked, QPushButton#LibraryViewButton:checked" in rendered
+    assert "QPushButton#SearchModeButton:focus, QPushButton#LibraryViewButton:focus" in rendered
+    assert "QPushButton#SearchModeButton:disabled, QPushButton#LibraryViewButton:disabled" in rendered
+
+
+def test_tree_branch_style_is_shared_and_keeps_branch_surface_transparent() -> None:
+    app = QApplication.instance() or QApplication([])
+    tree = QTreeWidget()
+    widgets_module.apply_themed_tree_branches(tree)
+
+    assert isinstance(tree.style(), widgets_module.ThemedTreeBranchStyle)
+    assert "QTreeWidget#KnowledgeTree::branch:selected" in app_stylesheet("light")
+    tree.close()
+    app.processEvents()

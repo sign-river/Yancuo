@@ -949,27 +949,36 @@ def app_stylesheet(theme: str = "light") -> str:
         min-height: 32px;
         max-height: 32px;
     }}
-    QPushButton#LibraryViewButton {{
-        min-width: 92px;
+    QPushButton#SearchModeButton, QPushButton#LibraryViewButton {{
         background: transparent;
         color: {t.muted};
-    }}
-    QPushButton#LibraryViewButton:checked {{
-        background: transparent;
-        color: {t.primary};
-        border-bottom-color: {t.primary};
-        font-weight: 600;
+        border: 1px solid transparent;
+        border-radius: 6px;
     }}
     QPushButton#SearchModeButton {{
         min-width: 78px;
-        color: {t.muted};
-        border-radius: 6px;
     }}
-    QPushButton#SearchModeButton:checked {{
+    QPushButton#LibraryViewButton {{
+        min-width: 92px;
+    }}
+    QPushButton#SearchModeButton:hover:!checked:!disabled,
+    QPushButton#LibraryViewButton:hover:!checked:!disabled {{
+        background: {t.list_hover};
+        border-color: {t.hover_border};
+    }}
+    QPushButton#SearchModeButton:checked, QPushButton#LibraryViewButton:checked {{
         background: {t.list_selected};
         color: {t.primary};
         border-color: {t.primary};
         font-weight: 600;
+    }}
+    QPushButton#SearchModeButton:focus, QPushButton#LibraryViewButton:focus {{
+        border-color: {t.focus_ring};
+    }}
+    QPushButton#SearchModeButton:disabled, QPushButton#LibraryViewButton:disabled {{
+        background: {t.input_disabled};
+        color: {t.muted};
+        border-color: {t.border};
     }}
     QPushButton#SegmentButton {{
         background: {t.card};

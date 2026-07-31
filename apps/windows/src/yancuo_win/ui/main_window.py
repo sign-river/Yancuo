@@ -84,6 +84,7 @@ from yancuo_win.ui.widgets import (
     SearchInput,
     SoftItemDelegate,
     ToastMessage,
+    apply_themed_tree_branches,
     button_row,
     danger_button,
     deferred_view_updates,
@@ -1044,6 +1045,7 @@ class MainWindow(QMainWindow):
         self.knowledge_tree.setUniformRowHeights(True)
         self.knowledge_tree.setHeaderHidden(True)
         self.knowledge_tree.setIndentation(16)
+        apply_themed_tree_branches(self.knowledge_tree)
         tree_palette = self.knowledge_tree.palette()
         for color_group in (
             QPalette.ColorGroup.Active,
