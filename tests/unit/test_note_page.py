@@ -121,6 +121,7 @@ def test_note_detail_is_opened_by_double_click_and_restores_library_state(
 
     assert note_page.page_stack.currentWidget() is note_page.note_detail_page
     assert note_page.detail_back_button.accessibleName() == "返回笔记库"
+    assert "collection_scroll" in note_page._library_state
 
     note_page._return_to_library()
 
@@ -142,6 +143,41 @@ def test_empty_note_filter_explains_the_next_action(note_page: NotePage) -> None
     assert note_page.note_list.count() == 0
     assert not note_page.note_list_hint.isHidden()
     assert "暂无笔记" in note_page.note_list_hint.text()
+
+
+def test_note_library_uses_state_specific_empty_feedback_and_no_horizontal_lists(
+    note_page: NotePage,
+) -> None:
+    note_page.status_filter.setCurrentIndex(
+        note_page.status_filter.findData("trashed")
+    )
+
+    assert "回收站为空" in note_page.note_list_hint.text()
+    assert (
+        note_page.note_list.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    assert (
+        note_page.collection_list.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    assert not note_page.collection_list_hint.isHidden()
+
+
+def test_note_library_narrow_breakpoint_keeps_list_and_discloses_space(
+    note_page: NotePage,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+
+    note_page.show()
+    note_page.resize(760, 640)
+    app.processEvents()
+
+    assert note_page._narrow_layout
+    assert note_page.space_pane.isHidden()
+    assert not note_page.note_library_pane.isHidden()
+    assert isinstance(note_page.space_back_button, note_page_module.IconButton)
 
 
 def test_narrow_note_layout_discloses_space_separately(note_page: NotePage) -> None:
