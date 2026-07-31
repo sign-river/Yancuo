@@ -237,8 +237,8 @@ class ProblemDetailPage(QWidget):
         self.setObjectName("PageRoot")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(24, 12, 24, 20)
+        root.setSpacing(10)
 
         self.back_button = IconButton("chevron-left", "返回题库")
         self.back_button.clicked.connect(self.back_requested.emit)
@@ -251,12 +251,15 @@ class ProblemDetailPage(QWidget):
         self.chat_button = QPushButton("AI 讨论")
         self.chat_button.clicked.connect(self._toggle_chat)
         self.chat_button.setEnabled(chat is not None)
-        header = PageHeader("题目详情")
-        self.title_label = header.title
-        self.meta_label = header.description
+        self.header = PageHeader("题目详情")
+        self.title_label = self.header.title
+        self.meta_label = self.header.description
         self.meta_label.hide()
-        header.add_leading(self.back_button)
-        root.addWidget(header)
+        self.header.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.header.add_leading(self.back_button)
+        root.addWidget(self.header)
 
         self.action_toolbar = QFrame()
         self.action_toolbar.setObjectName("ContextBar")

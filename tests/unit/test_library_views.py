@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QSizePolicy,
     QWidget,
 )
 
@@ -293,6 +294,7 @@ def test_problem_detail_toolbar_groups_actions_and_keeps_priority_controls(
     page = window.problem_detail_page
 
     assert page.edit_button.objectName() == "PrimaryButton"
+    assert page.header.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
     assert [action.text() for action in page.more_menu.actions()] == [
         "归档",
         "移入回收站",
