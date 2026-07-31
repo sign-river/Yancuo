@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.services import AppServices
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.tasks.worker import AIJobWorker, ReviewApplicationWorker
 from yancuo_win.ui.widgets import (
     ConfirmDialog,
     PageHeader,
@@ -60,6 +61,9 @@ class ReviewDialog(QDialog):
         self.app = app
         self._decisions: dict[str, str] = {}
         self._applied_problem_ids: list[str] = []
+        self._job_id: str | None = None
+        self._job_worker: AIJobWorker | None = None
+        self._apply_worker: ReviewApplicationWorker | None = None
         self.setWindowTitle("AI 补全审核")
         self.resize(1000, 680)
 
@@ -96,10 +100,17 @@ class ReviewDialog(QDialog):
         self.execution_status.setObjectName("MutedLabel")
         self.execution_status.setWordWrap(True)
         body.addWidget(self.execution_status)
+        body.addWidget(QLabel("继续审核"))
+        self.resume_list = QListWidget()
+        self.resume_list.setObjectName("CompletionResumeList")
+        self.resume_list.setAccessibleName("可继续的 AI 补全任务")
+        self.resume_list.setItemDelegate(SoftItemDelegate(self.resume_list, minimum_height=40))
+        self.resume_list.currentItemChanged.connect(self._select_job)
+        body.addWidget(self.resume_list, 1)
         body.addStretch(1)
         row = QHBoxLayout()
-        self.begin_button = primary_button("开始审核建议")
-        self.begin_button.clicked.connect(self._begin_review)
+        self.begin_button = primary_button("继续审核")
+        self.begin_button.clicked.connect(self._continue_review)
         self.refresh_button = default_button("刷新状态")
         self.refresh_button.clicked.connect(self.refresh)
         row.addWidget(self.begin_button)
@@ -179,15 +190,80 @@ class ReviewDialog(QDialog):
         return page
 
     def refresh(self) -> None:
-        cards = self.ai.list_open_review_items()
-        latest = self.ai.list_jobs(limit=1)
-        if latest:
-            diagnostics = self.ai.get_job_diagnostics(latest[0].id)
-            self.execution_status.setText(f"最近一次补全任务：{diagnostics['label']}。待审核建议：{len(cards)} 项。")
+        selected = self._job_id
+        overview = self.ai.completion_review_overview()
+        self.resume_list.clear()
+        for job in overview:
+            progress = f"已处理 {job['completed']} / {job['total']}"
+            if job["failed"]:
+                progress += f"，待重试 {job['failed']}"
+            text = f"{job['label']} · {progress} · 待审核 {job['review_count']} 项"
+            row = QListWidgetItem(text)
+            row.setData(Qt.ItemDataRole.UserRole, job["job_id"])
+            row.setData(Qt.ItemDataRole.UserRole + 1, job)
+            self.resume_list.addItem(row)
+        if not overview:
+            empty = QListWidgetItem("暂无可继续的 AI 补全任务")
+            empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self.resume_list.addItem(empty)
+            self.execution_status.setText("创建补全任务后，可在这里查看进度并继续审核。")
+            self.begin_button.setEnabled(False)
+            self._refresh_list([])
+            return
+        for index in range(self.resume_list.count()):
+            if self.resume_list.item(index).data(Qt.ItemDataRole.UserRole) == selected:
+                self.resume_list.setCurrentRow(index)
+                break
+        if self.resume_list.currentRow() < 0:
+            self.resume_list.setCurrentRow(0)
+
+    def _select_job(self, current: QListWidgetItem | None, _previous) -> None:
+        job = current.data(Qt.ItemDataRole.UserRole + 1) if current else None
+        if not isinstance(job, dict):
+            self._job_id = None
+            self.begin_button.setEnabled(False)
+            return
+        job_id = str(job["job_id"])
+        if self._job_id != job_id:
+            self._decisions.clear()
+        self._job_id = job_id
+        self.execution_status.setText(
+            f"当前任务：{job['label']}。已完成 {job['completed']} / {job['total']}，"
+            f"待审核 {job['review_count']} 项。"
+        )
+        if job["review_count"]:
+            self.begin_button.setText("继续审核建议")
+        elif job["status"] in {"pending", "failed"}:
+            self.begin_button.setText("开始或重试补全")
         else:
-            self.execution_status.setText(f"当前没有补全任务。待审核建议：{len(cards)} 项。")
-        self.begin_button.setEnabled(bool(cards))
-        self._refresh_list(cards)
+            self.begin_button.setText("等待建议生成")
+        self.begin_button.setEnabled(job["status"] in {"pending", "failed", "completed"})
+        self._refresh_list(self.ai.list_open_review_items_for_job(self._job_id))
+
+    def _continue_review(self) -> None:
+        if not self._job_id:
+            return
+        items = self.ai.list_open_review_items_for_job(self._job_id)
+        if items:
+            self._begin_review()
+            return
+        if self._job_worker and self._job_worker.isRunning():
+            return
+        self.begin_button.setEnabled(False)
+        self.execution_status.setText("正在生成补全建议，完成后会自动进入审核。")
+        self._job_worker = AIJobWorker(self.ai, self._job_id, self)
+        self._job_worker.finished_ok.connect(self._on_job_done)
+        self._job_worker.failed.connect(self._on_job_failed)
+        self._job_worker.start()
+
+    def _on_job_done(self, _job_id: str) -> None:
+        self.refresh()
+        if self._job_id and self.ai.list_open_review_items_for_job(self._job_id):
+            self._begin_review()
+
+    def _on_job_failed(self, _job_id: str, error: str) -> None:
+        self.execution_status.setText(f"补全未完成：{error}")
+        self.refresh_button.setFocus()
 
     def _begin_review(self) -> None:
         self.stack.setCurrentWidget(self.review_page)
@@ -246,7 +322,11 @@ class ReviewDialog(QDialog):
         if item_id is None:
             return
         self._decisions[item_id] = decision
-        self._refresh_list(self.ai.list_open_review_items())
+        self._refresh_list(
+            self.ai.list_open_review_items_for_job(self._job_id)
+            if self._job_id
+            else []
+        )
         self._update_apply_button()
         self.toast.show_message("已记录你的决定，尚未写入题库。")
 
@@ -261,11 +341,17 @@ class ReviewDialog(QDialog):
     def _apply(self) -> None:
         if not ConfirmDialog.ask(self, "应用审核决定", "确认后才会把采纳的建议写入正式题目，并保留可撤销的版本记录。", "确认应用"):
             return
-        try:
-            result = self.ai.apply_review_decisions(dict(self._decisions))
-        except DomainError as exc:
-            QMessageBox.warning(self, "无法应用", str(exc))
-            self.refresh()
+        self.apply_button.setEnabled(False)
+        self.meta.setText("正在应用已确认决定，请稍候。")
+        self._apply_worker = ReviewApplicationWorker(self.ai, self._decisions, self)
+        self._apply_worker.finished_ok.connect(self._on_apply_done)
+        self._apply_worker.failed.connect(self._on_apply_failed)
+        self._apply_worker.start()
+
+    def _on_apply_done(self, result: object) -> None:
+        if not isinstance(result, dict):
+            QMessageBox.warning(self, "无法应用", "审核结果无效")
+            self.apply_button.setEnabled(True)
             return
         self._applied_problem_ids = result["accepted_problem_ids"]
         self.complete_summary.setText(
@@ -273,6 +359,10 @@ class ReviewDialog(QDialog):
         )
         self.undo_button.setEnabled(bool(self._applied_problem_ids))
         self.stack.setCurrentWidget(self.complete_page)
+
+    def _on_apply_failed(self, error: str) -> None:
+        QMessageBox.warning(self, "无法应用", error)
+        self.apply_button.setEnabled(True)
 
     def _undo(self) -> None:
         try:
