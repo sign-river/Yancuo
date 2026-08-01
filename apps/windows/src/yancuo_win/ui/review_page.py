@@ -49,6 +49,14 @@ from yancuo_win.ui.widgets import (
 )
 
 
+_STUDY_STATUS_LABELS = {
+    "pending": "等待开始",
+    "active": "进行中",
+    "completed": "已完成",
+    "abandoned": "已结束",
+}
+
+
 class ReviewPage(QWidget):
     """A resumable review session that stays inside the main content area."""
 
@@ -576,7 +584,8 @@ class ReviewPage(QWidget):
             sessions = self.services.review_plan_study_sessions(plan.id)
             for study_session in sessions[:8]:
                 started = study_session.started_at.astimezone().strftime("%Y-%m-%d %H:%M")
-                self.plan_history.addItem(f"{started} · {study_session.status} · {study_session.problem_count} 题")
+                status = _STUDY_STATUS_LABELS.get(study_session.status, "状态未知")
+                self.plan_history.addItem(f"{started} · {status} · {study_session.problem_count} 题")
         else:
             for item in plan.items:
                 note = self.notes.get_note(item.source_id) if self.notes is not None else None
@@ -603,6 +612,7 @@ class ReviewPage(QWidget):
         if plan.content_type == "problem":
             for study_session in self.services.review_plan_study_sessions(plan.id):
                 records = self.services.study_session_records(study_session.id)
+                status = _STUDY_STATUS_LABELS.get(study_session.status, "状态未知")
                 grades = " · ".join(
                     f"{grade}分 {sum(record.grade == grade for record in records)}题"
                     for grade in REVIEW_GRADES
@@ -611,8 +621,8 @@ class ReviewPage(QWidget):
                 entries.append(
                     ReviewHistoryEntry(
                         study_session.started_at,
-                        f"{study_session.status} · {study_session.problem_count} 题",
-                        f"状态：{study_session.status}\n计划题目：{study_session.problem_count} 题\n"
+                        f"{status} · {study_session.problem_count} 题",
+                        f"状态：{status}\n计划题目：{study_session.problem_count} 题\n"
                         f"已评分：{len(records)} 题\n评分分布：{grades}",
                     )
                 )

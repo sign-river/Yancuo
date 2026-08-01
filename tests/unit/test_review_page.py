@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from PySide6.QtWidgets import QApplication, QWidget
@@ -177,6 +178,45 @@ def test_selecting_a_plan_only_updates_preview_until_start(monkeypatch) -> None:
     assert page.start_selected_button.text() == "开始题目复习"
     assert page.plan_preview.count() == 1
     assert page.stack.currentWidget() is page.home_page
+    assert page._study_session_id is None
+    page.close()
+
+
+def test_selected_plan_exposes_read_only_full_history(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    services = _ServicesStub()
+    session = SimpleNamespace(
+        id="study-history",
+        started_at=datetime(2026, 8, 1, 10, 30, tzinfo=timezone.utc),
+        status="completed",
+        problem_count=1,
+    )
+    services.review_plan_study_sessions = lambda _plan_id: [session]
+    services.study_session_records = lambda _session_id: [
+        SimpleNamespace(grade=4)
+    ]
+    opened: list[tuple[str, list[object]]] = []
+
+    class _HistoryDialogStub:
+        def __init__(self, title, entries, _parent) -> None:
+            opened.append((title, entries))
+
+        def exec(self) -> None:
+            return None
+
+    monkeypatch.setattr(review_page_module, "ReviewHistoryDialog", _HistoryDialogStub)
+    page = review_page_module.ReviewPage(services)
+    page.plan_combo.setCurrentIndex(0)
+
+    assert page.plan_preview.item(0).text() == "复习交互测试"
+    assert "已完成" in page.plan_history.item(0).text()
+    assert page.open_history_button.isEnabled()
+    page._open_plan_history()
+
+    assert opened[0][0] == "测试计划"
+    assert opened[0][1][0].title == "已完成 · 1 题"
+    assert "4分 1题" in opened[0][1][0].details
     assert page._study_session_id is None
     page.close()
 
