@@ -14,7 +14,7 @@ from yancuo_win.ui.widgets import OperationResultDialog
 
 
 class _ReaderStub(QWidget):
-    def set_adaptive_content_height(self, _maximum_height: int) -> None:
+    def set_fit_content_height(self, *_args, **_kwargs) -> None:
         return None
 
     def set_accessible_content(self, name: str, description: str = "") -> None:

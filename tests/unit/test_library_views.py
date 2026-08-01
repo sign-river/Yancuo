@@ -41,7 +41,8 @@ class _ReaderStub(QWidget):
         self.setAccessibleDescription(description)
 
     def set_fit_content_height(self, *_args, **_kwargs) -> None:
-        pass
+        self.fit_content_height_args = _args
+        self.fit_content_height_kwargs = _kwargs
 
     def set_adaptive_content_height(self, maximum_height, **_kwargs) -> None:
         self.adaptive_height_limit = maximum_height
@@ -612,7 +613,10 @@ def test_formula_content_surfaces_use_bounded_adaptive_height(
     assert inline_reader is not None
     assert inline_reader._content_height_limit == 420
 
-    assert window.problem_detail_page.reader.adaptive_height_limit == 560
+    assert window.problem_detail_page.reader.fit_content_height_args == ()
+    assert window.problem_detail_page.reader.fit_content_height_kwargs == {
+        "expand_widget": False,
+    }
     assert window.intake_page.ai_result_preview.adaptive_height_limit == 520
     assert {
         preview.adaptive_height_limit

@@ -406,7 +406,10 @@ class ProblemDetailPage(QWidget):
         root.addWidget(self.action_toolbar)
 
         self.reader = MathContentView()
-        self.reader.set_adaptive_content_height(560)
+        # The reader owns the remaining page height.  A content-height-fixed
+        # reader changes its parent layout when its first async render arrives,
+        # which makes the header and toolbar visibly jump on first open.
+        self.reader.set_fit_content_height(expand_widget=False)
         self.reader.set_accessible_content(
             "题目正文与解析",
             "只读题目内容；可使用方向键或翻页键浏览长内容",
