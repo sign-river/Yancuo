@@ -72,6 +72,11 @@ from yancuo_win.ui.icons import bind_icon
 from yancuo_win.ui.intake_page import IntakePage
 from yancuo_win.ui.math_content import MathContentView, set_preview_zoom_scale
 from yancuo_win.ui.note_page import NotePage
+from yancuo_win.ui.operation_results import (
+    infer_transfer_operation,
+    TransferOperation,
+    show_transfer_result,
+)
 from yancuo_win.ui.problem_detail import ProblemDetailPage
 from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
@@ -84,7 +89,6 @@ from yancuo_win.ui.widgets import (
     ConfirmDialog,
     CompletionNotification,
     IconButton,
-    OperationResultDialog,
     PageHeader,
     SearchInput,
     SoftItemDelegate,
@@ -643,17 +647,19 @@ class MainWindow(QMainWindow):
         details: str = "",
         retry: Callable[[], None] | None = None,
         is_error: bool = False,
+        operation: TransferOperation | None = None,
     ) -> None:
-        dialog = OperationResultDialog(
+        if operation is None:
+            operation = infer_transfer_operation(title)
+        show_transfer_result(
+            self,
             title,
             summary,
+            operation=operation,
             details=details,
             is_error=is_error,
-            retry_text="重新尝试" if retry is not None else "",
-            parent=self,
+            retry=retry,
         )
-        if dialog.exec() == OperationResultDialog.RetryCode and retry is not None:
-            QTimer.singleShot(0, retry)
 
     def _build_shortcuts(self) -> None:
         shortcuts = (

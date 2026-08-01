@@ -9,7 +9,11 @@ from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 import yancuo_win.ui.problem_detail as problem_detail_module
 from yancuo_win.data.models import Problem
-from yancuo_win.ui.operation_results import TransferOperation, TransferResultDialog
+from yancuo_win.ui.operation_results import (
+    infer_transfer_operation,
+    TransferOperation,
+    TransferResultDialog,
+)
 from yancuo_win.ui.widgets import OperationResultDialog
 
 
@@ -91,6 +95,11 @@ def test_transfer_operation_labels_cover_all_migrated_result_categories() -> Non
         "云端",
         "同步",
     ]
+    assert infer_transfer_operation("图片导入完成") is TransferOperation.IMPORT
+    assert infer_transfer_operation("Word 导出失败") is TransferOperation.EXPORT
+    assert infer_transfer_operation("完整备份包恢复完成") is TransferOperation.RESTORE
+    assert infer_transfer_operation("云端资料合并完成") is TransferOperation.CLOUD
+    assert infer_transfer_operation("拉取合并失败") is TransferOperation.SYNC
 
 
 def test_transfer_result_restores_focus_to_its_invoker() -> None:
@@ -106,6 +115,26 @@ def test_transfer_result_restores_focus_to_its_invoker() -> None:
     app.processEvents()
 
     assert QApplication.focusWidget() is invoker
+    dialog.close()
+    parent.close()
+
+
+def test_transfer_result_skips_a_disabled_invoker_when_restoring_focus() -> None:
+    app = _application()
+    parent = QWidget()
+    disabled = QPushButton("正在导出", parent)
+    fallback = QPushButton("其他操作", parent)
+    fallback.move(0, 40)
+    parent.show()
+    disabled.setFocus()
+    disabled.setEnabled(False)
+    app.processEvents()
+    dialog = TransferResultDialog("导出完成", "资料已导出。", parent=parent)
+
+    dialog.done(0)
+    app.processEvents()
+
+    assert QApplication.focusWidget() is fallback
     dialog.close()
     parent.close()
 
