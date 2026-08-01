@@ -1582,7 +1582,9 @@ class IntakePage(QWidget):
         self.answer_apply_button.setEnabled(True)
 
     def _on_answer_recognition_failed(self, error: str) -> None:
-        self.answer_recognition_status.setText(f"识别失败：{error}")
+        message = f"识别失败，结果未写入：{error}"
+        self.answer_recognition_status.setText(message)
+        self.status_message.emit(message)
 
     def _on_answer_recognition_finished(self) -> None:
         worker = self.answer_recognition_worker

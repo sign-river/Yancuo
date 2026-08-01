@@ -17,6 +17,7 @@ import json
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from PySide6.QtCore import QRect
@@ -75,6 +76,9 @@ _INTAKE_AI_FIELDS = frozenset(
         "priority",
     }
 )
+
+_USER_ANSWER_TIMEOUT_SECONDS = 45
+_USER_ANSWER_RETRY_ATTEMPTS = 1
 
 _COMMIT_FIELDS = frozenset(
     {
@@ -788,6 +792,17 @@ class ProblemIntakeService:
             raise DomainError("作答图片不存在")
         provider = get_provider(self.runtime.settings)
         provider.validate_configuration()
+        timeout_seconds = min(
+            self.runtime.settings.ai.request_timeout_seconds,
+            _USER_ANSWER_TIMEOUT_SECONDS,
+        )
+        started = perf_counter()
+        self.runtime.logger.info(
+            "user answer recognition started: image_count=%d timeout_seconds=%d retry_attempts=%d",
+            len(image_paths),
+            timeout_seconds,
+            _USER_ANSWER_RETRY_ATTEMPTS,
+        )
         prompt = (
             "这是用户补录作答的图片。只提取用户写下的作答内容，保留原有"
             "文本、数学公式和 LaTeX；不要解题、不要补全缺失步骤、不要"
@@ -796,15 +811,34 @@ class ProblemIntakeService:
         )
         if keywords.strip():
             prompt += "\n用户提供的定位关键词：" + keywords.strip()
-        result = provider.structure_from_images(
-            image_paths=[str(path) for path in image_paths],
-            prompt=prompt,
-            model=self.runtime.settings.ai.default_vision_model,
-            timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
-        )
+        try:
+            result = provider.structure_from_images(
+                image_paths=[str(path) for path in image_paths],
+                prompt=prompt,
+                model=self.runtime.settings.ai.default_vision_model,
+                timeout_seconds=timeout_seconds,
+                retry_attempts=_USER_ANSWER_RETRY_ATTEMPTS,
+            )
+        except Exception as exc:
+            self.runtime.logger.warning(
+                "user answer recognition failed: elapsed_ms=%d error_type=%s error=%s",
+                (perf_counter() - started) * 1000,
+                type(exc).__name__,
+                str(exc)[:500],
+            )
+            raise
         answer = str(result.fields.get("user_answer") or "").strip()
         if not answer:
+            self.runtime.logger.warning(
+                "user answer recognition returned no answer: elapsed_ms=%d",
+                (perf_counter() - started) * 1000,
+            )
             raise DomainError("AI 没有识别出可填入的作答内容")
+        self.runtime.logger.info(
+            "user answer recognition completed: elapsed_ms=%d answer_length=%d",
+            (perf_counter() - started) * 1000,
+            len(answer),
+        )
         return answer
 
     def start_ai(

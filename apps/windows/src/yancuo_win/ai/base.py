@@ -146,6 +146,7 @@ class AIProvider(ABC):
         prompt: str,
         model: str,
         timeout_seconds: int,
+        retry_attempts: int | None = None,
     ) -> StructuredResult:
         raise NotImplementedError
 
@@ -156,6 +157,7 @@ class AIProvider(ABC):
         prompt: str,
         model: str,
         timeout_seconds: int,
+        retry_attempts: int | None = None,
     ) -> StructuredResult:
         """Recognize one ordered image group in a single provider request."""
 
@@ -165,5 +167,6 @@ class AIProvider(ABC):
                 prompt=prompt,
                 model=model,
                 timeout_seconds=timeout_seconds,
+                retry_attempts=retry_attempts,
             )
         raise NotImplementedError(f"{self.name} 不支持单次多图识别")

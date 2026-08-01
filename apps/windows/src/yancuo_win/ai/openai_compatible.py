@@ -100,6 +100,7 @@ class OpenAICompatibleProvider(AIProvider):
         method: str,
         timeout_seconds: int,
         payload: dict[str, Any] | None = None,
+        retry_attempts: int | None = None,
         retry_instruction: str = "请检查网络后点击“重新尝试失败项”",
     ) -> dict[str, Any]:
         key = self._api_key()
@@ -107,7 +108,9 @@ class OpenAICompatibleProvider(AIProvider):
         body: Any = None
         self._last_request_attempts = 0
         self._last_server_timing = {}
-        for attempt in range(1, _MAX_REQUEST_ATTEMPTS + 1):
+        max_attempts = retry_attempts or _MAX_REQUEST_ATTEMPTS
+        max_attempts = max(1, min(max_attempts, _MAX_REQUEST_ATTEMPTS))
+        for attempt in range(1, max_attempts + 1):
             self._last_request_attempts = attempt
             request = urllib.request.Request(
                 f"{self.base_url}{endpoint}",
@@ -134,7 +137,7 @@ class OpenAICompatibleProvider(AIProvider):
                     body = json.loads(response.read().decode("utf-8"))
                 break
             except urllib.error.HTTPError as exc:
-                if exc.code in _RETRYABLE_HTTP_CODES and attempt < _MAX_REQUEST_ATTEMPTS:
+                if exc.code in _RETRYABLE_HTTP_CODES and attempt < max_attempts:
                     time.sleep(0.6 * attempt)
                     continue
                 detail = exc.read().decode("utf-8", errors="replace")
@@ -150,7 +153,7 @@ class OpenAICompatibleProvider(AIProvider):
                     f"AI 请求失败 HTTP {exc.code}：{hint}。服务返回：{detail[:240]}"
                 ) from exc
             except _TRANSIENT_NETWORK_ERRORS as exc:
-                if attempt < _MAX_REQUEST_ATTEMPTS:
+                if attempt < max_attempts:
                     time.sleep(0.6 * attempt)
                     continue
                 reason = exc.reason if isinstance(exc, urllib.error.URLError) else str(exc)
@@ -190,12 +193,14 @@ class OpenAICompatibleProvider(AIProvider):
         prompt: str,
         model: str,
         timeout_seconds: int,
+        retry_attempts: int | None = None,
     ) -> StructuredResult:
         return self.structure_from_images(
             image_paths=[image_path],
             prompt=prompt,
             model=model,
             timeout_seconds=timeout_seconds,
+            retry_attempts=retry_attempts,
         )
 
     def structure_from_images(
@@ -205,6 +210,7 @@ class OpenAICompatibleProvider(AIProvider):
         prompt: str,
         model: str,
         timeout_seconds: int,
+        retry_attempts: int | None = None,
     ) -> StructuredResult:
         encode_started = time.perf_counter()
         if not image_paths:
@@ -241,6 +247,7 @@ class OpenAICompatibleProvider(AIProvider):
             method="POST",
             timeout_seconds=timeout_seconds,
             payload=payload,
+            retry_attempts=retry_attempts,
         )
         request_ms = (time.perf_counter() - request_started) * 1000
 
