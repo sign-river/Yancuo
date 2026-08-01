@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from PySide6.QtCore import QDateTime, QPoint, QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import (
@@ -52,6 +52,7 @@ from yancuo_win.application.cloud_service import CloudBackupService
 from yancuo_win.application.intake_service import ProblemIntakeService
 from yancuo_win.application.note_service import NoteService
 from yancuo_win.application.problem_chat_service import ProblemChatService
+from yancuo_win.application.question_content import content_blocks_with_images
 from yancuo_win.application.search_service import SearchIndexHealth, SearchIndexService
 from yancuo_win.application.search_spec import SearchBoundary
 from yancuo_win.application.services import AppServices, ProblemFilter
@@ -141,6 +142,7 @@ class _InlineQuestionItem(QWidget):
         self,
         problem: Problem,
         *,
+        content_blocks: list[dict[str, Any]] | None = None,
         expanded: bool,
         on_toggle: Callable[[], None],
         on_open: Callable[[], None],
@@ -205,6 +207,7 @@ class _InlineQuestionItem(QWidget):
         reader.set_problem(
             {
                 "question_markdown": question_markdown,
+                "content_blocks": content_blocks or [],
             },
             include_answers=False,
             show_header=False,
@@ -2635,6 +2638,11 @@ class MainWindow(QMainWindow):
     def _make_inline_question_widget(self, problem: Problem) -> _InlineQuestionItem:
         return _InlineQuestionItem(
             problem,
+            content_blocks=content_blocks_with_images(
+                problem.question_content_json,
+                problem.assets or (),
+                self.services.store.resolve,
+            ),
             expanded=problem.id == self._expanded_question_id,
             on_toggle=lambda problem_id=problem.id: self._toggle_question_by_id(problem_id),
             on_open=lambda problem_id=problem.id: self._open_problem_detail(problem_id),
@@ -3047,6 +3055,11 @@ class MainWindow(QMainWindow):
         self.problem_detail_page.set_problem(
             problem,
             image_path=image_path,
+            content_blocks=content_blocks_with_images(
+                problem.question_content_json,
+                problem.assets or (),
+                self.services.store.resolve,
+            ),
             subject_name=subject_name,
             chapter_name=chapter_name,
         )

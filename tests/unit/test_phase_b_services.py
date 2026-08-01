@@ -161,6 +161,40 @@ def test_backup_restore_and_word_export(
     assert "42" in text
 
 
+def test_word_export_preserves_structured_table_order(
+    services: AppServices, tmp_path: Path
+) -> None:
+    problem = services.create_problem(title="结构化导出", status="active")
+    services.update_problem(
+        problem.id,
+        {
+            "question_content_json": json.dumps(
+                [
+                    {"type": "text", "content": "先阅读表格："},
+                    {
+                        "type": "table",
+                        "rows": [
+                            [{"content": "项目", "colspan": 2}],
+                            ["x", "$x^2$"],
+                        ],
+                    },
+                    {"type": "formula", "content": "x^2+1"},
+                ],
+                ensure_ascii=False,
+            )
+        },
+    )
+
+    destination = services.export_problems_docx(
+        [problem.id], tmp_path / "structured.docx"
+    )
+
+    document = Document(str(destination))
+    assert any(paragraph.text == "先阅读表格：" for paragraph in document.paragraphs)
+    assert document.tables[0].cell(0, 0).text == "项目"
+    assert document.tables[0].cell(1, 1).text == "$x^2$"
+
+
 def test_chapter_template_roundtrip(services: AppServices, tmp_path: Path) -> None:
     sub = services.create_subject("线性代数")
     services.create_chapter(sub.id, "行列式")

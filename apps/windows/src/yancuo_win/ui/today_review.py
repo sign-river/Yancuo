@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from yancuo_win.application.services import AppServices
+from yancuo_win.application.question_content import content_blocks_with_images
 from yancuo_win.domain.review_rules import REVIEW_GRADES
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.math_content import MathContentView
@@ -102,6 +103,11 @@ class TodayReviewDialog(QDialog):
             "notes": p.notes,
             "problem_type": p.problem_type,
             "source_book": p.source_book,
+            "content_blocks": content_blocks_with_images(
+                p.question_content_json,
+                p.assets or (),
+                getattr(getattr(self.services, "store", None), "resolve", None),
+            ),
         }
         self.body.set_problem(
             fields,

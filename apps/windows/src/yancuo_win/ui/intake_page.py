@@ -8,21 +8,25 @@ dialog to finish recording a new problem.
 from __future__ import annotations
 
 import math
+import json
+import base64
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -46,6 +50,7 @@ from yancuo_win.application.intake_service import (
     ProblemIntakeService,
     RegionRecognitionProposal,
 )
+from yancuo_win.ai.base import normalize_content_blocks
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.tasks.worker import (
@@ -75,6 +80,189 @@ _PAGE_AI_PROCESSING = 2
 _PAGE_AI_CONFIRM = 3
 _PAGE_DONE = 4
 _PAGE_AI_ANSWER_CAPTURE = 5
+
+
+class ContentBlocksEditor(QWidget):
+    """Ordered editor for AI-recognized text, formula, table, and figure blocks."""
+
+    changed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._blocks: list[dict[str, Any]] = []
+        self._loading = False
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
+        self.block_list = QListWidget()
+        self.block_list.setAccessibleName("题目结构化内容块顺序")
+        self.block_list.setMinimumHeight(110)
+        root.addWidget(self.block_list)
+        actions = QGridLayout()
+        for column, (label, kind) in enumerate((("添加文本", "text"), ("添加公式", "formula"), ("添加表格", "table"), ("添加题图", "figure"))):
+            button = ghost_button(label)
+            button.clicked.connect(lambda _checked=False, value=kind: self._add(value))
+            actions.addWidget(button, 0, column)
+        for column, (label, delta) in enumerate((("上移", -1), ("下移", 1))):
+            button = ghost_button(label)
+            button.clicked.connect(lambda _checked=False, value=delta: self._move(value))
+            actions.addWidget(button, 1, column)
+        remove = danger_button("删除块")
+        remove.clicked.connect(self._remove)
+        actions.addWidget(remove, 1, 2)
+        actions.setColumnStretch(3, 1)
+        root.addLayout(actions)
+
+        form = QFormLayout()
+        self.kind = QComboBox()
+        for label, value in (("文本", "text"), ("公式", "formula"), ("表格", "table"), ("题图", "figure")):
+            self.kind.addItem(label, value)
+        self.content = QTextEdit()
+        self.content.setMaximumHeight(100)
+        self.content.setPlaceholderText("文本、公式或题图说明")
+        self.table_rows = QTextEdit()
+        self.table_rows.setMaximumHeight(130)
+        self.table_rows.setPlaceholderText(
+            "每行一行、制表符分隔；合并单元格可直接填写 rows JSON"
+        )
+        self.source_image_index = QSpinBox()
+        self.source_image_index.setRange(0, 999)
+        self.region_row = QWidget()
+        region_layout = QHBoxLayout(self.region_row)
+        region_layout.setContentsMargins(0, 0, 0, 0)
+        self.region_values: list[QDoubleSpinBox] = []
+        for label, default in (("x", 0.0), ("y", 0.0), ("宽", 1.0), ("高", 1.0)):
+            region_layout.addWidget(QLabel(label))
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 1.0)
+            spin.setDecimals(4)
+            spin.setSingleStep(0.01)
+            spin.setValue(default)
+            region_layout.addWidget(spin)
+            self.region_values.append(spin)
+        describe_field(self.kind, "内容块类型", "可将误识别的表格或题图降级为文本")
+        describe_field(self.content, "内容块文本或说明")
+        describe_field(self.table_rows, "表格单元格内容")
+        describe_field(self.source_image_index, "题图来源图片序号")
+        for spin, name in zip(self.region_values, ("题图区域横坐标", "题图区域纵坐标", "题图区域宽度", "题图区域高度"), strict=True):
+            describe_field(spin, name, "范围 0 到 1")
+        form.addRow("类型", self.kind)
+        form.addRow("内容 / 说明", self.content)
+        form.addRow("表格行列", self.table_rows)
+        form.addRow("来源图片序号", self.source_image_index)
+        form.addRow("归一化裁剪区域", self.region_row)
+        root.addLayout(form)
+
+        self.block_list.currentRowChanged.connect(self._select)
+        self.kind.currentIndexChanged.connect(self._write_current)
+        self.content.textChanged.connect(self._write_current)
+        self.table_rows.textChanged.connect(self._write_current)
+        self.source_image_index.valueChanged.connect(self._write_current)
+        for spin in self.region_values:
+            spin.valueChanged.connect(self._write_current)
+        self._sync_editor_visibility()
+
+    @staticmethod
+    def _label(block: dict[str, Any], index: int) -> str:
+        labels = {"text": "文本", "formula": "公式", "table": "表格", "figure": "题图"}
+        content = str(block.get("content") or "").replace("\n", " ").strip()
+        if block.get("type") == "table":
+            content = f"{len(block.get('rows') or [])} 行"
+        return f"{index + 1}. {labels.get(str(block.get('type')), '内容')} · {content[:36]}".rstrip(" ·")
+
+    def _refresh_list(self, selected: int | None = None) -> None:
+        self._loading = True
+        self.block_list.clear()
+        for index, block in enumerate(self._blocks):
+            self.block_list.addItem(self._label(block, index))
+        if self._blocks:
+            row = min(selected if selected is not None else 0, len(self._blocks) - 1)
+            self.block_list.setCurrentRow(max(0, row))
+        self._loading = False
+        self._select(self.block_list.currentRow())
+
+    def _add(self, kind: str) -> None:
+        block: dict[str, Any] = {"type": kind, "content": "", "source_region": {}}
+        if kind == "table":
+            block["rows"] = [[""]]
+        if kind == "figure":
+            block.update(source_image_index=0, source_region={"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0})
+        row = self.block_list.currentRow()
+        insert_at = len(self._blocks) if row < 0 else row + 1
+        self._blocks.insert(insert_at, block)
+        self._refresh_list(insert_at)
+        self.changed.emit()
+
+    def _remove(self) -> None:
+        row = self.block_list.currentRow()
+        if 0 <= row < len(self._blocks):
+            self._blocks.pop(row)
+            self._refresh_list(min(row, len(self._blocks) - 1))
+            self.changed.emit()
+
+    def _move(self, delta: int) -> None:
+        row = self.block_list.currentRow()
+        target = row + delta
+        if 0 <= row < len(self._blocks) and 0 <= target < len(self._blocks):
+            self._blocks[row], self._blocks[target] = self._blocks[target], self._blocks[row]
+            self._refresh_list(target)
+            self.changed.emit()
+
+    def _select(self, row: int) -> None:
+        if self._loading or not 0 <= row < len(self._blocks):
+            return
+        block = self._blocks[row]
+        self._loading = True
+        self.kind.setCurrentIndex(max(0, self.kind.findData(block.get("type"))))
+        self.content.setPlainText(str(block.get("content") or ""))
+        rows = block.get("rows") or []
+        if any(isinstance(cell, dict) for cells in rows if isinstance(cells, list) for cell in cells):
+            table_text = json.dumps(rows, ensure_ascii=False, indent=2)
+        else:
+            table_text = "\n".join("\t".join(str(cell) for cell in cells) for cells in rows if isinstance(cells, list))
+        self.table_rows.setPlainText(table_text)
+        self.source_image_index.setValue(int(block.get("source_image_index", 0)))
+        region = block.get("source_region") or {}
+        for spin, key, default in zip(self.region_values, ("x", "y", "width", "height"), (0.0, 0.0, 1.0, 1.0), strict=True):
+            spin.setValue(float(region.get(key, default)))
+        self._loading = False
+        self._sync_editor_visibility()
+
+    def _write_current(self, *_args) -> None:
+        if self._loading:
+            return
+        row = self.block_list.currentRow()
+        if not 0 <= row < len(self._blocks):
+            return
+        kind = str(self.kind.currentData())
+        block: dict[str, Any] = {"type": kind, "content": self.content.toPlainText(), "source_region": {}}
+        if kind == "table":
+            raw = self.table_rows.toPlainText().strip()
+            try:
+                rows = json.loads(raw) if raw.startswith("[") else [line.split("\t") for line in raw.splitlines()]
+            except json.JSONDecodeError:
+                rows = [[raw]]
+            block["rows"] = rows if isinstance(rows, list) else [[raw]]
+        if kind == "figure":
+            block["source_image_index"] = self.source_image_index.value()
+            block["source_region"] = dict(zip(("x", "y", "width", "height"), (spin.value() for spin in self.region_values), strict=True))
+        self._blocks[row] = block
+        self.block_list.item(row).setText(self._label(block, row))
+        self._sync_editor_visibility()
+        self.changed.emit()
+
+    def _sync_editor_visibility(self) -> None:
+        kind = self.kind.currentData()
+        self.table_rows.setVisible(kind == "table")
+        self.source_image_index.setVisible(kind == "figure")
+        self.region_row.setVisible(kind == "figure")
+
+    def blocks(self) -> list[dict[str, Any]]:
+        return normalize_content_blocks(self._blocks)
+
+    def set_blocks(self, blocks: Any) -> None:
+        self._blocks = normalize_content_blocks(blocks)
+        self._refresh_list()
 
 
 class ImagePreviewLabel(QLabel):
@@ -569,6 +757,13 @@ class ProblemForm(QWidget):
         describe_field(self.question, "题干")
         content.body.addWidget(QLabel("题干"))
         content.body.addWidget(self.question)
+        self.content_blocks = ContentBlocksEditor()
+        self.content_blocks.setVisible(self.show_render_previews)
+        if self.show_render_previews:
+            blocks_label = QLabel("结构化内容块（按原题顺序，可编辑表格、题图区域并拖动顺序）")
+            blocks_label.setObjectName("MutedLabel")
+            content.body.addWidget(blocks_label)
+            content.body.addWidget(self.content_blocks)
         if self.show_render_previews:
             self._add_field_preview(content.body, "question", "题目内容预览")
         root.addWidget(content)
@@ -665,6 +860,8 @@ class ProblemForm(QWidget):
         self.subject.currentIndexChanged.connect(notify)
         self.chapter.currentIndexChanged.connect(notify)
         self.priority.valueChanged.connect(notify)
+        self.content_blocks.changed.connect(notify)
+        self.content_blocks.changed.connect(self.refresh_render_previews)
 
     @staticmethod
     def _text_area(placeholder: str, height: int) -> QTextEdit:
@@ -814,6 +1011,7 @@ class ProblemForm(QWidget):
             "original_number": self._optional(self.original_number.text()),
             "question_markdown": self.question.toPlainText(),
             "question_latex": self._question_latex,
+            "content_blocks": self.content_blocks.blocks(),
             "user_answer": self.user_answer.toPlainText(),
             "correct_answer": self.correct_answer.toPlainText(),
             "solution_markdown": self.solution.toPlainText(),
@@ -905,6 +1103,7 @@ class ProblemForm(QWidget):
         self.original_number.setText(str(values.get("original_number") or ""))
         self.question.setPlainText(str(values.get("question_markdown") or ""))
         self._question_latex = str(values.get("question_latex") or "")
+        self.content_blocks.set_blocks(values.get("content_blocks") or [])
         self.user_answer.setPlainText(
             ""
             if self.clear_user_answer_on_load
@@ -2377,6 +2576,35 @@ class IntakePage(QWidget):
         if not hasattr(self, "ai_result_preview") or not hasattr(self, "ai_form"):
             return
         fields = self.ai_form.values()
+        if self.ai_candidates:
+            candidate = self.ai_candidates[self.candidate_index]
+            paths = self.intake.candidate_source_images(candidate.review_item_id)
+            blocks = normalize_content_blocks(fields.get("content_blocks"))
+            for block in blocks:
+                if block.get("type") != "figure":
+                    continue
+                index = int(block.get("source_image_index", 0))
+                region = block.get("source_region") or {}
+                if not (0 <= index < len(paths) and region):
+                    continue
+                image = QImage(str(paths[index]))
+                if image.isNull():
+                    continue
+                rect = QRectF(
+                    image.width() * float(region.get("x", 0)),
+                    image.height() * float(region.get("y", 0)),
+                    image.width() * float(region.get("width", 0)),
+                    image.height() * float(region.get("height", 0)),
+                ).toAlignedRect().intersected(image.rect())
+                crop = image.copy(rect)
+                payload = QBuffer()
+                payload.open(QIODevice.OpenModeFlag.WriteOnly)
+                if crop.save(payload, "PNG"):
+                    block["image_data_uri"] = (
+                        "data:image/png;base64,"
+                        + base64.b64encode(bytes(payload.data())).decode("ascii")
+                    )
+            fields["content_blocks"] = blocks
         if self.ai_form.subject.currentData():
             fields["subject_name"] = self.ai_form.subject.currentText()
         if self.ai_form.chapter.currentData():
@@ -2416,6 +2644,19 @@ class IntakePage(QWidget):
             QMessageBox.warning(self, "无法调整来源图", str(exc))
             self._load_candidate()
             return
+        blocks = self.ai_form.content_blocks.blocks()
+        for block in blocks:
+            if block.get("type") != "figure":
+                continue
+            index = int(block.get("source_image_index", 0))
+            if index == row:
+                block["source_image_index"] = target
+            elif row < target and row < index <= target:
+                block["source_image_index"] = index - 1
+            elif target < row and target <= index < row:
+                block["source_image_index"] = index + 1
+        self.ai_form.content_blocks.set_blocks(blocks)
+        self._queue_ai_preview()
         self.status_message.emit("来源图片顺序已保存；不会自动重新识别")
 
     def _show_region_label(self, region: dict[str, float]) -> None:

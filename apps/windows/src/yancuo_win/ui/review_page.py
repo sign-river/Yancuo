@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from yancuo_win.application.services import AppServices
 from yancuo_win.application.note_service import NoteService
+from yancuo_win.application.question_content import content_blocks_with_images
 from yancuo_win.data.models import NoteDocument, Problem
 from yancuo_win.domain.review_rules import REVIEW_GRADES
 from yancuo_win.domain.rules import DomainError
@@ -712,8 +713,7 @@ class ReviewPage(QWidget):
         self._index %= len(self._note_queue)
         return self._note_queue[self._index]
 
-    @staticmethod
-    def _fields(problem: Problem) -> dict[str, object]:
+    def _fields(self, problem: Problem) -> dict[str, object]:
         return {
             "title": problem.title,
             "priority": problem.priority,
@@ -726,6 +726,11 @@ class ReviewPage(QWidget):
             "notes": problem.notes,
             "problem_type": problem.problem_type,
             "source_book": problem.source_book,
+            "content_blocks": content_blocks_with_images(
+                problem.question_content_json,
+                problem.assets or (),
+                getattr(getattr(self.services, "store", None), "resolve", None),
+            ),
         }
 
     def _render(self) -> None:

@@ -129,9 +129,11 @@ class WorkspaceService:
                     shutil.copy2(src, candidate)
                     asset_files.append(
                         {
+                            "id": asset.id,
                             "role": asset.role,
                             "filename": candidate.name,
                             "sha256": asset.sha256,
+                            "mime_type": asset.mime_type,
                         }
                     )
 
@@ -146,6 +148,7 @@ class WorkspaceService:
                     "chapter_name": chapter_name,
                     "tags": tags,
                     "asset_files": asset_files,
+                    "content_blocks": json.loads(problem.question_content_json or "[]"),
                 }
                 (pdir / "metadata.json").write_text(
                     json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
@@ -310,6 +313,13 @@ class WorkspaceService:
             raise DomainError(f"题库中不存在题目 {problem_id}")
 
         proposed: dict[str, Any] = {}
+        if "content_blocks" in metadata:
+            from yancuo_win.ai.base import normalize_content_blocks
+
+            proposed["question_content_json"] = json.dumps(
+                normalize_content_blocks(metadata.get("content_blocks")),
+                ensure_ascii=False,
+            )
         for field in (
             "question_markdown",
             "user_answer",

@@ -202,6 +202,7 @@ _REVIEW_MUTABLE_FIELDS = frozenset(
         "title",
         "question_markdown",
         "question_latex",
+        "question_content_json",
         "user_answer",
         "correct_answer",
         "solution_markdown",
@@ -233,6 +234,7 @@ _REVIEW_REQUIRED_TEXT_FIELDS = frozenset(
     {
         "question_markdown",
         "question_latex",
+        "question_content_json",
         "user_answer",
         "correct_answer",
         "solution_markdown",

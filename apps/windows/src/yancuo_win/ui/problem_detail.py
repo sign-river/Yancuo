@@ -525,6 +525,7 @@ class ProblemDetailPage(QWidget):
         problem: Problem,
         *,
         image_path: Path | None = None,
+        content_blocks: list[dict[str, Any]] | None = None,
         subject_name: str | None = None,
         chapter_name: str | None = None,
     ) -> None:
@@ -557,6 +558,7 @@ class ProblemDetailPage(QWidget):
         }
         fields["subject_name"] = subject_name
         fields["chapter_name"] = chapter_name
+        fields["content_blocks"] = content_blocks or []
         self.reader.set_problem(
             fields,
             tag_names=[tag.name for tag in (problem.tags or [])],

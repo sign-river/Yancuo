@@ -763,6 +763,45 @@ def test_many_images_one_problem_uses_one_ordered_recognition_unit(
     assert candidate_unit.recognition_unit_id == unit.id
 
 
+def test_many_image_candidate_materializes_traced_figure_from_second_source(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    first = tmp_path / "structured-source-1.png"
+    second = tmp_path / "structured-source-2.png"
+    first_image = QImage(100, 80, QImage.Format.Format_ARGB32)
+    first_image.fill(QColor("red"))
+    second_image = QImage(120, 90, QImage.Format.Format_ARGB32)
+    second_image.fill(QColor("blue"))
+    assert first_image.save(str(first), "PNG")
+    assert second_image.save(str(second), "PNG")
+    started = intake.start_ai([first, second], recognition_mode="many_to_one")
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    fields = dict(candidate.fields)
+    fields["content_blocks"] = [
+        {"type": "text", "content": "观察下图"},
+        {
+            "type": "figure",
+            "content": "第二张来源图的局部",
+            "source_image_index": 1,
+            "source_region": {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.6},
+        },
+    ]
+
+    committed = intake.commit_ai_candidate(candidate.review_item_id, fields)
+
+    loaded = intake.app.get_problem(committed.id)
+    assert loaded is not None
+    assert len([asset for asset in loaded.assets if asset.role == "original"]) == 2
+    derived = [asset for asset in loaded.assets if asset.role == "derived_figure"]
+    assert len(derived) == 1
+    assert derived[0].width == 60
+    assert derived[0].height == 54
+    blocks = json.loads(loaded.question_content_json)
+    assert blocks[1]["source_image_index"] == 1
+    assert blocks[1]["derived_asset_id"] == derived[0].id
+
+
 def test_candidate_sources_can_be_reordered(
     intake: ProblemIntakeService, tmp_path: Path
 ) -> None:

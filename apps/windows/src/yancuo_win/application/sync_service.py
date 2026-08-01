@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import tempfile
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.cloud.factory import get_cloud_provider
@@ -18,6 +20,7 @@ from yancuo_win.cloud.local_folder import LocalFolderProvider
 from yancuo_win.cloud.base import CloudProvider
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
+    Asset,
     Problem,
     ReviewItem,
     ReviewSession,
@@ -29,6 +32,7 @@ from yancuo_win.domain.operations import build_operation, validate_operation
 from yancuo_win.domain.rules import DomainError, validate_priority, validate_status
 from yancuo_win.domain.sync_merge import apply_patch, merge_snapshots
 from yancuo_win.import_export.ebpack import EbpackService
+from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.review.changeset import snapshot_problem_fields
 
 
@@ -41,6 +45,7 @@ _SYNC_MUTABLE_FIELDS = frozenset(
         "title",
         "question_markdown",
         "question_latex",
+        "question_content_json",
         "user_answer",
         "correct_answer",
         "solution_markdown",
@@ -66,6 +71,7 @@ _SYNC_REQUIRED_TEXT_FIELDS = frozenset(
     {
         "question_markdown",
         "question_latex",
+        "question_content_json",
         "user_answer",
         "correct_answer",
         "solution_markdown",
@@ -205,6 +211,7 @@ class SyncService:
         # push/pull 时解析默认提供商。显式传入的 provider 仍立即复用。
         self.provider = provider
         self.ebpack = EbpackService(runtime)
+        self.store = ObjectStore(runtime.paths.asset_objects_dir)
 
     @property
     def owner(self) -> str:
@@ -315,6 +322,8 @@ class SyncService:
             tombstone=operation == "delete",
         )
         op["base_fields"] = base_fields
+        op["attachments"] = self._content_block_attachments(problem_id, changed)
+        validate_operation(op)
         with self.runtime.session_factory() as s:
             existing = s.get(SyncOperation, op["operation_id"])
             if existing:
@@ -333,6 +342,62 @@ class SyncService:
             s.add(row)
             s.commit()
         return op
+
+    def _content_block_attachments(
+        self, problem_id: str, changed_fields: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        if "question_content_json" not in changed_fields:
+            return []
+        from yancuo_win.application.question_content import load_question_content
+
+        referenced_ids = {
+            str(block.get("derived_asset_id"))
+            for block in load_question_content(changed_fields["question_content_json"])
+            if block.get("type") == "figure" and block.get("derived_asset_id")
+        }
+        if not referenced_ids:
+            return []
+        with self.runtime.session_factory() as session:
+            problem = session.scalar(
+                select(Problem)
+                .where(Problem.id == problem_id)
+                .options(selectinload(Problem.assets))
+            )
+            if problem is None:
+                return []
+            result: list[dict[str, Any]] = []
+            total_bytes = 0
+            for asset in problem.assets:
+                if asset.id not in referenced_ids or asset.role != "derived_figure":
+                    continue
+                path = self.store.resolve(asset.relative_path)
+                try:
+                    payload = path.read_bytes()
+                except OSError:
+                    continue
+                total_bytes += len(payload)
+                if total_bytes > 32 * 1024 * 1024:
+                    raise DomainError("单个 Operation 的派生题图总大小不能超过 32 MiB")
+                if hashlib.sha256(payload).hexdigest() != asset.sha256:
+                    raise DomainError(f"派生题图哈希不一致：{asset.id}")
+                result.append(
+                    {
+                        "id": asset.id,
+                        "role": "derived_figure",
+                        "sha256": asset.sha256,
+                        "mime_type": asset.mime_type,
+                        "size_bytes": len(payload),
+                        "width": asset.width,
+                        "height": asset.height,
+                        "content_base64": base64.b64encode(payload).decode("ascii"),
+                    }
+                )
+            missing = referenced_ids - {item["id"] for item in result}
+            if missing:
+                raise DomainError(
+                    "结构化题目引用的派生题图缺失：" + ", ".join(sorted(missing))
+                )
+            return result
 
     def list_unpushed(self) -> list[dict[str, Any]]:
         with self.runtime.session_factory() as s:
@@ -460,6 +525,7 @@ class SyncService:
                     for op in ops:
                         fields.update(op.get("changed_fields") or {})
                     problem = self._create_remote_problem(s, entity_id, fields)
+                    self._apply_operation_attachments(s, problem, ops)
                     for op in ops:
                         self._store_remote_op(s, op, applied=True)
                     s.commit()
@@ -470,6 +536,7 @@ class SyncService:
                 return {"applied": 0, "auto": 0, "conflicts": 0}
 
             tag_names = [t.name for t in problem.tags]
+            self._apply_operation_attachments(s, problem, ops)
             local = sync_snapshot(problem, tag_names)
             # 用各 op 的 base_fields 还原共同祖先：取第一个 op 的 base 覆盖
             base = dict(local)
@@ -583,6 +650,75 @@ class SyncService:
                 self._store_remote_op(s, op, applied=True)
             s.commit()
             return {"applied": len(ops), "auto": auto, "conflicts": 0}
+
+    def _apply_operation_attachments(
+        self, session, problem: Problem, operations: list[dict[str, Any]]
+    ) -> None:
+        """Materialize only derived figures referenced by the accompanying blocks."""
+
+        from yancuo_win.application.question_content import load_question_content
+
+        referenced_ids: set[str] = set()
+        attachments: dict[str, dict[str, Any]] = {}
+        for operation in operations:
+            content_json = (operation.get("changed_fields") or {}).get(
+                "question_content_json"
+            )
+            if isinstance(content_json, str):
+                referenced_ids.update(
+                    str(block.get("derived_asset_id"))
+                    for block in load_question_content(content_json)
+                    if block.get("derived_asset_id")
+                )
+            for attachment in operation.get("attachments") or []:
+                if isinstance(attachment, dict) and attachment.get("id"):
+                    attachments[str(attachment["id"])] = attachment
+        for asset_id in sorted(referenced_ids):
+            attachment = attachments.get(asset_id)
+            if attachment is None:
+                existing = session.get(Asset, asset_id)
+                if existing is not None and existing.problem_id == problem.id:
+                    continue
+                raise DomainError(f"同步 Operation 缺少派生题图附件：{asset_id}")
+            payload = base64.b64decode(str(attachment["content_base64"]), validate=True)
+            expected = str(attachment["sha256"])
+            if hashlib.sha256(payload).hexdigest() != expected:
+                raise DomainError(f"同步派生题图哈希不一致：{asset_id}")
+            existing = session.get(Asset, asset_id)
+            if existing is not None:
+                if existing.problem_id != problem.id or existing.sha256 != expected:
+                    raise DomainError(f"同步派生题图 ID 冲突：{asset_id}")
+                continue
+            mime_type = str(attachment.get("mime_type") or "image/png")
+            suffix = {
+                "image/jpeg": ".jpg",
+                "image/webp": ".webp",
+                "image/gif": ".gif",
+                "image/bmp": ".bmp",
+            }.get(mime_type, ".png")
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+                handle.write(payload)
+                temporary = Path(handle.name)
+            try:
+                stored = self.store.store_copy(temporary, role="derived_figure")
+            finally:
+                temporary.unlink(missing_ok=True)
+            if stored.sha256 != expected:
+                raise DomainError(f"同步派生题图落盘校验失败：{asset_id}")
+            session.add(
+                Asset(
+                    id=asset_id,
+                    problem_id=problem.id,
+                    role="derived_figure",
+                    sha256=stored.sha256,
+                    relative_path=stored.relative_path,
+                    mime_type=mime_type,
+                    size_bytes=len(payload),
+                    width=attachment.get("width"),
+                    height=attachment.get("height"),
+                    is_immutable=True,
+                )
+            )
 
     @staticmethod
     def _apply_problem_field(problem: Problem, field: str, value: Any) -> bool:

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from yancuo_win.data.ids import new_id
@@ -83,6 +86,38 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
         raise DomainError("base_fields 必须是对象")
     if "tombstone" in raw and not isinstance(raw["tombstone"], bool):
         raise DomainError("tombstone 必须是布尔值")
+    attachments = raw.get("attachments", [])
+    if not isinstance(attachments, list) or len(attachments) > 100:
+        raise DomainError("attachments 必须是最多 100 项的数组")
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            raise DomainError("attachment 必须是对象")
+        if attachment.get("role") != "derived_figure":
+            raise DomainError("Operation 只允许携带派生题图附件")
+        if not isinstance(attachment.get("id"), str) or not attachment["id"].startswith("asset_"):
+            raise DomainError("attachment id 无效")
+        if not isinstance(attachment.get("sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", attachment["sha256"]) is None:
+            raise DomainError("attachment sha256 无效")
+        mime_type = attachment.get("mime_type")
+        if mime_type is not None and (
+            not isinstance(mime_type, str) or not mime_type.startswith("image/")
+        ):
+            raise DomainError("attachment mime_type 无效")
+        for dimension in ("size_bytes", "width", "height"):
+            value = attachment.get(dimension)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                raise DomainError(f"attachment {dimension} 无效")
+        payload = attachment.get("content_base64")
+        if not isinstance(payload, str) or len(payload) > 48 * 1024 * 1024:
+            raise DomainError("attachment 内容无效或过大")
+        try:
+            decoded = base64.b64decode(payload, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise DomainError("attachment Base64 无效") from exc
+        if attachment.get("size_bytes") is not None and attachment["size_bytes"] != len(decoded):
+            raise DomainError("attachment size_bytes 与内容不一致")
 
     normalized = dict(raw)
     for field in ("base_revision", "new_revision"):

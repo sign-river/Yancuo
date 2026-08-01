@@ -691,6 +691,10 @@ class ProblemIntakeService:
             '"region": {"x": 0.05, "y": 0.10, "width": 0.90, "height": 0.35}, '
             '"uncertain_fields": []}]}',
             "即使只有一道题也使用 problems 数组；不要把多道题拼进同一个题干。",
+            "每道题必须同时输出 content_blocks，按原题顺序使用 text、formula、table、figure 四类内容块；question_markdown/question_latex 仍作为兼容降级表示。",
+            "text/formula 块使用 content；table 块使用 rows 二维数组。普通单元格为字符串，合并单元格为 {\"content\":\"...\",\"rowspan\":2,\"colspan\":2}；不得猜造看不清的单元格。",
+            "figure 块必须给出 source_image_index 和 source_region；source_image_index 是本次输入图片从 0 开始的顺序，source_region 是该图内归一化矩形。函数图、几何图、流程图等只能引用原图区域，禁止重绘。",
+            "无法可靠结构化的内容保留在 text 块，并在 uncertain_fields 中指出原因；不能为了结构完整而补写缺失数据或图形标注。",
             "region 是该题在原图中的归一化矩形坐标，左上角为原点，四个值均为 0 到 1；无法判断时使用整图 {\"x\":0,\"y\":0,\"width\":1,\"height\":1}。",
             "每道题都必须判断 subject_id、chapter_id、problem_type 和 priority（1-5）。若题干可明确匹配下方已有章节，必须填写对应 chapter_id，不能只填标签或仅填科目。",
             "章节判断必须参考该考研科目的通用考试大纲与教材章节体系。不能因为本地章节为空或缺少目标章节就省略判断；此时必须在 taxonomy_proposal 中给出规范章节名、判断理由和置信度。章节名应是“函数、极限与连续”这类稳定知识章节，不能拿“计算题”“难题”或零散标签代替。",
@@ -1786,13 +1790,24 @@ class ProblemIntakeService:
                     intake_asset.relative_path
                 )
         if intake_candidate is not None:
+            source_images = [
+                path for path in self.candidate_source_images(review_item_id) if path.is_file()
+            ]
+            if not source_images:
+                source_images = [original_image]
             problem = self.commit_manual(
                 payload,
                 tag_names=tags,
-                image_paths=[original_image],
+                image_paths=source_images,
                 source="ai_intake",
             )
             if content_blocks:
+                from yancuo_win.application.sync_service import (
+                    SyncService,
+                    sync_snapshot,
+                )
+
+                before_content = sync_snapshot(problem, tags)
                 with self.runtime.session_factory() as session:
                     stored = session.get(Problem, problem.id)
                     if stored is not None:
@@ -1801,6 +1816,15 @@ class ProblemIntakeService:
                             ensure_ascii=False,
                         )
                         session.commit()
+                updated_problem = self.app.get_problem(problem.id)
+                if updated_problem is None:
+                    raise DomainError("结构化题目写入后不存在")
+                SyncService(self.runtime).record_problem_update(
+                    updated_problem,
+                    before=before_content,
+                    after=sync_snapshot(updated_problem, tags),
+                )
+                problem = updated_problem
             with self.runtime.session_factory() as session:
                 current = session.get(
                     IntakeCandidateRecord, review_item_id
@@ -1877,22 +1901,22 @@ class ProblemIntakeService:
         for block in blocks:
             copied, region = dict(block), normalize_region(block.get("source_region"))
             index = int(copied.get("source_image_index", 0))
-            if copied.get("type") != "figure" or not region or not 0 <= index < len(originals):
+            if copied.get("type") != "figure":
                 result.append(copied)
                 continue
+            if not region or not 0 <= index < len(originals):
+                raise DomainError("题图来源图片或裁剪区域无效，请在确认页重新核对")
             source = originals[index]
             image = QImage(str(self.store.resolve(source.relative_path)))
             if image.isNull():
-                result.append(copied)
-                continue
+                raise DomainError("题图来源图片无法读取，未保存结构化题目")
             rect = QRect(round(image.width() * region["x"]), round(image.height() * region["y"]), max(1, round(image.width() * region["width"])), max(1, round(image.height() * region["height"]))).intersected(image.rect())
             crop = image.copy(rect)
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
                 temp_path = Path(handle.name)
             try:
                 if not crop.save(str(temp_path), "PNG"):
-                    result.append(copied)
-                    continue
+                    raise DomainError("题图派生裁剪保存失败，未保存结构化题目")
                 derived = self.store.store_copy(temp_path, role="derived_figure")
             finally:
                 temp_path.unlink(missing_ok=True)

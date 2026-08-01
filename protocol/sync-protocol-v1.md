@@ -77,6 +77,7 @@ operation-batches/         # 逻辑目录；远端实现对应不可变 Release 
 - `device_id`、`database_id`、`timestamp`、`entity_id` 必须是非空字符串；revision 必须是非负整数
 - `operation` ∈ `create` | `update` | `delete` | `undelete`
 - `changed_fields` 仅含实际变更键；`tags` 可为字符串数组（并集合并）
+- `question_content_json` 作为一个保守冲突字段同步；引用派生题图时，同一 Operation 可带 `attachments`，每项只允许 `role=derived_figure`，包含稳定资源 ID、SHA-256、媒体类型、尺寸和 Base64 内容。接收端必须先验证大小、Base64 和哈希，再写入内容寻址对象库；不得通过 Operation 注入或覆盖 `original` 原图。
 - `delete` 时 `tombstone=true`，并设置 `changed_fields.status="trashed"`（或等价）
 - Windows v1 当前只落地 `entity_type=problem`；其他预留实体不会被误套用到题目模型
 

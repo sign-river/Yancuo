@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -17,12 +19,14 @@ from yancuo_win.cloud.local_folder import LocalFolderProvider
 from yancuo_win.cloud.github import GitHubProvider
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.models import (
+    Asset,
     Problem,
     ReviewItem,
     ReviewSession,
     SyncOperation,
     Version,
 )
+from yancuo_win.data.ids import new_id
 from yancuo_win.domain.operations import validate_operation
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.domain.sync_merge import merge_snapshots
@@ -211,6 +215,127 @@ def test_local_mutations_are_recorded_as_operations(runtime):
     review_payloads = [p for p in payloads if "next_review_at" in p["changed_fields"]]
     assert review_payloads
     assert all(p["new_revision"] > p["base_revision"] for p in review_payloads)
+
+
+def test_structured_figure_operation_carries_and_restores_derived_asset(
+    runtime, tmp_path: Path
+):
+    provider = LocalFolderProvider(tmp_path / "derived-remote")
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "derived-repo"
+    runtime.settings.sync.create_snapshot_before_merge = False
+    payload = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    sha256 = hashlib.sha256(payload).hexdigest()
+    asset_id = new_id("asset")
+    content_json = json.dumps(
+        [
+            {
+                "type": "figure",
+                "content": "函数图像",
+                "source_image_index": 0,
+                "source_region": {"x": 0, "y": 0, "width": 1, "height": 1},
+                "derived_asset_id": asset_id,
+            }
+        ],
+        ensure_ascii=False,
+    )
+    remote_op = {
+        "format": "yancuo-operation",
+        "format_version": 1,
+        "operation_id": "op_remote_derived_1",
+        "device_id": "dev_other",
+        "database_id": "db_other",
+        "timestamp": "2026-07-22T00:02:00+00:00",
+        "entity_type": "problem",
+        "entity_id": "problem_remote_derived_1",
+        "operation": "create",
+        "base_revision": 0,
+        "new_revision": 1,
+        "changed_fields": {
+            "title": "带题图的远端题目",
+            "status": "active",
+            "question_markdown": "兼容题干",
+            "question_content_json": content_json,
+            "revision": 1,
+        },
+        "base_fields": {},
+        "attachments": [
+            {
+                "id": asset_id,
+                "role": "derived_figure",
+                "sha256": sha256,
+                "mime_type": "image/png",
+                "size_bytes": len(payload),
+                "width": 1,
+                "height": 1,
+                "content_base64": base64.b64encode(payload).decode("ascii"),
+            }
+        ],
+        "tombstone": False,
+    }
+    provider.append_operations("local", "derived-repo", "dev_other", [remote_op])
+
+    result = SyncService(runtime, provider).pull_and_merge()
+
+    assert result["applied"] == 1
+    with runtime.session_factory() as session:
+        problem = session.get(Problem, "problem_remote_derived_1")
+        asset = session.get(Asset, asset_id)
+        assert problem is not None
+        assert problem.question_content_json == content_json
+        assert asset is not None
+        assert asset.problem_id == problem.id
+        assert asset.is_immutable is True
+        assert SyncService(runtime, provider).store.resolve(asset.relative_path).read_bytes() == payload
+
+
+def test_local_structured_figure_update_embeds_referenced_crop(runtime, tmp_path: Path):
+    services = AppServices(runtime)
+    problem = services.create_problem(title="本地结构化题")
+    crop = tmp_path / "crop.png"
+    crop.write_bytes(b"isolated-derived-crop")
+    stored = services.store.store_copy(crop, role="derived_figure")
+    asset_id = new_id("asset")
+    with runtime.session_factory() as session:
+        session.add(
+            Asset(
+                id=asset_id,
+                problem_id=problem.id,
+                role="derived_figure",
+                sha256=stored.sha256,
+                relative_path=stored.relative_path,
+                mime_type="image/png",
+                size_bytes=stored.size_bytes,
+                width=10,
+                height=10,
+                is_immutable=True,
+            )
+        )
+        session.commit()
+    content_json = json.dumps(
+        [
+            {
+                "type": "figure",
+                "content": "局部题图",
+                "source_image_index": 0,
+                "source_region": {"x": 0, "y": 0, "width": 1, "height": 1},
+                "derived_asset_id": asset_id,
+            }
+        ]
+    )
+
+    services.update_problem(problem.id, {"question_content_json": content_json})
+
+    operations = SyncService(runtime).list_unpushed()
+    update = next(
+        operation
+        for operation in operations
+        if operation["changed_fields"].get("question_content_json") == content_json
+    )
+    assert update["attachments"][0]["id"] == asset_id
+    assert base64.b64decode(update["attachments"][0]["content_base64"]) == crop.read_bytes()
 
 
 def test_remote_create_materializes_unknown_problem(runtime, tmp_path: Path):

@@ -1042,6 +1042,7 @@ class AppServices:
                 "title",
                 "question_markdown",
                 "question_latex",
+                "question_content_json",
                 "user_answer",
                 "correct_answer",
                 "solution_markdown",
@@ -2298,6 +2299,7 @@ class AppServices:
     def export_problems_docx(self, problem_ids: list[str], dest: Path) -> Path:
         try:
             from docx import Document
+            from docx.shared import Inches
         except ImportError as exc:  # pragma: no cover
             raise DomainError("未安装 python-docx，无法导出 Word") from exc
 
@@ -2317,9 +2319,70 @@ class AppServices:
             meta = f"优先级：{p.priority}　状态：{p.status}　ID：{p.id}"
             doc.add_paragraph(meta)
             doc.add_heading("原题", level=2)
-            doc.add_paragraph(p.question_markdown or "（空）")
-            if p.question_latex:
-                doc.add_paragraph(f"LaTeX：{p.question_latex}")
+            from yancuo_win.application.question_content import load_question_content
+
+            content_blocks = load_question_content(p.question_content_json)
+            assets_by_id = {asset.id: asset for asset in (p.assets or [])}
+            if content_blocks:
+                for block in content_blocks:
+                    kind = block.get("type")
+                    if kind in {"text", "formula"}:
+                        doc.add_paragraph(str(block.get("content") or ""))
+                    elif kind == "table":
+                        rows = block.get("rows") or []
+                        column_count = max(
+                            (
+                                sum(
+                                    max(1, int(cell.get("colspan", 1)))
+                                    if isinstance(cell, dict)
+                                    else 1
+                                    for cell in row
+                                )
+                                for row in rows
+                                if isinstance(row, list)
+                            ),
+                            default=1,
+                        )
+                        table = doc.add_table(
+                            rows=max(1, len(rows)), cols=max(1, column_count)
+                        )
+                        occupied: set[tuple[int, int]] = set()
+                        for row_index, row in enumerate(rows):
+                            column_index = 0
+                            for raw_cell in row:
+                                while (row_index, column_index) in occupied:
+                                    column_index += 1
+                                cell_data = raw_cell if isinstance(raw_cell, dict) else {}
+                                content = (
+                                    str(cell_data.get("content") or "")
+                                    if cell_data
+                                    else str(raw_cell or "")
+                                )
+                                rowspan = max(1, int(cell_data.get("rowspan", 1)))
+                                colspan = max(1, int(cell_data.get("colspan", 1)))
+                                end_row = min(len(rows) - 1, row_index + rowspan - 1)
+                                end_col = min(column_count - 1, column_index + colspan - 1)
+                                target = table.cell(row_index, column_index)
+                                if end_row != row_index or end_col != column_index:
+                                    target = target.merge(table.cell(end_row, end_col))
+                                target.text = content
+                                for used_row in range(row_index, end_row + 1):
+                                    for used_col in range(column_index, end_col + 1):
+                                        occupied.add((used_row, used_col))
+                                column_index = end_col + 1
+                    elif kind == "figure":
+                        asset = assets_by_id.get(str(block.get("derived_asset_id") or ""))
+                        if asset is not None:
+                            path = self.store.resolve(asset.relative_path)
+                            if path.is_file():
+                                doc.add_picture(str(path), width=Inches(6.0))
+                        caption = str(block.get("content") or "").strip()
+                        if caption:
+                            doc.add_paragraph(caption)
+            else:
+                doc.add_paragraph(p.question_markdown or "（空）")
+                if p.question_latex:
+                    doc.add_paragraph(f"LaTeX：{p.question_latex}")
             doc.add_heading("我的作答", level=2)
             doc.add_paragraph(p.user_answer or "（空）")
             doc.add_heading("正确答案", level=2)

@@ -8,7 +8,35 @@ from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from yancuo_win.ui.intake_page import ImagePreviewLabel
+from yancuo_win.ui.intake_page import ContentBlocksEditor, ImagePreviewLabel
+
+
+def test_content_block_editor_preserves_order_spans_and_figure_region() -> None:
+    QApplication.instance() or QApplication([])
+    editor = ContentBlocksEditor()
+    editor.set_blocks(
+        [
+            {
+                "type": "table",
+                "rows": [[{"content": "表头", "colspan": 2}], ["a", "b"]],
+            },
+            {
+                "type": "figure",
+                "content": "几何图",
+                "source_image_index": 1,
+                "source_region": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+            },
+        ]
+    )
+
+    editor.block_list.setCurrentRow(1)
+    editor._move(-1)
+    blocks = editor.blocks()
+
+    assert blocks[0]["type"] == "figure"
+    assert blocks[0]["source_image_index"] == 1
+    assert blocks[0]["source_region"]["width"] == pytest.approx(0.3)
+    assert blocks[1]["rows"][0][0]["colspan"] == 2
 
 
 def _make_preview() -> tuple[QApplication, ImagePreviewLabel]:

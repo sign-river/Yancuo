@@ -63,7 +63,7 @@
 
 导入时以 `revision` 作为冲突检测基线：若库中当前 `revision` 与导出时不同，则进入**冲突**，不得静默覆盖。
 
-可选 `content_blocks` 保留题干的有序表格、公式和题图描述；图片块必须带 `source_image_index` 和归一化 `source_region`，且不能替换不可变原图。缺失时按 Markdown 正文安全降级。
+可选 `content_blocks` 保留题干的有序文本、公式、表格和题图；表格允许带 `rowspan` / `colspan` 的单元格对象。图片块必须带 `source_image_index`、归一化 `source_region`、`source_asset_id` 和 `derived_asset_id`，对应资源以 `asset_files[].id` 一并导出，且不能替换不可变原图。导入时只接受经过哈希校验的派生资源；缺失时按 Markdown 正文安全降级。
 
 ---
 

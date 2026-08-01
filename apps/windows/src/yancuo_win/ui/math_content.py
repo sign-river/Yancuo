@@ -176,12 +176,98 @@ def _section(
     empty: str = "（空）",
     allow_bare_latex: bool = True,
 ) -> str:
+    rendered = _render_markdown_tables(
+        value,
+        empty=empty,
+        allow_bare_latex=allow_bare_latex,
+    )
     return (
         '<section class="content-card">'
         f"<h2>{html.escape(title)}</h2>"
-        f'<div class="rich-text">{render_math_text(value, empty=empty, allow_bare_latex=allow_bare_latex)}</div>'
+        f'<div class="rich-text">{rendered}</div>'
         "</section>"
     )
+
+
+def _table_cells(line: str) -> list[str]:
+    value = line.strip()
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|"):
+        value = value[:-1]
+    return [cell.strip() for cell in value.split("|")]
+
+
+def _render_markdown_tables(
+    value: str | None,
+    *,
+    empty: str,
+    allow_bare_latex: bool,
+) -> str:
+    """Render conservative pipe tables while leaving ordinary Markdown untouched."""
+
+    text = value or ""
+    if not text.strip():
+        return f'<span class="empty">{html.escape(empty)}</span>'
+    lines = text.splitlines()
+    output: list[str] = []
+    plain: list[str] = []
+
+    def flush_plain() -> None:
+        if not plain:
+            return
+        output.append(
+            render_math_text(
+                "\n".join(plain),
+                empty="",
+                allow_bare_latex=allow_bare_latex,
+            )
+        )
+        plain.clear()
+
+    index = 0
+    while index < len(lines):
+        header = _table_cells(lines[index]) if "|" in lines[index] else []
+        separator = (
+            _table_cells(lines[index + 1])
+            if index + 1 < len(lines) and "|" in lines[index + 1]
+            else []
+        )
+        if (
+            len(header) >= 2
+            and len(separator) == len(header)
+            and all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator)
+        ):
+            flush_plain()
+            rows: list[list[str]] = []
+            index += 2
+            while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                cells = _table_cells(lines[index])
+                if len(cells) != len(header):
+                    break
+                rows.append(cells)
+                index += 1
+            head_html = "".join(
+                f"<th>{render_math_text(cell, empty='', allow_bare_latex=True)}</th>"
+                for cell in header
+            )
+            row_html = "".join(
+                "<tr>"
+                + "".join(
+                    f"<td>{render_math_text(cell, empty='', allow_bare_latex=True)}</td>"
+                    for cell in row
+                )
+                + "</tr>"
+                for row in rows
+            )
+            output.append(
+                f'<table class="problem-table"><thead><tr>{head_html}</tr></thead><tbody>{row_html}</tbody></table>'
+            )
+            continue
+        plain.append(lines[index])
+        index += 1
+    flush_plain()
+    return "".join(output)
 
 
 def build_problem_html(
@@ -248,10 +334,40 @@ def build_problem_html(
         if kind in {"text", "formula"}:
             block_html.append(_section("题目" if kind == "text" else "公式", str(block.get("content") or "")))
         elif kind == "table" and isinstance(block.get("rows"), list):
-            rows = "".join("<tr>" + "".join(f"<td>{render_math_text(str(cell), empty='', allow_bare_latex=True)}</td>" for cell in row) + "</tr>" for row in block["rows"] if isinstance(row, list))
+            rendered_rows: list[str] = []
+            for row in block["rows"]:
+                if not isinstance(row, list):
+                    continue
+                cells: list[str] = []
+                for raw_cell in row:
+                    if isinstance(raw_cell, Mapping):
+                        content = str(raw_cell.get("content") or "")
+                        spans = "".join(
+                            f' {name}="{max(1, min(100, int(raw_cell.get(name, 1))))}"'
+                            for name in ("rowspan", "colspan")
+                            if str(raw_cell.get(name, "1")).isdigit()
+                            and int(raw_cell.get(name, 1)) > 1
+                        )
+                    else:
+                        content, spans = str(raw_cell or ""), ""
+                    cells.append(
+                        f"<td{spans}>{render_math_text(content, empty='', allow_bare_latex=True)}</td>"
+                    )
+                rendered_rows.append(f"<tr>{''.join(cells)}</tr>")
+            rows = "".join(rendered_rows)
             block_html.append(f'<section class="content-card"><h2>表格</h2><table class="problem-table">{rows}</table></section>')
         elif kind == "figure":
-            block_html.append(_section("题图", str(block.get("content") or "题图保留在可追溯原图区域中")))
+            source = str(block.get("image_data_uri") or block.get("image_src") or "")
+            caption = str(block.get("content") or "题图")
+            if source.startswith(("data:image/", "file:")):
+                block_html.append(
+                    '<section class="content-card figure-card"><h2>题图</h2>'
+                    f'<img class="problem-figure" src="{html.escape(source, quote=True)}" '
+                    f'alt="{html.escape(caption, quote=True)}">'
+                    f'<div class="figure-caption">{html.escape(caption)}</div></section>'
+                )
+            else:
+                block_html.append(_section("题图", caption or "题图保留在可追溯原图区域中"))
     body.extend(block_html or [_section("题目", question)])
     if latex and not _contains_math(question, allow_bare_latex=True):
         body.append(
@@ -306,6 +422,9 @@ def build_problem_html(
   .rich-text {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
   .problem-table {{ width: 100%; border-collapse: collapse; }}
   .problem-table td {{ border: 1px solid {colors.border}; padding: 7px 9px; vertical-align: top; }}
+  .problem-table th {{ border: 1px solid {colors.border}; padding: 7px 9px; text-align: left; background: {colors.chip_bg}; }}
+  .problem-figure {{ display: block; max-width: 100%; height: auto; margin: 4px auto 8px; }}
+  .figure-caption {{ color: {colors.muted}; font-size: .9em; text-align: center; }}
   .rich-text math {{
     font-family: "Cambria Math", "STIX Two Math", serif;
     font-size: {1.08 if compact else 1.18}em;

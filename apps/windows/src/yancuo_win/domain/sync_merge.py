@@ -9,6 +9,7 @@ CONFLICT_FIELDS = frozenset(
     {
         "question_markdown",
         "question_latex",
+        "question_content_json",
         "correct_answer",
         "solution_markdown",
         "error_analysis",
