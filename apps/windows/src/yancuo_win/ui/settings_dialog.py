@@ -102,6 +102,7 @@ class ServiceSettingsPage(QWidget):
         self._dirty = False
         self._last_connection_test = "尚未测试"
         self._field_errors: dict[str, QLabel] = {}
+        self._save_button: QPushButton | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 20)
@@ -195,7 +196,7 @@ class ServiceSettingsPage(QWidget):
             appearance.body.addLayout(appearance_form)
             self.apply_theme_button = primary_button("保存更改")
             self.apply_theme_button.clicked.connect(self._apply_theme)
-            appearance.body.addLayout(self._save_row(self.apply_theme_button))
+            self._save_button = self.apply_theme_button
             appearance.body.addLayout(self._save_row(self.apply_theme_button))
             self._refresh_theme_status()
             set_tab_order_chain(
@@ -305,6 +306,8 @@ class ServiceSettingsPage(QWidget):
         self.test_ai_button.clicked.connect(self._test_ai_connection)
         self.apply_ai_button = primary_button("保存更改")
         self.apply_ai_button.clicked.connect(self._apply_ai_session)
+        if section == "ai":
+            self._save_button = self.apply_ai_button
         self.ai_connection_notice = StateNotice("尚未测试连接。", "disabled")
         self.ai_connection_notice.setObjectName("CompactStateNotice")
         self.ai_connection_notice.layout().setContentsMargins(8, 4, 8, 4)
@@ -402,6 +405,8 @@ class ServiceSettingsPage(QWidget):
         self.test_cloud_button.clicked.connect(self._test_cloud)
         self.apply_cloud_button = primary_button("保存更改")
         self.apply_cloud_button.clicked.connect(self._save_cloud_settings)
+        if section == "cloud":
+            self._save_button = self.apply_cloud_button
         cloud_actions = QHBoxLayout()
         cloud_actions.setSpacing(8)
         cloud_actions.addWidget(self.clear_cloud_token_button)
@@ -541,9 +546,8 @@ class ServiceSettingsPage(QWidget):
         self._set_save_enabled(False)
 
     def _set_save_enabled(self, enabled: bool) -> None:
-        button = getattr(self, "apply_ai_button", None) or getattr(self, "apply_cloud_button", None) or getattr(self, "apply_theme_button", None)
-        if button is not None:
-            button.setEnabled(enabled)
+        if self._save_button is not None:
+            self._save_button.setEnabled(enabled)
 
     def _refresh_theme_status(self) -> None:
         selected_mode = str(self.theme_mode.currentData())
