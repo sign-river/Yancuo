@@ -790,12 +790,13 @@ class ProblemIntakeService:
             raise DomainError("请先选择包含作答的图片")
         if any(not path.is_file() for path in image_paths):
             raise DomainError("作答图片不存在")
-        provider = get_provider(self.runtime.settings)
+        ai_settings = self.runtime.settings.ai
+        provider_name = ai_settings.default_provider
+        model = ai_settings.default_vision_model
+        timeout_seconds = ai_settings.request_timeout_seconds
+        provider = get_provider(self.runtime.settings, provider_name)
         provider.validate_configuration()
-        timeout_seconds = min(
-            self.runtime.settings.ai.request_timeout_seconds,
-            _USER_ANSWER_TIMEOUT_SECONDS,
-        )
+        timeout_seconds = min(timeout_seconds, _USER_ANSWER_TIMEOUT_SECONDS)
         started = perf_counter()
         self.runtime.logger.info(
             "user answer recognition started: image_count=%d timeout_seconds=%d retry_attempts=%d",
@@ -815,7 +816,7 @@ class ProblemIntakeService:
             result = provider.structure_from_images(
                 image_paths=[str(path) for path in image_paths],
                 prompt=prompt,
-                model=self.runtime.settings.ai.default_vision_model,
+                model=model,
                 timeout_seconds=timeout_seconds,
                 retry_attempts=_USER_ANSWER_RETRY_ATTEMPTS,
             )

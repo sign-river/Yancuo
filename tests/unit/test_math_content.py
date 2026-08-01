@@ -138,6 +138,37 @@ def test_reader_swaps_in_only_fully_rendered_documents(monkeypatch) -> None:
     reader.close()
 
 
+def test_reader_serializes_and_coalesces_overlapping_renders(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(math_content_module, "QWebEnginePage", _PageStub)
+    monkeypatch.setattr(math_content_module, "QPdfDocument", _DocumentStub)
+    monkeypatch.setattr(math_content_module, "QPdfView", _PdfViewStub)
+
+    reader = MathContentView()
+    reader.set_message("First", "one")
+    reader.show()
+    app.processEvents()
+    first_page = reader._renderer
+    assert first_page is not None
+
+    first_page.loadFinished.emit(True)
+    assert first_page.pdf_callback is not None
+    reader.set_message("Second", "two")
+    reader.set_message("Latest", "three")
+    app.processEvents()
+
+    assert reader._renderer is first_page
+    first_page.pdf_callback(QByteArray(b"first document"))
+    app.processEvents()
+
+    second_page = reader._renderer
+    assert second_page is not None
+    assert second_page is not first_page
+    assert "Latest" in second_page.html
+    assert "Second" not in second_page.html
+    reader.close()
+
+
 def test_adaptive_reader_fits_short_content_and_scrolls_long_content() -> None:
     app = QApplication.instance() or QApplication([])
     reader = MathContentView()
@@ -157,6 +188,30 @@ def test_adaptive_reader_fits_short_content_and_scrolls_long_content() -> None:
     reader._content_height = None
     reader._update_content_height()
     assert reader.height() == 300
+    assert (
+        reader._view.verticalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    reader.close()
+    app.processEvents()
+
+
+def test_reserved_adaptive_reader_keeps_stable_height() -> None:
+    app = QApplication.instance() or QApplication([])
+    reader = MathContentView()
+    reader.resize(794, 420)
+    reader.set_zoom_scale(1.0)
+    reader.set_adaptive_content_height(420, reserve_height=True)
+
+    assert reader.height() == 420
+
+    reader._document = _SizingDocument(QSizeF(794, 120))  # type: ignore[assignment]
+    reader._update_content_height()
+    assert reader.height() == 420
+
+    reader._document = _SizingDocument(QSizeF(794, 1200))  # type: ignore[assignment]
+    reader._update_content_height()
+    assert reader.height() == 420
     assert (
         reader._view.verticalScrollBarPolicy()
         == Qt.ScrollBarPolicy.ScrollBarAsNeeded

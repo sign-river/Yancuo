@@ -192,7 +192,7 @@ class _InlineQuestionItem(QWidget):
 
         reader = MathContentView()
         reader.setObjectName("InlineQuestionPreview")
-        reader.set_adaptive_content_height(420)
+        reader.set_adaptive_content_height(420, reserve_height=True)
         reader.content_height_changed.connect(self.updateGeometry)
         question_markdown = problem.question_markdown or ""
         if problem.question_latex and problem.question_latex not in question_markdown:
@@ -2672,11 +2672,23 @@ class MainWindow(QMainWindow):
         self._toggle_question_by_id(problem_id)
 
     def _toggle_question_by_id(self, problem_id: str) -> None:
+        previous_id = self._expanded_question_id
         self._expanded_question_id = (
-            None if self._expanded_question_id == problem_id else problem_id
+            None if previous_id == problem_id else problem_id
         )
+
+        affected_ids = {problem_id}
+        if previous_id:
+            affected_ids.add(previous_id)
+        for affected_id in affected_ids:
+            row, item = self._find_problem_item(affected_id)
+            problem = self._problem_rows.get(affected_id)
+            if row < 0 or item is None or problem is None:
+                continue
+            self._set_inline_question_widget(item, problem)
+            self._materialized_problem_rows.add(row)
+
         self._select_problem_id(problem_id)
-        self.refresh_problems(preserve_view=True)
         _row, refreshed = self._find_problem_item(problem_id)
         if refreshed is not None:
             self.problem_list.scrollToItem(
