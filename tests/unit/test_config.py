@@ -135,6 +135,29 @@ def test_cloud_preferences_preserve_ai_settings(tmp_path: Path) -> None:
     assert payload["cloud"]["default_provider"] == "github"
 
 
+def test_cloudbase_preferences_roundtrip_without_token(tmp_path: Path) -> None:
+    path = save_cloud_preferences(
+        tmp_path,
+        provider="cloudbase",
+        owner="student-user",
+        repository="mistake-book-data",
+        local_root="",
+        cloudbase_environment_id="yancuo-prod-xxxxx",
+        cloudbase_gateway_url="https://example.com/yancuo-cloud-gateway",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["cloud"]["cloudbase"] == {
+        "environment_id": "yancuo-prod-xxxxx",
+        "gateway_url": "https://example.com/yancuo-cloud-gateway",
+    }
+    assert "token" not in path.read_text(encoding="utf-8").lower()
+
+    settings = load_settings(default_toml_path())
+    apply_user_preferences(settings, tmp_path)
+    assert settings.cloud.default_provider == "cloudbase"
+    assert settings.cloud.cloudbase.environment_id == "yancuo-prod-xxxxx"
+
+
 def test_theme_preference_preserves_ai_settings(tmp_path: Path) -> None:
     save_ai_preferences(tmp_path, provider="mock", model="offline-test-model")
     path = save_theme_preference(tmp_path, "light")

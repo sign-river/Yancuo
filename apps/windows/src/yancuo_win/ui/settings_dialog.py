@@ -342,6 +342,7 @@ class ServiceSettingsPage(QWidget):
         self.provider.addItem("本地文件夹（推荐先测通）", "local_folder")
         self.provider.addItem("GitLink", "gitlink")
         self.provider.addItem("GitHub", "github")
+        self.provider.addItem("腾讯云 CloudBase（完整备份）", "cloudbase")
         idx = self.provider.findData(s.cloud.default_provider)
         if idx < 0:
             idx = self.provider.findData("local_folder")
@@ -373,6 +374,17 @@ class ServiceSettingsPage(QWidget):
         local_root_row.addWidget(self.browse_local_button)
         cloud_form.addRow("本地云目录", local_root_control)
         self._add_field_error(cloud_form, "cloud_root")
+
+        self.cloudbase_environment_edit = QLineEdit(s.cloud.cloudbase.environment_id)
+        self.cloudbase_gateway_edit = QLineEdit(s.cloud.cloudbase.gateway_url)
+        describe_field(self.cloudbase_environment_edit, "CloudBase 环境 ID")
+        describe_field(self.cloudbase_gateway_edit, "CloudBase 网关地址")
+        self.cloudbase_environment_edit.setPlaceholderText("例如：yancuo-prod-xxxxx")
+        self.cloudbase_gateway_edit.setPlaceholderText("部署后填写 HTTPS 网关地址")
+        cloud_form.addRow("CloudBase 环境 ID", self.cloudbase_environment_edit)
+        self._add_field_error(cloud_form, "cloudbase_environment")
+        cloud_form.addRow("CloudBase 网关地址", self.cloudbase_gateway_edit)
+        self._add_field_error(cloud_form, "cloudbase_gateway")
 
         self.token_label = QLabel("令牌")
         self.token_status = QLabel("")
@@ -453,7 +465,7 @@ class ServiceSettingsPage(QWidget):
             if section == "appearance"
             else (self.ai_provider, self.ai_model, self.ai_token_edit)
             if section == "ai"
-            else (self.provider, self.owner_edit, self.repo_edit, self.branch_edit, self.local_root, self.token_edit)
+            else (self.provider, self.owner_edit, self.repo_edit, self.branch_edit, self.local_root, self.cloudbase_environment_edit, self.cloudbase_gateway_edit, self.token_edit)
         )
         for field in tracked:
             for signal_name in (
@@ -511,6 +523,15 @@ class ServiceSettingsPage(QWidget):
             self._set_field_error("cloud_root", "请选择本地云同步目录。")
             self.local_root.setFocus(Qt.FocusReason.OtherFocusReason)
             return False
+        if provider == "cloudbase":
+            if not self.cloudbase_environment_edit.text().strip():
+                self._set_field_error("cloudbase_environment", "请填写 CloudBase 环境 ID。")
+                self.cloudbase_environment_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+                return False
+            if not self.cloudbase_gateway_edit.text().strip():
+                self._set_field_error("cloudbase_gateway", "请填写已部署的 CloudBase 网关 HTTPS 地址。")
+                self.cloudbase_gateway_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+                return False
         for name, field, message in (
             ("cloud_owner", self.owner_edit, "请填写仓库所有者。"),
             ("cloud_repo", self.repo_edit, "请填写仓库名称。"),
@@ -794,6 +815,8 @@ class ServiceSettingsPage(QWidget):
             return s.cloud.gitlink.credential_key or "yancuo_gitlink_token"
         if name == "github":
             return s.cloud.github.credential_key or "yancuo_github_token"
+        if name == "cloudbase":
+            return s.cloud.cloudbase.credential_key or "yancuo_cloudbase_gateway_token"
         return None
 
     def _refresh_token_ui(self) -> None:
@@ -809,6 +832,12 @@ class ServiceSettingsPage(QWidget):
             self.token_status.setText(mask_secret(get_secret(key) if key else None))
             self.token_edit.setEnabled(True)
             self._set_cloud_permission_state(key)
+        elif name == "cloudbase":
+            self.token_label.setText("CloudBase 网关令牌")
+            self.token_status.setText(mask_secret(get_secret(key) if key else None))
+            self.token_edit.setEnabled(True)
+            self.token_edit.setToolTip("由 yancuo-cloud-gateway 校验的用户令牌")
+            self._set_cloud_permission_state(key)
         else:
             self.token_label.setText("令牌（本地文件夹无需）")
             self.token_status.setText("—")
@@ -818,9 +847,12 @@ class ServiceSettingsPage(QWidget):
                 "本地文件夹提供商不需要云端令牌。",
                 "disabled",
             )
-        remote = name in {"gitlink", "github"}
+        remote = name in {"gitlink", "github", "cloudbase"}
         for field in (self.owner_edit, self.repo_edit, self.branch_edit, self.token_status, self.token_control, self.cloud_permission_notice):
             self.cloud_form.setRowVisible(field, remote)
+        cloudbase = name == "cloudbase"
+        for field in (self.cloudbase_environment_edit, self.cloudbase_gateway_edit):
+            self.cloud_form.setRowVisible(field, cloudbase)
         self.clear_cloud_token_button.setVisible(remote)
 
     def _set_cloud_permission_state(self, key: str | None) -> None:
@@ -894,6 +926,8 @@ class ServiceSettingsPage(QWidget):
                 repository=self.repo_edit.text(),
                 local_root=self.local_root.text(),
                 branch=self.branch_edit.text(),
+                cloudbase_environment_id=self.cloudbase_environment_edit.text(),
+                cloudbase_gateway_url=self.cloudbase_gateway_edit.text(),
                 enabled=True,
             )
         except (ConfigError, OSError) as exc:
@@ -913,6 +947,12 @@ class ServiceSettingsPage(QWidget):
         self.runtime.settings.cloud.enabled = True
         local_root = self.local_root.text().strip()
         self.runtime.settings.cloud.local_root = local_root
+        self.runtime.settings.cloud.cloudbase.environment_id = (
+            self.cloudbase_environment_edit.text().strip()
+        )
+        self.runtime.settings.cloud.cloudbase.gateway_url = (
+            self.cloudbase_gateway_edit.text().strip()
+        )
         if name == "local_folder":
             os.environ["YANCUO_CLOUD_LOCAL_ROOT"] = local_root
         if notify:
@@ -951,6 +991,8 @@ class ServiceSettingsPage(QWidget):
                 repository=self.repo_edit.text(),
                 local_root=self.local_root.text(),
                 branch=self.branch_edit.text(),
+                cloudbase_environment_id=self.cloudbase_environment_edit.text(),
+                cloudbase_gateway_url=self.cloudbase_gateway_edit.text(),
                 enabled=True,
             )
         except (ConfigError, OSError) as exc:

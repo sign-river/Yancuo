@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from yancuo_win.cloud.base import CloudProvider
+from yancuo_win.cloud.cloudbase import CloudBaseGatewayProvider
 from yancuo_win.cloud.github import GitHubProvider
 from yancuo_win.cloud.gitlink import GitLinkProvider
 from yancuo_win.cloud.local_folder import LocalFolderProvider
@@ -33,5 +34,12 @@ def get_cloud_provider(settings: AppSettings, *, local_root: Path | None = None)
         return GitHubProvider(
             base_url=cfg.base_url or "https://api.github.com",
             credential_key=cfg.credential_key or "yancuo_github_token",
+        )
+    if name == "cloudbase":
+        cfg = settings.cloud.cloudbase
+        return CloudBaseGatewayProvider(
+            environment_id=cfg.environment_id,
+            gateway_url=cfg.gateway_url,
+            credential_key=cfg.credential_key or "yancuo_cloudbase_gateway_token",
         )
     raise DomainError(f"未知云端提供商：{name}")

@@ -98,6 +98,14 @@ base_url = "https://api.github.com"
 auth_method = "token"
 credential_key = "yancuo_github_token"
 
+[cloud.cloudbase]
+# 腾讯云 CloudBase 上海区环境。部署 yancuo-cloud-gateway 后填写环境 ID 和 HTTPS 地址；
+# 网关令牌仅保存到系统凭据 yancuo_cloudbase_gateway_token，不能写入此文件。
+environment_id = ""
+gateway_url = ""
+auth_method = "gateway_token"
+credential_key = "yancuo_cloudbase_gateway_token"
+
 [sync]
 device_name = ""
 conflict_policy = "ask"
