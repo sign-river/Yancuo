@@ -578,7 +578,7 @@ class ProblemForm(QWidget):
         self.user_answer = self._text_area("可选：填写你的作答；也可留空。", 90)
         self.correct_answer = self._text_area("正确答案", 90)
         self.solution = self._text_area("完整解析", 130)
-        self.notes = self._text_area("备注", 80)
+        self.notes = self._text_area("可选：填写备注；也可留空。", 80)
         describe_field(self.user_answer, "我的作答")
         describe_field(self.correct_answer, "正确答案")
         describe_field(self.solution, "题目解析")

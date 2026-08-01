@@ -287,6 +287,7 @@ def test_problem_form_exposes_field_names_and_focus_order(
     assert form.question.accessibleName() == "题干"
     assert form.user_answer.placeholderText() == "可选：填写你的作答；也可留空。"
     assert form.correct_answer.accessibleName() == "正确答案"
+    assert form.notes.placeholderText() == "可选：填写备注；也可留空。"
     assert form.notes.accessibleName() == "题目备注"
     form.show()
     form.title_edit.setFocus()
