@@ -1021,6 +1021,11 @@ def app_stylesheet(theme: str = "light") -> str:
         color: {t.muted};
         border-color: {t.border};
     }}
+    QLabel#ThemeModeStatus {{
+        color: {t.primary};
+        font-weight: 600;
+        padding: 6px 0;
+    }}
 
     QTabWidget::pane {{
         border: none;

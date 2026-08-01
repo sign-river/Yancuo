@@ -211,6 +211,7 @@ def test_theme_mode_buttons_have_a_distinct_selected_state(mode: str) -> None:
     assert "QPushButton#ThemeModeButton:checked" in rendered
     assert "QPushButton#ThemeModeButton:focus" in rendered
     assert "QPushButton#ThemeModeButton:disabled" in rendered
+    assert "QLabel#ThemeModeStatus" in rendered
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])
