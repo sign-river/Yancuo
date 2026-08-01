@@ -369,6 +369,8 @@ class ReviewPage(QWidget):
         workspace.setStretchFactor(1, 1)
         queue_card.body.addWidget(workspace)
         self.plan_name_edit = QLineEdit()
+        self.plan_name_edit.setObjectName("ReviewPlanNameInput")
+        self.plan_name_edit.setFixedHeight(38)
         describe_field(self.plan_name_edit, "复习计划名称")
         self.plan_name_edit.setPlaceholderText("复习计划名称")
         queue_card.body.addWidget(self.plan_name_edit)
