@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from yancuo_win.ui.review_dialog import ReviewDialog
 
@@ -65,6 +65,13 @@ def test_review_dialog_stages_decisions_and_hides_internal_identifiers(monkeypat
     dialog._continue_review()
     dialog.list.setCurrentRow(0)
 
+    assert not dialog.review_back_button.isHidden()
+    assert dialog.review_back_button.text() == ""
+    assert dialog.review_back_button.accessibleName() == "返回准备页"
+    assert not any(
+        button.text() == "返回准备页"
+        for button in dialog.review_page.findChildren(QPushButton)
+    )
     assert "internal-review-id" not in dialog.list.item(0).text()
     assert "problem-private-id" not in dialog.meta.text()
     assert not dialog.apply_button.isEnabled()
@@ -84,6 +91,7 @@ def test_review_dialog_stages_decisions_and_hides_internal_identifiers(monkeypat
         {"accepted_problem_ids": ["problem-private-id"], "rejected_item_ids": []}
     )
     assert dialog.complete_summary.text().startswith("已采纳 1 项")
+    assert dialog.review_back_button.isHidden()
 
     dialog._undo()
     assert ai.undone == ["problem-private-id"]

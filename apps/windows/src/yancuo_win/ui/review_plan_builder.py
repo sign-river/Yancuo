@@ -229,7 +229,7 @@ class ReviewPlanBuilder(QWidget):
         self.queue_title = QLabel("计划草稿")
         head.addWidget(self.queue_title)
         head.addStretch(1)
-        self.draft_back_button = ghost_button("返回资料")
+        self.draft_back_button = IconButton("chevron-left", "返回资料")
         self.draft_back_button.clicked.connect(self._show_browse_view)
         self.draft_back_button.setVisible(False)
         head.addWidget(self.draft_back_button)

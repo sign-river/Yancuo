@@ -1416,14 +1416,14 @@ class IntakePage(QWidget):
 
     def _build_processing(self) -> QWidget:
         page, layout = self._page()
-        layout.addWidget(
-            self._header(
-                "AI 实时回复",
-                "这里展示模型公开输出和处理阶段；返回上传页不会中断任务。",
-                self.show_ai_upload,
-                back_tooltip="返回上传页",
-            )
+        processing_header = self._header(
+            "AI 实时回复",
+            "这里展示模型公开输出和处理阶段；返回上传页不会中断任务。",
+            self.show_ai_upload,
+            back_tooltip="返回上传页",
         )
+        self.processing_back = processing_header.findChild(IconButton)
+        layout.addWidget(processing_header)
         self.ai_processing_steps_bar = self._ai_step_bar(0)
         layout.addWidget(self.ai_processing_steps_bar)
         card = CardFrame()
@@ -1454,13 +1454,8 @@ class IntakePage(QWidget):
         self.processing_retry = primary_button("重新尝试失败项")
         self.processing_retry.clicked.connect(self._retry_failed_ai)
         self.processing_retry.setVisible(False)
-        self.processing_back = QPushButton("返回修改上传内容")
-        self.processing_back.clicked.connect(self.show_ai_upload)
-        self.processing_back.setText("返回上传页")
-        self.processing_back.setVisible(True)
         actions.addWidget(self.processing_cancel_button)
         actions.addWidget(self.processing_retry)
-        actions.addWidget(self.processing_back)
         actions.addStretch(1)
         card.body.addLayout(actions)
         layout.addWidget(card)

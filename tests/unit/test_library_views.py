@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QSizePolicy,
     QWidget,
 )
@@ -503,6 +504,8 @@ def test_review_plan_builder_warns_before_creating_an_empty_plan(
     assert messages == ["请先从左侧选择题目或笔记，并加入计划草稿。"]
     assert not builder.toast.isHidden()
     assert builder.toast.label.text() == messages[0]
+    assert builder.draft_back_button.text() == ""
+    assert builder.draft_back_button.accessibleName() == "返回资料"
 
 
 def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
@@ -514,6 +517,9 @@ def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
     assert page.ai_processing_steps_bar.current_step == 0
     assert page.ai_confirmation_steps.current_step == 1
     assert page.ai_confirmation_surface.objectName() == "IntakeConfirmationSurface"
+    processing_buttons = page.stack.widget(2).findChildren(QPushButton)
+    assert any(button.accessibleName() == "返回上传页" for button in processing_buttons)
+    assert not any(button.text() == "返回上传页" for button in processing_buttons)
     assert page.ai_confirmation_action_bar.objectName() == "IntakeActionBar"
     assert isinstance(page.ai_file_list.itemDelegate(), SoftItemDelegate)
     assert page.ai_upload_content_host.minimumHeight() == 0

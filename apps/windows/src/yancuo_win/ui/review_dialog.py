@@ -25,6 +25,7 @@ from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.worker import AIJobWorker, ReviewApplicationWorker
 from yancuo_win.ui.widgets import (
     ConfirmDialog,
+    IconButton,
     PageHeader,
     SoftItemDelegate,
     ToastMessage,
@@ -70,7 +71,14 @@ class ReviewDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(12)
-        layout.addWidget(PageHeader("AI 补全审核", "AI 只生成建议。逐项决定后，仍需在最后一步确认写入题库。"))
+        self.header = PageHeader(
+            "AI 补全审核",
+            "AI 只生成建议。逐项决定后，仍需在最后一步确认写入题库。",
+        )
+        self.review_back_button = IconButton("chevron-left", "返回准备页")
+        self.review_back_button.hide()
+        self.header.add_leading(self.review_back_button)
+        layout.addWidget(self.header)
 
         self.stack = QStackedWidget()
         self.prepare_page = self._build_prepare_page()
@@ -79,6 +87,10 @@ class ReviewDialog(QDialog):
         self.stack.addWidget(self.prepare_page)
         self.stack.addWidget(self.review_page)
         self.stack.addWidget(self.complete_page)
+        self.review_back_button.clicked.connect(
+            lambda: self.stack.setCurrentWidget(self.prepare_page)
+        )
+        self.stack.currentChanged.connect(self._sync_back_button)
         layout.addWidget(self.stack, 1)
         self.toast = ToastMessage(self)
         self.refresh()
@@ -160,16 +172,19 @@ class ReviewDialog(QDialog):
         self.accept_button.clicked.connect(lambda: self._decide("accept"))
         self.reject_button = default_button("保留当前内容")
         self.reject_button.clicked.connect(lambda: self._decide("reject"))
-        self.back_button = default_button("返回准备页")
-        self.back_button.clicked.connect(lambda: self.stack.setCurrentWidget(self.prepare_page))
         self.apply_button = primary_button("应用已确认决定")
         self.apply_button.clicked.connect(self._apply)
-        for button in (self.accept_button, self.reject_button, self.back_button, self.apply_button):
+        for button in (self.accept_button, self.reject_button, self.apply_button):
             actions.addWidget(button)
         actions.addStretch(1)
         layout.addLayout(actions)
         set_tab_order_chain(self.list, self.diff_view, self.uncertain, self.accept_button, self.reject_button, self.apply_button)
         return page
+
+    def _sync_back_button(self, *_args) -> None:
+        self.review_back_button.setVisible(
+            self.stack.currentWidget() is self.review_page
+        )
 
     def _build_complete_page(self) -> QFrame:
         page = QFrame()
