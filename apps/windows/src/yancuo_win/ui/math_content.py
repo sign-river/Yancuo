@@ -533,6 +533,7 @@ class MathContentView(QWidget):
         self._fit_content_height = False
         self._content_sized_pdf = False
         self._content_height_limit: int | None = None
+        self._reserve_content_height = False
         self._minimum_content_height = 80
         self._compact = False
         self._zoom_scale = preview_zoom_scale()
@@ -623,6 +624,7 @@ class MathContentView(QWidget):
         maximum_height: int = 480,
         *,
         minimum_height: int = 80,
+        reserve_height: bool = False,
     ) -> None:
         """Fit short content and scroll inside the reader once it grows long."""
 
@@ -633,10 +635,14 @@ class MathContentView(QWidget):
             self._minimum_content_height,
             int(maximum_height),
         )
+        self._reserve_content_height = reserve_height
         self.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Fixed,
         )
+        if reserve_height:
+            self._content_height = self._content_height_limit
+            self.setFixedHeight(self._content_height_limit)
         self._view.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
@@ -686,7 +692,12 @@ class MathContentView(QWidget):
         if self._fit_content_height:
             self._content_height = None
             if self._document is None:
-                self.setFixedHeight(self._minimum_content_height)
+                initial_height = (
+                    self._content_height_limit
+                    if self._reserve_content_height
+                    else self._minimum_content_height
+                )
+                self.setFixedHeight(initial_height)
 
         page = QWebEnginePage(self)
         page.setBackgroundColor(QColor(theme_tokens(current_theme_name()).bg))
@@ -831,11 +842,14 @@ class MathContentView(QWidget):
             if page_size.width() > 0:
                 height += width * page_size.height() / page_size.width()
         natural_height = max(self._minimum_content_height, round(height))
-        new_height = (
-            min(natural_height, self._content_height_limit)
-            if self._content_height_limit is not None
-            else natural_height
-        )
+        if self._reserve_content_height and self._content_height_limit is not None:
+            new_height = self._content_height_limit
+        else:
+            new_height = (
+                min(natural_height, self._content_height_limit)
+                if self._content_height_limit is not None
+                else natural_height
+            )
         overflow = natural_height > new_height
         self._view.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded

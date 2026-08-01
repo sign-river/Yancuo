@@ -631,6 +631,30 @@ def test_question_preview_expands_inline_and_remains_single(window: MainWindow) 
     assert not collapsed.findChildren(QLabel, "InlinePreviewTitle")
 
 
+def test_question_preview_toggle_does_not_rebuild_problem_list(
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = window.problem_list.item(0)
+    problem_id = str(item.data(Qt.ItemDataRole.UserRole))
+    refresh_calls = 0
+
+    def record_refresh(*_args, **_kwargs) -> None:
+        nonlocal refresh_calls
+        refresh_calls += 1
+
+    monkeypatch.setattr(window, "refresh_problems", record_refresh)
+
+    window._toggle_question_by_id(problem_id)
+
+    assert refresh_calls == 0
+    expanded = window.problem_list.itemWidget(item)
+    assert expanded is not None
+    reader = expanded.findChild(MathContentView)
+    assert reader is not None
+    assert reader.height() == 420
+
+
 def test_formula_content_surfaces_use_bounded_adaptive_height(
     window: MainWindow,
 ) -> None:

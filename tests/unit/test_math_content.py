@@ -165,6 +165,30 @@ def test_adaptive_reader_fits_short_content_and_scrolls_long_content() -> None:
     app.processEvents()
 
 
+def test_reserved_adaptive_reader_keeps_stable_height() -> None:
+    app = QApplication.instance() or QApplication([])
+    reader = MathContentView()
+    reader.resize(794, 420)
+    reader.set_zoom_scale(1.0)
+    reader.set_adaptive_content_height(420, reserve_height=True)
+
+    assert reader.height() == 420
+
+    reader._document = _SizingDocument(QSizeF(794, 120))  # type: ignore[assignment]
+    reader._update_content_height()
+    assert reader.height() == 420
+
+    reader._document = _SizingDocument(QSizeF(794, 1200))  # type: ignore[assignment]
+    reader._update_content_height()
+    assert reader.height() == 420
+    assert (
+        reader._view.verticalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    reader.close()
+    app.processEvents()
+
+
 def test_content_sized_problem_document_does_not_force_viewport_height() -> None:
     rendered = build_problem_html(
         {"title": "短题", "question_markdown": "求 $x+1$。"},
