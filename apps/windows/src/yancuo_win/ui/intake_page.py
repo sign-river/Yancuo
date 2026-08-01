@@ -1356,9 +1356,6 @@ class IntakePage(QWidget):
         source_actions.addWidget(source_down)
         source_actions.addStretch(1)
         image_tools_layout.addLayout(source_actions)
-        source_split = QPushButton("拆分识别单元")
-        source_split.clicked.connect(self._split_recognition_unit)
-        image_tools_layout.addWidget(source_split)
 
         region_title = QLabel("题目区域")
         region_title.setObjectName("SectionTitle")
@@ -2388,18 +2385,6 @@ class IntakePage(QWidget):
             self._load_candidate()
             return
         self.status_message.emit("来源图片顺序已保存；不会自动重新识别")
-
-    def _split_recognition_unit(self) -> None:
-        if not self.ai_candidates:
-            return
-        candidate = self.ai_candidates[self.candidate_index]
-        try:
-            self.intake.split_candidate_recognition_unit(candidate.review_item_id)
-        except DomainError as exc:
-            QMessageBox.warning(self, "无法拆分识别单元", str(exc))
-            return
-        self._reload_region_candidate(candidate.review_item_id)
-        self.status_message.emit("来源图片已拆为独立识别单元；当前候选内容保持不变")
 
     def _show_region_label(self, region: dict[str, float]) -> None:
         if region:
