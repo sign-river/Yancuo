@@ -575,7 +575,7 @@ class ProblemForm(QWidget):
 
         answer = CardFrame()
         answer.add_title("作答与解析")
-        self.user_answer = self._text_area("我的作答", 90)
+        self.user_answer = self._text_area("可选：填写你的作答；也可留空。", 90)
         self.correct_answer = self._text_area("正确答案", 90)
         self.solution = self._text_area("完整解析", 130)
         self.notes = self._text_area("备注", 80)
