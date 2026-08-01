@@ -63,7 +63,8 @@ from yancuo_win.infrastructure.credentials import get_secret
 from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.import_export.gmshare import GmshareService
 from yancuo_win.import_export.workspace import WorkspaceService
-from yancuo_win.tasks.worker import AIJobWorker, CallableWorker
+from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
+from yancuo_win.tasks.worker import CallableWorker
 from yancuo_win.tasks.search_worker import AiSearchWorker
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
 from yancuo_win.ui.icons import bind_icon
@@ -75,6 +76,7 @@ from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
 from yancuo_win.ui.settings_dialog import ServiceSettingsPage
+from yancuo_win.ui.task_center import TaskCenterDialog
 from yancuo_win.ui.widgets import (
     action_combo_box,
     CardFrame,
@@ -243,6 +245,7 @@ class MainWindow(QMainWindow):
         self.search = SearchIndexService(runtime)
         self.ai_search = AiSearchService(runtime)
         self.ai = AIService(runtime)
+        self.ai_coordinator = AIJobCoordinator(self.ai, self)
         self.problem_chat = ProblemChatService(runtime)
         self.intake = ProblemIntakeService(runtime)
         self.notes = NoteService(runtime)
@@ -261,7 +264,6 @@ class MainWindow(QMainWindow):
         self._nav_mode = "active"
         self._selected_problem_id: str | None = None
         self._expanded_question_id: str | None = None
-        self._ai_worker: AIJobWorker | None = None
         self._ai_search_worker: AiSearchWorker | None = None
         self._search_index_worker: CallableWorker | None = None
         self._cloud_profile_worker: CallableWorker | None = None
@@ -296,15 +298,16 @@ class MainWindow(QMainWindow):
             self._open_completed_ai_review
         )
         self._build_shortcuts()
+        self.ai_coordinator.job_finished.connect(self._on_coordinated_ai_job_done)
+        self.ai_coordinator.job_failed.connect(self._on_coordinated_ai_job_failed)
         self.refresh_all()
         self._update_context_bar(False)
         self._refresh_focus_pages()
+        self.ai_coordinator.resume_pending()
 
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802
         self.intake_page.shutdown()
-        if self._ai_worker and self._ai_worker.isRunning():
-            self._ai_worker.cancel()
-            self._ai_worker.wait(300)
+        self.ai_coordinator.shutdown()
         if self._ai_search_worker and self._ai_search_worker.isRunning():
             worker = self._ai_search_worker
             worker.cancel()
@@ -344,7 +347,7 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_dashboard_page())
-        self.intake_page = IntakePage(self.intake)
+        self.intake_page = IntakePage(self.intake, self.ai_coordinator)
         self.intake_page.problem_committed.connect(self._on_intake_committed)
         self.intake_page.status_message.connect(
             lambda message: self.statusBar().showMessage(message)
@@ -356,7 +359,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.intake_page)
         self.stack.addWidget(self._build_library_page())
         self.stack.addWidget(self._build_review_page())
-        self.note_page = NotePage(self.notes)
+        self.note_page = NotePage(self.notes, self.ai_coordinator)
         self.note_page.status_message.connect(
             lambda message: self.statusBar().showMessage(message)
         )
@@ -570,6 +573,34 @@ class MainWindow(QMainWindow):
         duration_ms = self.runtime.settings.application.ai_completion_notification_seconds * 1000
         self.ai_completion_notification.enqueue(job_id, candidates, duration_ms)
 
+    def _on_coordinated_ai_job_done(self, job_id: str) -> None:
+        job = self.ai.get_job(job_id)
+        if job is None:
+            return
+        if job.domain == "question_intake":
+            if job_id != self.intake_page.ai_job_id:
+                candidates = len(
+                    [
+                        item
+                        for item in self.intake.list_candidates(job_id)
+                        if item.status in {"pending", "conflict"}
+                    ]
+                )
+                if candidates:
+                    self._show_ai_completion_notification(job_id, candidates)
+            self._refresh_focus_pages()
+            return
+        if job.domain == "question_completion":
+            self._on_ai_job_done(job_id)
+
+    def _on_coordinated_ai_job_failed(self, job_id: str, message: str) -> None:
+        job = self.ai.get_job(job_id)
+        if job is not None and job.domain == "question_intake":
+            if job_id != self.intake_page.ai_job_id:
+                self._show_status_toast(f"一个 AI 录题任务失败：{message}")
+            return
+        self._on_ai_job_fail(job_id, message)
+
     def _open_completed_ai_review(self, job_id: str) -> None:
         if not self.intake_page.show_ai_review(job_id):
             self.statusBar().showMessage("该 AI 批次已无待确认题目", 3500)
@@ -677,6 +708,15 @@ class MainWindow(QMainWindow):
         review.body.addLayout(button_row(start_review))
         row.addWidget(review, stretch=1)
         layout.addLayout(row)
+        ai_queue = CardFrame()
+        ai_queue.add_title("AI 任务与审核队列")
+        self.dashboard_ai_queue = ai_queue.add_hint("暂无 AI 任务")
+        open_tasks = primary_button("查看 AI 任务")
+        open_tasks.clicked.connect(self._open_ai_tasks)
+        open_note_review = QPushButton("继续笔记审核")
+        open_note_review.clicked.connect(lambda: self.note_page._resume_note_draft())
+        ai_queue.body.addLayout(button_row(open_tasks, open_note_review))
+        layout.addWidget(ai_queue)
         layout.addStretch(1)
         return page
 
@@ -1893,6 +1933,15 @@ class MainWindow(QMainWindow):
         ai = self.runtime.settings.ai
         active = self.services.count_problems("active")
         pending_changes = len(self.ai.list_open_review_items())
+        jobs = self.ai.list_jobs(limit=100)
+        active_ai_jobs = sum(job.status in {"pending", "running"} for job in jobs)
+        question_reviews = sum(
+            batch.pending_candidates for batch in self.intake.list_resumable_ai_batches()
+        )
+        note_reviews = sum(
+            intake.status == "review"
+            for intake in self.note_page.note_intake.list_resumable_sessions()
+        )
         self.dashboard_hero.setText(
             f"正式题库 {active} 题  ·  今日待复习 {due} 题"
             if active
@@ -1908,7 +1957,39 @@ class MainWindow(QMainWindow):
         self.dashboard_review.setText(
             f"今日还有 {due} 道题需要复习。" if due else "今日复习已完成。"
         )
+        self.dashboard_ai_queue.setText(
+            f"运行或排队 {active_ai_jobs} 项 · "
+            f"题目待审核 {question_reviews} 项 · 笔记待审核 {note_reviews} 项"
+        )
         self.data_path_label.setText(str(self.runtime.paths.root))
+
+    def _open_ai_tasks(self) -> None:
+        dialog = TaskCenterDialog(self.ai, self.ai_coordinator, self)
+        dialog.job_open_requested.connect(self._open_ai_job)
+        dialog.exec()
+
+    def _open_ai_job(self, job_id: str) -> None:
+        job = self.ai.get_job(job_id)
+        if job is None:
+            self._show_status_toast("AI 任务不存在")
+            return
+        if job.domain == "question_intake":
+            self.intake_page.ai_job_id = job_id
+            self._show_navigation_page(_PAGE_INTAKE)
+            self.intake_page._open_current_ai_task()
+            return
+        if job.domain == "note_intake":
+            intake = self.note_page.note_intake.get_session(job.context_id)
+            self._show_navigation_page(_PAGE_NOTES)
+            if intake is not None and intake.status == "review":
+                self.note_page._show_draft_preview(intake)
+            else:
+                self.note_page._show_ai_intake()
+                self.note_page.ai_intake_status.setText(
+                    "任务仍在后台处理中，可从 AI 任务中心查看实时回复。"
+                )
+            return
+        self._open_review()
 
     # —— 刷新 ——
 
@@ -3699,16 +3780,10 @@ class MainWindow(QMainWindow):
         if not ids:
             self._show_status_toast("请先选择带原图的题目")
             return
-        if self._ai_worker and self._ai_worker.isRunning():
-            self._show_status_toast("已有 AI 任务在后台运行")
-            return
         try:
             job = self.ai.create_structure_job(ids)
-            self._ai_worker = AIJobWorker(self.ai, job.id, self)
-            self._ai_worker.finished_ok.connect(self._on_ai_job_done)
-            self._ai_worker.failed.connect(self._on_ai_job_fail)
-            self._ai_worker.start()
-            self.status.showMessage(f"AI 任务已开始：{job.id}（不阻塞界面）")
+            self.ai_coordinator.enqueue(job.id)
+            self.status.showMessage(f"AI 任务已加入后台队列：{job.id}")
         except DomainError as exc:
             QMessageBox.warning(self, "无法创建 AI 任务", str(exc))
 

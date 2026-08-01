@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -12,11 +12,13 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QPushButton,
+    QTextEdit,
     QVBoxLayout,
 )
 
 from yancuo_win.application.ai_service import AIService
-from yancuo_win.tasks.worker import AIJobWorker
+from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.ui.widgets import (
     PageHeader,
     SoftItemDelegate,
@@ -27,11 +29,15 @@ from yancuo_win.ui.widgets import (
 
 
 class TaskCenterDialog(QDialog):
-    def __init__(self, ai: AIService, parent=None) -> None:
+    job_open_requested = Signal(str)
+
+    def __init__(
+        self, ai: AIService, coordinator: AIJobCoordinator | None = None, parent=None
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("TaskCenterDialog")
         self.ai = ai
-        self._worker: AIJobWorker | None = None
+        self.coordinator = coordinator or AIJobCoordinator(ai, self)
         self.setWindowTitle("AI 任务中心")
         self.resize(640, 420)
 
@@ -56,6 +62,12 @@ class TaskCenterDialog(QDialog):
             SoftItemDelegate(self.list, minimum_height=40)
         )
         layout.addWidget(self.list, stretch=1)
+        self.list.currentItemChanged.connect(self._show_selected_response)
+        self.response = QTextEdit()
+        self.response.setReadOnly(True)
+        self.response.setPlaceholderText("选择任务后查看已接收的 AI 回复")
+        self.response.setMinimumHeight(110)
+        layout.addWidget(self.response)
 
         actions = QFrame()
         actions.setObjectName("DialogActionBar")
@@ -66,10 +78,13 @@ class TaskCenterDialog(QDialog):
         refresh.clicked.connect(self.refresh)
         run_btn = primary_button("运行选中任务")
         run_btn.clicked.connect(self._run_selected)
+        open_btn = QPushButton("打开任务")
+        open_btn.clicked.connect(self._open_selected)
         cancel_btn = danger_button("取消运行中")
         cancel_btn.clicked.connect(self._cancel_running)
         row.addWidget(refresh)
         row.addWidget(run_btn)
+        row.addWidget(open_btn)
         row.addWidget(cancel_btn)
         row.addStretch(1)
         layout.addWidget(actions)
@@ -108,20 +123,27 @@ class TaskCenterDialog(QDialog):
             self.summary.setText("请先选择一个后台任务")
             self.summary.setAccessibleDescription("请先选择一个后台任务")
             return
-        if self._worker and self._worker.isRunning():
-            self.summary.setText("已有任务在运行，请等待完成或先取消")
-            self.summary.setAccessibleDescription("已有任务在运行，请等待完成或先取消")
-            return
         job_id = items[0].data(256)
-        self._worker = AIJobWorker(self.ai, job_id, self)
-        self._worker.finished_ok.connect(self._on_done)
-        self._worker.failed.connect(self._on_fail)
-        self._worker.start()
-        self.summary.setText(self.summary.text() + "  · 后台运行中…")
+        self.coordinator.enqueue(job_id)
+        self.summary.setText(self.summary.text() + "  · 已加入后台队列")
 
     def _cancel_running(self) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.cancel()
+        items = self.list.selectedItems()
+        if items:
+            self.coordinator.cancel(str(items[0].data(256)))
+            self.refresh()
+
+    def _show_selected_response(self, current, _previous) -> None:
+        job_id = current.data(256) if current is not None else None
+        job = self.ai.get_job(str(job_id)) if job_id else None
+        self.response.setPlainText(job.response_text if job else "")
+
+    def _open_selected(self) -> None:
+        items = self.list.selectedItems()
+        if not items:
+            return
+        self.job_open_requested.emit(str(items[0].data(256)))
+        self.accept()
 
     def _on_done(self, job_id: str) -> None:
         QMessageBox.information(self, "完成", f"任务完成：{job_id}\n请打开「AI 审核」查看结果。")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any
 
 
@@ -170,3 +171,26 @@ class AIProvider(ABC):
                 retry_attempts=retry_attempts,
             )
         raise NotImplementedError(f"{self.name} 不支持单次多图识别")
+
+    def stream_structure_from_images(
+        self,
+        *,
+        image_paths: list[str],
+        prompt: str,
+        model: str,
+        timeout_seconds: int,
+        on_text_delta: Callable[[str], None],
+        retry_attempts: int | None = None,
+    ) -> StructuredResult:
+        """Stream public response text when supported, with a safe fallback."""
+
+        result = self.structure_from_images(
+            image_paths=image_paths,
+            prompt=prompt,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            retry_attempts=retry_attempts,
+        )
+        if result.raw_text:
+            on_text_delta(result.raw_text)
+        return result

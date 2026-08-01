@@ -582,6 +582,12 @@ class AiJob(Base):
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
     model: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     prompt_key: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    domain: Mapped[str] = mapped_column(String(32), default="generic", nullable=False)
+    context_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    config_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    response_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     done_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     failed_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -589,6 +595,12 @@ class AiJob(Base):
     error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
     allowed_fields_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
@@ -596,6 +608,11 @@ class AiJob(Base):
 
     items: Mapped[list[AiJobItem]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
+    )
+    events: Mapped[list[AiJobEvent]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="AiJobEvent.sequence",
     )
 
 
@@ -623,6 +640,27 @@ class AiJobItem(Base):
     )
 
     job: Mapped[AiJob] = relationship(back_populates="items")
+
+
+class AiJobEvent(Base):
+    """Persisted, ordered public output and lifecycle events for an AI job."""
+
+    __tablename__ = "ai_job_events"
+    __table_args__ = (
+        UniqueConstraint("job_id", "sequence", name="uq_ai_job_event_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    job: Mapped[AiJob] = relationship(back_populates="events")
 
 
 class AiRecognitionCache(Base):

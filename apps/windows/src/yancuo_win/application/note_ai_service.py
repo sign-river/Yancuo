@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,9 @@ class NoteAiService:
         *,
         instruction: str = "",
         classification_mode: str = "custom",
+        on_text_delta: Callable[[str], None] | None = None,
+        provider_name: str | None = None,
+        model: str | None = None,
     ) -> NoteExtractionDraft:
         image_path = Path(image_path)
         if not image_path.is_file():
@@ -74,17 +78,36 @@ class NoteAiService:
             raise DomainError("AI 功能未启用（config [ai].enabled）")
         if not self.runtime.settings.privacy.send_original_images_to_ai:
             raise DomainError("隐私设置禁止向 AI 发送原图")
-        provider = get_provider(self.runtime.settings)
+        provider = (
+            get_provider(self.runtime.settings)
+            if not provider_name
+            or provider_name == self.runtime.settings.ai.default_provider
+            else get_provider(self.runtime.settings, provider_name)
+        )
         provider.validate_configuration()
         if classification_mode not in {"ai", "custom"}:
             raise DomainError("不支持的笔记分类方式")
         prompt = self._prompt(instruction, classification_mode=classification_mode)
-        result = provider.structure_from_image(
-            image_path=str(image_path),
-            prompt=prompt,
-            model=self.runtime.settings.ai.default_vision_model or "mock-v1",
-            timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
-        )
+        request = {
+            "image_paths": [str(image_path)],
+            "prompt": prompt,
+            "model": model or self.runtime.settings.ai.default_vision_model or "mock-v1",
+            "timeout_seconds": self.runtime.settings.ai.request_timeout_seconds,
+        }
+        if on_text_delta is not None and hasattr(provider, "stream_structure_from_images"):
+            result = provider.stream_structure_from_images(
+                **request,
+                on_text_delta=on_text_delta,
+            )
+        else:
+            result = provider.structure_from_image(
+                image_path=str(image_path),
+                prompt=prompt,
+                model=request["model"],
+                timeout_seconds=request["timeout_seconds"],
+            )
+            if on_text_delta is not None and result.raw_text:
+                on_text_delta(result.raw_text)
         candidate = result.candidate_results()[0]
         return self._normalize_draft(image_path, candidate.fields, candidate.uncertain_fields, result)
 

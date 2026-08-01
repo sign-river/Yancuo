@@ -445,8 +445,8 @@ def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
     page = window.intake_page
 
     assert page.ai_upload_steps.current_step == 0
-    assert page.ai_processing_steps_bar.current_step == 1
-    assert page.ai_confirmation_steps.current_step == 2
+    assert page.ai_processing_steps_bar.current_step == 0
+    assert page.ai_confirmation_steps.current_step == 1
     assert page.ai_confirmation_surface.objectName() == "IntakeConfirmationSurface"
     assert page.ai_confirmation_action_bar.objectName() == "IntakeActionBar"
     assert isinstance(page.ai_file_list.itemDelegate(), SoftItemDelegate)
@@ -458,6 +458,28 @@ def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
         page.ai_upload_content_layout.itemAt(1).alignment()
         == Qt.AlignmentFlag.AlignTop
     )
+
+
+def test_first_ai_submission_is_not_mistaken_for_an_active_none_job(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = window.intake_page
+    started_jobs: list[str] = []
+
+    class Started:
+        job_id = "job_first_submission"
+
+    monkeypatch.setattr(page.intake, "start_ai", lambda *_args, **_kwargs: Started())
+    monkeypatch.setattr(page, "_start_worker", started_jobs.append)
+    page.ai_job_id = None
+    page.ai_files = [Path("question.png")]
+    page.show_ai_upload()
+
+    page._start_ai()
+
+    assert started_jobs == ["job_first_submission"]
+    assert page.stack.currentIndex() == 1
+    assert not page.ai_task_surface.isHidden()
 
 
 def _select_mode(window: MainWindow, mode: str) -> None:

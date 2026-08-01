@@ -557,7 +557,8 @@ def test_recognition_cache_replays_catalog_fields_proposals_and_uncertainty(
         for candidate in intake.list_candidates(second.job_id)
     ]
 
-    assert provider.calls == 2
+    # The first run now uses one streamed request; the second is served by cache.
+    assert provider.calls == 1
     assert intake.progress(second.job_id).cache_hits == 1
     assert second_projection == first_projection
     assert second_projection[0][0]["subject_id"] == subject.id
@@ -570,7 +571,7 @@ def test_recognition_cache_replays_catalog_fields_proposals_and_uncertainty(
     third = intake.start_ai([image])
     intake.ai.run_job(third.job_id)
     rematched = intake.list_candidates(third.job_id)[0]
-    assert provider.calls == 4
+    assert provider.calls == 2
     assert intake.progress(third.job_id).cache_hits == 0
     assert rematched.fields["subject_id"] == subject.id
     assert "chapter_id" not in rematched.fields

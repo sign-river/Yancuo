@@ -309,3 +309,30 @@ def test_multi_candidate_recognition_cache_reuses_the_full_result(
     assert provider.calls == 1
     assert len(ai.list_review_items_for_job(second.id)) == 2
     assert ai.get_job_diagnostics(second.id)["cache_hits"] == 1
+
+
+def test_ai_job_events_are_ordered_and_interrupted_jobs_requeue(ai: AIService) -> None:
+    job = ai.create_background_job(
+        domain="note_intake",
+        context_id="nintake_test",
+        job_type="note_extract",
+    )
+    ai.append_job_event(
+        job.id, "text_delta", text_value="第一段", append_response=True
+    )
+    ai.append_job_event(
+        job.id, "text_delta", text_value="第二段", append_response=True
+    )
+    ai.start_background_job(job.id)
+
+    assert ai.recover_interrupted_jobs() == [job.id]
+    recovered = ai.get_job(job.id)
+    assert recovered is not None
+    assert recovered.status == "pending"
+    assert recovered.response_text == "第一段第二段"
+    events = ai.list_job_events(job.id)
+    assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+    assert [event.text for event in events if event.event_type == "text_delta"] == [
+        "第一段",
+        "第二段",
+    ]

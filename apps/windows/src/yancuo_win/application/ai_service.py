@@ -29,6 +29,7 @@ from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
     AiJob,
+    AiJobEvent,
     AiJobItem,
     AiRecognitionCache,
     Asset,
@@ -53,12 +54,6 @@ from yancuo_win.review.changeset import (
     field_diffs,
     validate_and_filter_proposal,
 )
-
-_QUICK_INTAKE_PROMPT = """这是题目图片的首轮快速识别。只返回严格 JSON，且只包含一个 problems 数组。
-每个对象仅包含 title、question_markdown、question_latex、correct_answer、region。
-优先准确转写题干、公式和最终答案；不要生成解析、标签、分类、说明文字或 Markdown 代码块。
-无法确认的字段使用空字符串，region 无法判断时使用整图。"""
-
 
 def _structured_result_from_cache(
     payload: dict[str, object] | None, raw_response: str
@@ -383,6 +378,67 @@ class AIService:
             s.expunge_all()
             return list(rows)
 
+    def append_job_event(
+        self,
+        job_id: str,
+        event_type: str,
+        *,
+        text_value: str = "",
+        payload: dict[str, Any] | None = None,
+        append_response: bool = False,
+    ) -> AiJobEvent:
+        """Append one public, resumable event to a job's ordered event stream."""
+
+        with self.session() as s:
+            job = s.get(AiJob, job_id)
+            if job is None:
+                raise DomainError("任务不存在")
+            sequence = int(
+                s.scalar(
+                    select(func.coalesce(func.max(AiJobEvent.sequence), 0)).where(
+                        AiJobEvent.job_id == job_id
+                    )
+                )
+                or 0
+            ) + 1
+            event = AiJobEvent(
+                id=new_id("jevent"),
+                job_id=job_id,
+                sequence=sequence,
+                event_type=event_type,
+                text=text_value,
+                payload_json=json.dumps(payload or {}, ensure_ascii=False),
+            )
+            s.add(event)
+            if append_response and text_value:
+                job.response_text = f"{job.response_text}{text_value}"
+            job.heartbeat_at = utcnow()
+            job.updated_at = utcnow()
+            s.commit()
+            s.refresh(event)
+            s.expunge(event)
+            return event
+
+    def list_job_events(
+        self, job_id: str, *, after_sequence: int = 0, limit: int = 500
+    ) -> list[AiJobEvent]:
+        with self.session() as s:
+            if s.get(AiJob, job_id) is None:
+                raise DomainError("任务不存在")
+            rows = list(
+                s.scalars(
+                    select(AiJobEvent)
+                    .where(
+                        AiJobEvent.job_id == job_id,
+                        AiJobEvent.sequence > max(0, after_sequence),
+                    )
+                    .order_by(AiJobEvent.sequence)
+                    .limit(max(1, min(limit, 2000)))
+                ).all()
+            )
+            s.expunge_all()
+            return rows
+
     def get_job(self, job_id: str) -> AiJob | None:
         with self.session() as s:
             job = s.scalars(
@@ -393,6 +449,138 @@ class AIService:
             if job:
                 s.expunge_all()
             return job
+
+    def recover_interrupted_jobs(self) -> list[str]:
+        """Return unfinished jobs to the durable queue after process restart."""
+
+        recovered: list[str] = []
+        with self.session() as s:
+            jobs = list(
+                s.scalars(
+                    select(AiJob)
+                    .where(AiJob.status.in_(("pending", "running")))
+                    .order_by(AiJob.created_at)
+                ).all()
+            )
+            for job in jobs:
+                recovered.append(job.id)
+                if job.status == "running":
+                    job.status = "pending"
+                    job.error_message = ""
+                    job.heartbeat_at = utcnow()
+                    for item in job.items:
+                        if item.status == "running":
+                            item.status = "pending"
+                job.updated_at = utcnow()
+            s.commit()
+        for job_id in recovered:
+            self.append_job_event(
+                job_id,
+                "status",
+                text_value="任务已进入后台队列",
+                payload={"stage": "queued"},
+            )
+        return recovered
+
+    def mark_job_failed(self, job_id: str, message: str) -> None:
+        with self.session() as s:
+            job = s.get(AiJob, job_id)
+            if job is None or job.status == "cancelled":
+                return
+            job.status = "failed"
+            job.error_message = message
+            job.finished_at = utcnow()
+            job.updated_at = utcnow()
+            s.commit()
+        self.append_job_event(job_id, "error", text_value=message)
+
+    def cancel_job(self, job_id: str) -> None:
+        with self.session() as s:
+            job = s.get(AiJob, job_id)
+            if job is None or job.status in {"completed", "cancelled"}:
+                return
+            job.status = "cancelled"
+            job.finished_at = utcnow()
+            job.updated_at = utcnow()
+            for item in job.items:
+                if item.status in {"pending", "running"}:
+                    item.status = "cancelled"
+            s.commit()
+        self.append_job_event(job_id, "cancelled", text_value="任务已取消")
+
+    def create_background_job(
+        self,
+        *,
+        domain: str,
+        context_id: str,
+        job_type: str,
+        config: dict[str, Any] | None = None,
+    ) -> AiJob:
+        provider = self.runtime.settings.ai.default_provider
+        model = self.runtime.settings.ai.default_vision_model or "mock-v1"
+        with self.session() as s:
+            job = AiJob(
+                id=new_id("job"),
+                job_type=job_type,
+                status="pending",
+                provider=provider,
+                model=model,
+                domain=domain,
+                context_id=context_id,
+                config_json=json.dumps(
+                    {"provider": provider, "model": model, **(config or {})},
+                    ensure_ascii=False,
+                ),
+                total_items=1,
+            )
+            s.add(job)
+            s.commit()
+            s.refresh(job)
+            s.expunge(job)
+        self.append_job_event(
+            job.id,
+            "status",
+            text_value="任务已进入后台队列",
+            payload={"stage": "queued"},
+        )
+        return job
+
+    def start_background_job(self, job_id: str) -> None:
+        with self.session() as s:
+            job = s.get(AiJob, job_id)
+            if job is None:
+                raise DomainError("任务不存在")
+            if job.status == "cancelled":
+                raise DomainError("任务已取消")
+            job.status = "running"
+            job.attempt_count += 1
+            job.started_at = job.started_at or utcnow()
+            job.heartbeat_at = utcnow()
+            job.updated_at = utcnow()
+            s.commit()
+        self.append_job_event(job_id, "status", text_value="任务已开始")
+
+    def complete_background_job(
+        self, job_id: str, *, result: dict[str, Any] | None = None
+    ) -> None:
+        with self.session() as s:
+            job = s.get(AiJob, job_id)
+            if job is None:
+                raise DomainError("任务不存在")
+            if job.status == "cancelled":
+                return
+            job.status = "completed"
+            job.done_items = 1
+            job.failed_items = 0
+            job.result_json = json.dumps(result or {}, ensure_ascii=False)
+            job.finished_at = utcnow()
+            job.updated_at = utcnow()
+            s.commit()
+        self.append_job_event(
+            job_id,
+            "complete",
+            text_value="AI 回复接收完毕，审核内容已准备好",
+        )
 
     def list_open_review_items(self) -> list[ReviewItem]:
         with self.session() as s:
@@ -548,6 +736,11 @@ class AIService:
                 provider=provider_name,
                 model=self.runtime.settings.ai.default_vision_model or "mock-v1",
                 prompt_key=prompt_key,
+                domain="question_completion",
+                config_json=json.dumps(
+                    {"provider": provider_name, "model": self.runtime.settings.ai.default_vision_model},
+                    ensure_ascii=False,
+                ),
                 total_items=0,
                 allowed_fields_json=json.dumps(allowed, ensure_ascii=False),
             )
@@ -810,6 +1003,16 @@ class AIService:
                 provider=provider_name,
                 model=self.runtime.settings.ai.default_vision_model or "mock-v1",
                 prompt_key=prompt_key,
+                domain="question_intake",
+                context_id=intake_session_id,
+                config_json=json.dumps(
+                    {
+                        "provider": provider_name,
+                        "model": self.runtime.settings.ai.default_vision_model,
+                        "recognition_mode": recognition_mode,
+                    },
+                    ensure_ascii=False,
+                ),
                 total_items=0,
                 allowed_fields_json=json.dumps(allowed, ensure_ascii=False),
             )
@@ -882,8 +1085,6 @@ class AIService:
         on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> AiJob:
         """同步执行任务（可由后台线程调用）。不直接写入正式题库字段。"""
-        provider = get_provider(self.runtime.settings)
-
         with self.session() as s:
             job = s.scalars(
                 select(AiJob).where(AiJob.id == job_id).options(selectinload(AiJob.items))
@@ -893,9 +1094,24 @@ class AIService:
             if job.status == "cancelled":
                 return job
             prompt_key = job.prompt_key or "structure_recognize"
+            provider = (
+                get_provider(self.runtime.settings)
+                if self.runtime.settings.ai.default_provider == job.provider
+                else get_provider(self.runtime.settings, job.provider)
+            )
             job.status = "running"
+            job.attempt_count += 1
+            job.started_at = job.started_at or utcnow()
+            job.heartbeat_at = utcnow()
             job.updated_at = utcnow()
             s.commit()
+
+        self.append_job_event(
+            job_id,
+            "status",
+            text_value="任务已开始，正在准备图片",
+            payload={"stage": "started"},
+        )
 
         prompt = self.get_prompt(prompt_key)
 
@@ -975,9 +1191,29 @@ class AIService:
                 if intake_session:
                     intake_session.status = "cancelled"
                     intake_session.completed_at = utcnow()
+            terminal_status = job.status
+            done_items = job.done_items
+            failed_items = job.failed_items
             s.commit()
             s.expunge_all()
-            return job
+        if terminal_status == "cancelled":
+            self.append_job_event(
+                job_id,
+                "cancelled",
+                text_value="任务已取消",
+            )
+        else:
+            self.append_job_event(
+                job_id,
+                "complete",
+                text_value=(
+                    "AI 回复接收完毕，审核内容已准备好"
+                    if done_items
+                    else "AI 任务已结束，但没有生成可审核内容"
+                ),
+                payload={"done": done_items, "failed": failed_items},
+            )
+        return job
 
     def _process_item(
         self,
@@ -1088,6 +1324,42 @@ class AIService:
             item.status = "running"
             s.commit()
 
+            stream_chunks: list[str] = []
+            last_stream_flush = [perf_counter()]
+
+            def flush_stream(*, force: bool = False) -> None:
+                length = sum(len(value) for value in stream_chunks)
+                if not stream_chunks or (
+                    not force
+                    and length < 128
+                    and perf_counter() - last_stream_flush[0] < 0.35
+                ):
+                    return
+                combined = "".join(stream_chunks)
+                stream_chunks.clear()
+                last_stream_flush[0] = perf_counter()
+                self.append_job_event(
+                    job_id,
+                    "text_delta",
+                    text_value=combined,
+                    payload={"item_id": item_id},
+                    append_response=True,
+                )
+
+            def receive_text_delta(delta: str) -> None:
+                if not delta:
+                    return
+                stream_chunks.append(delta)
+                if on_progress:
+                    on_progress(
+                        {
+                            "stage": "streaming",
+                            "label": "正在接收 AI 回复",
+                            "text_delta": delta,
+                        }
+                    )
+                flush_stream()
+
             try:
                 if should_cancel and should_cancel():
                     return
@@ -1135,51 +1407,36 @@ class AIService:
                 else:
                     active_stage = "provider"
                     provider_started = perf_counter()
-                    if job.job_type == "intake_structure":
-                        if on_progress:
-                            on_progress({"stage": "quick_request", "label": "正在识别题干、公式和最终答案"})
-                        quick_started = perf_counter()
-                        quick_result = (
-                            provider.structure_from_image(
-                                image_path=str(image_paths[0]),
-                                prompt=_QUICK_INTAKE_PROMPT,
-                                model=job.model,
-                                timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
-                            )
-                            if len(image_paths) == 1
-                            else provider.structure_from_images(
-                                image_paths=[str(path) for path in image_paths],
-                                prompt=_QUICK_INTAKE_PROMPT,
-                                model=job.model,
-                                timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
-                            )
-                        )
-                        timings_ms["quick_request"] = (
-                            perf_counter() - quick_started
-                        ) * 1000
-                        quick_candidates = quick_result.candidate_results()
-                        if on_progress and quick_candidates:
-                            quick_fields = quick_candidates[0].fields
-                            preview = {
-                                key: str(quick_fields.get(key) or "").strip()
-                                for key in ("title", "question_markdown", "question_latex", "correct_answer")
+                    if on_progress:
+                        on_progress(
+                            {
+                                "stage": "request",
+                                "label": "图片已提交，正在等待 AI 回复",
                             }
-                            if preview["question_markdown"] or preview["question_latex"] or preview["correct_answer"]:
-                                on_progress({
-                                    "stage": "quick_ready",
-                                    "label": "首轮结果已到，正在补全解析、标签和分类",
-                                    "preview": preview,
-                                })
-                        if on_progress:
-                            on_progress({"stage": "enrichment", "label": "正在生成完整解析、标签和分类"})
+                        )
+                    self.append_job_event(
+                        job_id,
+                        "status",
+                        text_value="图片已提交，正在等待 AI 回复",
+                        payload={"stage": "request", "item_id": item_id},
+                    )
                     enrichment_started = perf_counter()
-                    if len(image_paths) == 1:
+                    if hasattr(provider, "stream_structure_from_images"):
+                        result = provider.stream_structure_from_images(
+                            image_paths=[str(path) for path in image_paths],
+                            prompt=prompt_body,
+                            model=job.model,
+                            timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+                            on_text_delta=receive_text_delta,
+                        )
+                    elif len(image_paths) == 1:
                         result = provider.structure_from_image(
                             image_path=str(image_paths[0]),
                             prompt=prompt_body,
                             model=job.model,
                             timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
                         )
+                        receive_text_delta(result.raw_text)
                     else:
                         result = provider.structure_from_images(
                             image_paths=[str(path) for path in image_paths],
@@ -1187,6 +1444,8 @@ class AIService:
                             model=job.model,
                             timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
                         )
+                        receive_text_delta(result.raw_text)
+                    flush_stream(force=True)
                     timings_ms["enrichment_request"] = (
                         perf_counter() - enrichment_started
                     ) * 1000
@@ -1259,6 +1518,7 @@ class AIService:
                     }
                 item.structured_json = json.dumps(structured, ensure_ascii=False)
                 item.cost_estimate = float(result.cost_estimate)
+                job.result_json = item.structured_json
 
                 active_stage = "candidate_write"
                 if on_progress:
@@ -1450,7 +1710,14 @@ class AIService:
                     },
                 )
                 s.commit()
+                self.append_job_event(
+                    job_id,
+                    "item_complete",
+                    text_value="已生成可审核内容",
+                    payload={"item_id": item_id},
+                )
             except Exception as exc:  # noqa: BLE001
+                flush_stream(force=True)
                 if should_cancel and should_cancel():
                     s.rollback()
                     return
@@ -1480,6 +1747,12 @@ class AIService:
                     },
                 )
                 s.commit()
+                self.append_job_event(
+                    job_id,
+                    "error",
+                    text_value=str(exc),
+                    payload={"item_id": item_id, "stage": active_stage},
+                )
 
     def accept_review_item(self, review_item_id: str, *, force: bool = False) -> None:
         from yancuo_win.application.sync_service import SyncService, sync_snapshot
