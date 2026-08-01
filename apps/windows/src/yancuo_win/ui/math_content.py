@@ -537,6 +537,7 @@ class MathContentView(QWidget):
         self._compact = False
         self._zoom_scale = preview_zoom_scale()
         self._content_height: int | None = None
+        self._pdf_view_initialized = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._view = QPdfView(self)
@@ -782,7 +783,9 @@ class MathContentView(QWidget):
         self._document = document
         self._document_buffer = buffer
         self._view.setDocument(document)
-        self._view.show()
+        if not self._pdf_view_initialized:
+            self._pdf_view_initialized = True
+            self._view.show()
         self._apply_zoom_scale()
         if self._fit_content_height:
             self._update_content_height()
