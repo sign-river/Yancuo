@@ -1030,6 +1030,41 @@ def app_stylesheet(theme: str = "light") -> str:
         border-color: {t.primary};
         font-weight: 600;
     }}
+    QPushButton#ThemeModeButton {{
+        min-width: 76px;
+        background: {t.surface};
+        color: {t.text};
+        border: 1px solid {t.border};
+        border-radius: {m.radius_control}px;
+        padding: 6px 14px;
+    }}
+    QPushButton#ThemeModeButton:hover:!checked:!disabled {{
+        background: {t.list_hover};
+        border-color: {t.hover_border};
+    }}
+    QPushButton#ThemeModeButton:checked {{
+        background: {t.primary};
+        color: {t.nav_text};
+        border-color: {t.primary};
+        font-weight: 600;
+    }}
+    QPushButton#ThemeModeButton:checked:hover {{
+        background: {t.primary_hover};
+        border-color: {t.primary_hover};
+    }}
+    QPushButton#ThemeModeButton:focus {{
+        border: 2px solid {t.focus_ring};
+    }}
+    QPushButton#ThemeModeButton:disabled {{
+        background: {t.input_disabled};
+        color: {t.muted};
+        border-color: {t.border};
+    }}
+    QLabel#ThemeModeStatus {{
+        color: {t.primary};
+        font-weight: 600;
+        padding: 6px 0;
+    }}
 
     QTabWidget::pane {{
         border: none;

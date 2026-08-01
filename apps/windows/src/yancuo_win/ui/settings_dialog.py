@@ -54,7 +54,7 @@ from yancuo_win.ui.widgets import (
     primary_button,
     set_tab_order_chain,
 )
-from yancuo_win.ui.theme import apply_app_theme, get_theme_manager
+from yancuo_win.ui.theme import apply_app_theme, current_theme_name, get_theme_manager
 from yancuo_win.ui.math_content import set_preview_zoom_scale
 
 
@@ -147,15 +147,20 @@ class ServiceSettingsPage(QWidget):
             self.theme_buttons: dict[str, QPushButton] = {}
             for label, mode in (("跟随系统", "system"), ("浅色", "light"), ("深色", "dark")):
                 button = QPushButton(label)
+                button.setObjectName("ThemeModeButton")
                 button.setCheckable(True)
                 button.setProperty("themeMode", mode)
+                button.setAccessibleDescription("选择此主题模式")
                 self.theme_button_group.addButton(button)
                 self.theme_buttons[mode] = button
                 theme_row.addWidget(button)
-            self.theme_buttons[str(self.theme_mode.currentData())].setChecked(True)
+            self.theme_status = QLabel()
+            self.theme_status.setObjectName("ThemeModeStatus")
+            self.theme_status.setAccessibleName("当前生效主题")
             self.theme_button_group.idClicked.connect(self._select_theme_button)
             theme_row.addStretch(1)
             appearance_form.addRow("主题", theme_choices)
+            appearance_form.addRow("当前显示", self.theme_status)
             self.preview_zoom = QSpinBox()
             describe_field(
                 self.preview_zoom,
@@ -191,8 +196,12 @@ class ServiceSettingsPage(QWidget):
             self.apply_theme_button = primary_button("保存更改")
             self.apply_theme_button.clicked.connect(self._apply_theme)
             appearance.body.addLayout(self._save_row(self.apply_theme_button))
+            appearance.body.addLayout(self._save_row(self.apply_theme_button))
+            self._refresh_theme_status()
             set_tab_order_chain(
-                self.theme_mode,
+                self.theme_buttons["system"],
+                self.theme_buttons["light"],
+                self.theme_buttons["dark"],
                 self.preview_zoom,
                 self.apply_theme_button,
             )
@@ -537,8 +546,16 @@ class ServiceSettingsPage(QWidget):
             button.setEnabled(enabled)
 
     def _refresh_theme_status(self) -> None:
+        selected_mode = str(self.theme_mode.currentData())
+        resolved_mode = current_theme_name()
         for mode, button in self.theme_buttons.items():
-            button.setChecked(mode == str(self.theme_mode.currentData()))
+            button.setChecked(mode == resolved_mode)
+        source = "跟随系统" if selected_mode == "system" else "固定选择"
+        label = "浅色" if resolved_mode == "light" else "深色"
+        self.theme_status.setText(f"{label}（{source}）")
+        self.theme_status.setAccessibleDescription(
+            f"当前实际显示为{label}，主题来源为{source}"
+        )
 
     def _select_theme_button(self, button_id: int) -> None:
         button = self.theme_button_group.button(button_id)
