@@ -21,6 +21,10 @@ from yancuo_win.domain.rules import DomainError
 
 class LocalFolderProvider(CloudProvider):
     name = "local_folder"
+    MAX_METADATA_FILE_BYTES = 8 * 1024 * 1024
+    MAX_RELEASES = 10_000
+    MAX_RELEASE_ASSETS = 10_000
+    MAX_DEVICES = 10_000
     MAX_OPERATION_FILE_BYTES = 64 * 1024 * 1024
     MAX_REMOTE_OPERATIONS = 100_000
     MAX_REMOTE_DEVICES = 10_000
@@ -35,6 +39,41 @@ class LocalFolderProvider(CloudProvider):
             raise ValueError("lock_ttl_seconds 必须大于 0")
         self.lock_ttl_seconds = ttl
         self.root.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def _read_json_file(cls, path: Path, label: str) -> Any:
+        if path.is_symlink():
+            raise DomainError(f"{label} must not be a symlink")
+        if not path.is_file():
+            raise DomainError(f"{label} does not exist")
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise DomainError(f"cannot inspect {label}") from exc
+        if size > cls.MAX_METADATA_FILE_BYTES:
+            raise DomainError(f"{label} exceeds size limit")
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainError(f"{label} is not valid JSON") from exc
+
+    @staticmethod
+    def _write_text_atomic(path: Path, content: str, label: str) -> None:
+        if path.is_symlink():
+            raise DomainError(f"{label} must not be a symlink")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _safe_component(value: str, label: str) -> str:
@@ -126,7 +165,10 @@ class LocalFolderProvider(CloudProvider):
         repo_json = path / ".mistakebook" / "repository.json"
         meta = {}
         if repo_json.is_file():
-            meta = json.loads(repo_json.read_text(encoding="utf-8"))
+            raw = self._read_json_file(repo_json, "repository.json")
+            if not isinstance(raw, dict):
+                raise DomainError("repository.json must contain an object")
+            meta = raw
         return {"owner": owner, "name": name, "private": True, "meta": meta, "path": str(path)}
 
     def read_sync_manifest(self, owner: str, repo: str) -> dict[str, Any] | None:
@@ -135,32 +177,41 @@ class LocalFolderProvider(CloudProvider):
             raise DomainError("latest.json must not be a symlink")
         if not path.is_file():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw = self._read_json_file(path, "latest.json")
+        if not isinstance(raw, dict):
+            raise DomainError("latest.json must contain an object")
+        return raw
 
     def write_sync_manifest(self, owner: str, repo: str, manifest: dict[str, Any]) -> None:
         # 先写临时再替换，避免半写入
         path = self._repo_dir(owner, repo) / ".mistakebook" / "latest.json"
         if path.is_symlink():
             raise DomainError("latest.json must not be a symlink")
-        tmp = path.with_suffix(".tmp")
-        if tmp.is_symlink():
-            raise DomainError("latest.json temporary path must not be a symlink")
-        tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        encoded = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        if len(encoded.encode("utf-8")) > self.MAX_METADATA_FILE_BYTES:
+            raise DomainError("latest.json exceeds size limit")
+        self._write_text_atomic(path, encoded, "latest.json")
 
     def list_releases(self, owner: str, repo: str) -> list[RemoteRelease]:
         releases_dir = self._repo_dir(owner, repo) / "releases"
         items: list[RemoteRelease] = []
-        for d in sorted(releases_dir.iterdir(), reverse=True):
+        release_dirs = sorted(releases_dir.iterdir(), reverse=True)
+        if len(release_dirs) > self.MAX_RELEASES:
+            raise DomainError("release count exceeds limit")
+        for d in release_dirs:
             if not d.is_dir() or d.is_symlink():
                 continue
             meta_path = d / "release.json"
-            meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+            meta = self._read_json_file(meta_path, "release.json") if meta_path.is_file() else {}
+            if not isinstance(meta, dict):
+                raise DomainError("release.json must contain an object")
             assets = [
                 {"name": f.name, "path": str(f), "size": f.stat().st_size}
                 for f in d.iterdir()
                 if f.is_file() and f.name != "release.json"
             ]
+            if len(assets) > self.MAX_RELEASE_ASSETS:
+                raise DomainError("release asset count exceeds limit")
             items.append(
                 RemoteRelease(
                     tag=d.name,
@@ -374,13 +425,20 @@ class LocalFolderProvider(CloudProvider):
             raise DomainError("devices.json must not be a symlink")
         devices: list[dict[str, Any]] = []
         if path.is_file():
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = self._read_json_file(path, "devices.json")
             if isinstance(raw, list):
-                devices = raw
-        did = str(device.get("device_id") or "")
+                devices = [value for value in raw if isinstance(value, dict)]
+            else:
+                raise DomainError("devices.json must contain an array")
+        did = self._safe_component(str(device.get("device_id") or ""), "device id")
         devices = [d for d in devices if d.get("device_id") != did]
+        if len(devices) >= self.MAX_DEVICES:
+            raise DomainError("device count exceeds limit")
         devices.append(device)
-        path.write_text(json.dumps(devices, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        encoded = json.dumps(devices, ensure_ascii=False, indent=2) + "\n"
+        if len(encoded.encode("utf-8")) > self.MAX_METADATA_FILE_BYTES:
+            raise DomainError("devices.json exceeds size limit")
+        self._write_text_atomic(path, encoded, "devices.json")
 
     def append_operations(
         self, owner: str, repo: str, device_id: str, operations: list[dict[str, Any]]

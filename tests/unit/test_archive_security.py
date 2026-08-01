@@ -201,3 +201,32 @@ def test_local_folder_rejects_non_utf8_operation_logs(tmp_path: Path) -> None:
 
     with pytest.raises(DomainError, match="UTF-8"):
         provider.list_remote_operations("local", "repo")
+
+
+def test_local_folder_bounds_and_atomically_writes_sync_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.create_private_repository("repo")
+    provider.write_sync_manifest("local", "repo", {"format": "safe"})
+    metadata_dir = root / "local" / "repo" / ".mistakebook"
+
+    assert provider.read_sync_manifest("local", "repo") == {"format": "safe"}
+    assert not list(metadata_dir.glob(".latest.json.*.tmp"))
+
+    monkeypatch.setattr(LocalFolderProvider, "MAX_METADATA_FILE_BYTES", 1)
+    with pytest.raises(DomainError, match="size limit"):
+        provider.read_sync_manifest("local", "repo")
+
+
+def test_local_folder_rejects_unsafe_device_metadata_identifiers(
+    tmp_path: Path,
+) -> None:
+    provider = LocalFolderProvider(tmp_path / "cloud")
+    provider.create_private_repository("repo")
+
+    with pytest.raises(DomainError, match="unsafe path component"):
+        provider.register_device(
+            "local", "repo", {"device_id": "../outside", "name": "bad"}
+        )
