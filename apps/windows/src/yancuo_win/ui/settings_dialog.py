@@ -80,6 +80,7 @@ class ServiceSettingsPage(QWidget):
         self._dirty = False
         self._last_connection_test = "尚未测试"
         self._field_errors: dict[str, QLabel] = {}
+        self._save_button: QPushButton | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 20)
@@ -169,6 +170,7 @@ class ServiceSettingsPage(QWidget):
             appearance.body.addLayout(appearance_form)
             self.apply_theme_button = primary_button("保存更改")
             self.apply_theme_button.clicked.connect(self._apply_theme)
+            self._save_button = self.apply_theme_button
             appearance.body.addLayout(button_row(self.apply_theme_button))
             set_tab_order_chain(
                 self.theme_mode,
@@ -263,6 +265,8 @@ class ServiceSettingsPage(QWidget):
         self.fetch_ai_models.clicked.connect(self._fetch_ai_models)
         self.apply_ai_button = primary_button("保存更改")
         self.apply_ai_button.clicked.connect(self._apply_ai_session)
+        if section == "ai":
+            self._save_button = self.apply_ai_button
         ai_card.body.addLayout(
             button_row(
                 self.clear_ai_button,
@@ -358,6 +362,8 @@ class ServiceSettingsPage(QWidget):
         self.test_cloud_button.clicked.connect(self._test_cloud)
         self.apply_cloud_button = primary_button("保存更改")
         self.apply_cloud_button.clicked.connect(self._save_cloud_settings)
+        if section == "cloud":
+            self._save_button = self.apply_cloud_button
         cloud_card.body.addLayout(
             button_row(
                 self.clear_cloud_token_button,
@@ -494,9 +500,8 @@ class ServiceSettingsPage(QWidget):
         self._set_save_enabled(False)
 
     def _set_save_enabled(self, enabled: bool) -> None:
-        button = getattr(self, "apply_ai_button", None) or getattr(self, "apply_cloud_button", None) or getattr(self, "apply_theme_button", None)
-        if button is not None:
-            button.setEnabled(enabled)
+        if self._save_button is not None:
+            self._save_button.setEnabled(enabled)
 
     def _refresh_theme_status(self) -> None:
         for mode, button in self.theme_buttons.items():

@@ -144,6 +144,34 @@ def test_settings_page_consolidates_account_services_and_data(window: MainWindow
     assert window.settings_pages.currentIndex() == 1
 
 
+def test_data_transfer_actions_are_grouped_in_accessible_menus(
+    window: MainWindow,
+) -> None:
+    backup_actions = [
+        action.text() for action in window.backup_menu_button.menu().actions()
+    ]
+    transfer_actions = [
+        action.text() for action in window.transfer_menu_button.menu().actions()
+    ]
+
+    assert backup_actions == [
+        "导出完整备份",
+        "导入完整备份",
+        "",
+        "创建 ZIP 备份（旧版兼容）",
+        "从 ZIP 恢复（旧版兼容）",
+    ]
+    assert transfer_actions == [
+        "导出分享包",
+        "导出工作区",
+        "",
+        "导入分享包",
+        "导入工作区",
+    ]
+    assert window.backup_menu_button.accessibleName() == "备份与恢复操作"
+    assert window.transfer_menu_button.accessibleName() == "导入与导出操作"
+
+
 def test_primary_navigation_and_large_views_are_keyboard_accessible(
     window: MainWindow,
 ) -> None:
@@ -809,6 +837,22 @@ def test_settings_expose_loading_failure_disabled_and_permission_states(
     )
     assert cloud_settings.cloud_permission_notice.property("state") == "disabled"
     assert not cloud_settings.token_edit.isEnabled()
+
+
+def test_settings_dirty_state_only_updates_the_attached_save_button(
+    window: MainWindow,
+) -> None:
+    pages = (
+        (window.ai_settings_page, window.ai_settings_page.apply_ai_button),
+        (window.appearance_settings_page, window.appearance_settings_page.apply_theme_button),
+        (window.cloud_settings_page, window.cloud_settings_page.apply_cloud_button),
+    )
+    for page, save_button in pages:
+        page._mark_dirty()
+        assert page.has_unsaved_changes
+        assert save_button.isEnabled()
+        page.discard_unsaved_changes()
+        assert not save_button.isEnabled()
 
 
 def test_settings_show_field_level_validation_errors(window: MainWindow) -> None:
