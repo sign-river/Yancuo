@@ -22,7 +22,7 @@ from typing import Any
 
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QImage
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from yancuo_win.ai.base import normalize_content_blocks, normalize_region
@@ -1268,44 +1268,6 @@ class ProblemIntakeService:
                 raise DomainError("来源图片顺序无效")
             for order, path in enumerate(requested):
                 by_path[path].sort_order = order
-            session.commit()
-
-    def split_candidate_recognition_unit(self, candidate_id: str) -> None:
-        """Replace one multi-image candidate source unit with ordered single-image units."""
-
-        with self.runtime.session_factory() as session:
-            candidate = session.get(IntakeCandidateRecord, candidate_id)
-            unit_ids = session.scalars(
-                select(IntakeCandidateUnit.recognition_unit_id).where(
-                    IntakeCandidateUnit.candidate_id == candidate_id
-                )
-            ).all()
-            if candidate is None or len(unit_ids) != 1:
-                raise DomainError("当前候选没有可拆分的识别单元")
-            old_unit = session.get(IntakeRecognitionUnit, unit_ids[0])
-            members = session.scalars(
-                select(IntakeRecognitionUnitAsset)
-                .where(IntakeRecognitionUnitAsset.recognition_unit_id == unit_ids[0])
-                .order_by(IntakeRecognitionUnitAsset.sort_order)
-            ).all()
-            if old_unit is None or len(members) < 2:
-                raise DomainError("识别单元至少需要两张图片才能拆分")
-            session.execute(
-                delete(IntakeCandidateUnit).where(
-                    IntakeCandidateUnit.candidate_id == candidate_id
-                )
-            )
-            for order, member in enumerate(members):
-                unit = IntakeRecognitionUnit(
-                    id=new_id("iunit"), session_id=old_unit.session_id,
-                    mode="one_to_one", sort_order=old_unit.sort_order + order,
-                )
-                session.add(unit)
-                session.add(IntakeRecognitionUnitAsset(
-                    recognition_unit_id=unit.id, intake_asset_id=member.intake_asset_id, sort_order=0
-                ))
-                session.flush()
-                session.add(IntakeCandidateUnit(candidate_id=candidate_id, recognition_unit_id=unit.id))
             session.commit()
 
     def commit_ai_candidates_as_problem_set(

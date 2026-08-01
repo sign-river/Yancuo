@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 import yancuo_win.application.intake_service as intake_service_module
 from yancuo_win.ai.base import StructuredCandidate, StructuredResult
@@ -760,7 +760,7 @@ def test_many_images_one_problem_uses_one_ordered_recognition_unit(
     assert candidate_unit.recognition_unit_id == unit.id
 
 
-def test_candidate_sources_can_be_reordered_and_split_into_units(
+def test_candidate_sources_can_be_reordered(
     intake: ProblemIntakeService, tmp_path: Path
 ) -> None:
     first = tmp_path / "source-1.jpg"
@@ -781,16 +781,6 @@ def test_candidate_sources_can_be_reordered_and_split_into_units(
     assert intake.candidate_source_images(candidate.review_item_id) == list(
         reversed(original_order)
     )
-    intake.split_candidate_recognition_unit(candidate.review_item_id)
-    with intake.runtime.session_factory() as session:
-        unit_count = session.scalar(
-            select(func.count(IntakeCandidateUnit.recognition_unit_id)).where(
-                IntakeCandidateUnit.candidate_id == candidate.review_item_id
-            )
-        )
-    assert unit_count == 2
-
-
 def test_pending_candidates_can_be_explicitly_promoted_as_one_problem_set(
     intake: ProblemIntakeService, tmp_path: Path
 ) -> None:
