@@ -760,7 +760,11 @@ class ProblemIntakeService:
             raise DomainError("请先选择包含作答的图片")
         if any(not path.is_file() for path in image_paths):
             raise DomainError("作答图片不存在")
-        provider = get_provider(self.runtime.settings)
+        ai_settings = self.runtime.settings.ai
+        provider_name = ai_settings.default_provider
+        model = ai_settings.default_vision_model
+        timeout_seconds = ai_settings.request_timeout_seconds
+        provider = get_provider(self.runtime.settings, provider_name)
         provider.validate_configuration()
         prompt = (
             "这是用户补录作答的图片。只提取用户写下的作答内容，保留原有"
@@ -773,8 +777,8 @@ class ProblemIntakeService:
         result = provider.structure_from_images(
             image_paths=[str(path) for path in image_paths],
             prompt=prompt,
-            model=self.runtime.settings.ai.default_vision_model,
-            timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+            model=model,
+            timeout_seconds=timeout_seconds,
         )
         answer = str(result.fields.get("user_answer") or "").strip()
         if not answer:

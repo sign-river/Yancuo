@@ -528,6 +528,7 @@ class MathContentView(QWidget):
         self._document: QPdfDocument | None = None
         self._document_buffer: QBuffer | None = None
         self._renderer: QWebEnginePage | None = None
+        self._active_html: str | None = None
         self._render_generation = 0
         self._render_scheduled = False
         self._fit_content_height = False
@@ -675,7 +676,12 @@ class MathContentView(QWidget):
         self._schedule_render()
 
     def _schedule_render(self) -> None:
-        if not self.last_html or not self.isVisible() or self._render_scheduled:
+        if (
+            not self.last_html
+            or not self.isVisible()
+            or self._renderer is not None
+            or self._render_scheduled
+        ):
             return
         self._render_scheduled = True
         QTimer.singleShot(0, self._start_render)
@@ -687,8 +693,6 @@ class MathContentView(QWidget):
 
         self._render_generation += 1
         generation = self._render_generation
-        if self._renderer is not None:
-            self._renderer.deleteLater()
         if self._fit_content_height:
             self._content_height = None
             if self._document is None:
@@ -707,17 +711,26 @@ class MathContentView(QWidget):
             )
         )
         self._renderer = page
-        page.setHtml(self.last_html)
+        self._active_html = self.last_html
+        page.setHtml(self._active_html)
+
+    def _finish_render(self, page: QWebEnginePage, generation: int) -> None:
+        if page is not self._renderer or generation != self._render_generation:
+            return
+        rendered_html = self._active_html
+        self._renderer = None
+        self._active_html = None
+        page.deleteLater()
+        if self.last_html != rendered_html:
+            self._schedule_render()
 
     def _html_loaded(
         self, page: QWebEnginePage, generation: int, loaded: bool
     ) -> None:
         if page is not self._renderer or generation != self._render_generation:
-            page.deleteLater()
             return
         if not loaded:
-            self._renderer = None
-            page.deleteLater()
+            self._finish_render(page, generation)
             return
         if self._content_sized_pdf:
             page.runJavaScript(
@@ -770,11 +783,9 @@ class MathContentView(QWidget):
 
     def _pdf_ready(self, page: QWebEnginePage, generation: int, data) -> None:  # noqa: ANN001
         if page is not self._renderer or generation != self._render_generation:
-            page.deleteLater()
             return
-        self._renderer = None
-        page.deleteLater()
         if not data:
+            self._finish_render(page, generation)
             return
 
         buffer = QBuffer(self)
@@ -787,6 +798,7 @@ class MathContentView(QWidget):
         if load_result not in (None, QPdfDocument.Error.None_) or document.pageCount() < 1:
             document.deleteLater()
             buffer.deleteLater()
+            self._finish_render(page, generation)
             return
 
         previous_document = self._document
@@ -804,6 +816,7 @@ class MathContentView(QWidget):
             previous_document.deleteLater()
         if previous_buffer is not None:
             previous_buffer.deleteLater()
+        self._finish_render(page, generation)
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)

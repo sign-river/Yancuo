@@ -12,6 +12,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from sqlalchemy import func, select
 
+import yancuo_win.application.intake_service as intake_service_module
 from yancuo_win.ai.base import StructuredCandidate, StructuredResult
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.intake_service import (
@@ -1180,3 +1181,36 @@ def test_user_answer_image_recognition_extracts_only_answer(
     )
 
     assert answer == "（Mock）用户作答占位"
+
+
+def test_user_answer_recognition_uses_settings_snapshot(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "answer.jpg"
+    image.write_bytes(b"\xff\xd8\xffanswer-image")
+    intake.runtime.settings.ai.default_provider = "mock"
+    intake.runtime.settings.ai.default_vision_model = "model-before-switch"
+    captured: dict[str, object] = {}
+
+    class Provider:
+        def validate_configuration(self) -> None:
+            intake.runtime.settings.ai.default_provider = "openai_compatible"
+            intake.runtime.settings.ai.default_vision_model = "model-after-switch"
+
+        def structure_from_images(self, **kwargs):  # noqa: ANN003
+            captured.update(kwargs)
+            return StructuredResult(fields={"user_answer": "snapshot answer"})
+
+    def get_provider(_settings, name=None):  # noqa: ANN001
+        captured["provider_name"] = name
+        return Provider()
+
+    monkeypatch.setattr(intake_service_module, "get_provider", get_provider)
+
+    answer = intake.recognize_user_answer_image(image)
+
+    assert answer == "snapshot answer"
+    assert captured["provider_name"] == "mock"
+    assert captured["model"] == "model-before-switch"
