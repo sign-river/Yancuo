@@ -26,11 +26,16 @@ from yancuo_win.data.models import (
     utcnow,
 )
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.infrastructure.archive import ArchiveSecurityError, safe_relative_path
 from yancuo_win.import_export.markdown_problem import parse_problem_md, render_problem_md
 from yancuo_win.review.changeset import snapshot_problem_fields
 
 FORMAT_NAME = "yancuo-workspace"
 FORMAT_VERSION = 1
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_METADATA_BYTES = 4 * 1024 * 1024
+MAX_MARKDOWN_BYTES = 16 * 1024 * 1024
+MAX_WORKSPACE_PROBLEMS = 10_000
 
 INSTRUCTIONS = """# 研错库外部编辑工作区
 
@@ -49,6 +54,23 @@ class WorkspaceService:
 
     def session(self) -> Session:
         return self.runtime.session_factory()
+
+    @staticmethod
+    def _read_workspace_text(path: Path, label: str, max_bytes: int) -> str:
+        if path.is_symlink():
+            raise DomainError(f"{label} 不能是符号链接")
+        if not path.is_file():
+            raise DomainError(f"缺少 {label}")
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise DomainError(f"无法读取 {label}") from exc
+        if size > max_bytes:
+            raise DomainError(f"{label} 过大（上限 {max_bytes} 字节）")
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise DomainError(f"{label} 不是有效 UTF-8 文本") from exc
 
     def _audit(self, session: Session, action: str, entity_type: str, entity_id: str, detail: dict) -> None:
         session.add(
@@ -208,10 +230,12 @@ class WorkspaceService:
     def import_workspace(self, workspace_dir: Path) -> dict[str, Any]:
         workspace_dir = Path(workspace_dir)
         manifest_path = workspace_dir / "manifest.json"
-        if not manifest_path.is_file():
-            raise DomainError("缺少 manifest.json")
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                self._read_workspace_text(
+                    manifest_path, "manifest.json", MAX_MANIFEST_BYTES
+                )
+            )
         except json.JSONDecodeError as exc:
             raise DomainError(f"manifest.json 无效：{exc}") from exc
         if manifest.get("format") != FORMAT_NAME:
@@ -222,8 +246,13 @@ class WorkspaceService:
             )
 
         problems_root = workspace_dir / "problems"
-        if not problems_root.is_dir():
+        if problems_root.is_symlink() or not problems_root.is_dir():
             raise DomainError("缺少 problems/ 目录")
+        problem_dirs = sorted(p for p in problems_root.iterdir() if p.is_dir())
+        if len(problem_dirs) > MAX_WORKSPACE_PROBLEMS:
+            raise DomainError(
+                f"工作区题目目录过多（上限 {MAX_WORKSPACE_PROBLEMS}）"
+            )
 
         created_items: list[str] = []
         conflicts: list[str] = []
@@ -240,7 +269,7 @@ class WorkspaceService:
             s.add(session)
             s.flush()
 
-            for pdir in sorted(p for p in problems_root.iterdir() if p.is_dir()):
+            for pdir in problem_dirs:
                 try:
                     item_id, is_conflict = self._import_one_problem(s, session.id, pdir)
                     created_items.append(item_id)
@@ -278,12 +307,14 @@ class WorkspaceService:
     ) -> tuple[str, bool]:
         meta_path = pdir / "metadata.json"
         md_path = pdir / "problem.md"
-        if not meta_path.is_file():
-            raise DomainError("缺少 metadata.json")
-        if not md_path.is_file():
-            raise DomainError("缺少 problem.md")
+        if pdir.is_symlink():
+            raise DomainError("题目目录不能是符号链接")
         try:
-            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            metadata = json.loads(
+                self._read_workspace_text(
+                    meta_path, "metadata.json", MAX_METADATA_BYTES
+                )
+            )
         except json.JSONDecodeError as exc:
             raise DomainError(f"metadata.json 无效：{exc}") from exc
         if not isinstance(metadata, dict) or "id" not in metadata or "revision" not in metadata:
@@ -293,14 +324,22 @@ class WorkspaceService:
         base_revision = int(metadata["revision"])
         # 校验资源引用存在（不写回原图）
         assets_dir = pdir / "assets"
+        if assets_dir.is_symlink():
+            raise DomainError("assets 目录不能是符号链接")
         for af in metadata.get("asset_files") or []:
             filename = af.get("filename")
             if not filename:
                 raise DomainError("asset_files 缺少 filename")
-            if not (assets_dir / str(filename)).is_file():
+            try:
+                asset_path = safe_relative_path(assets_dir, str(filename))
+            except ArchiveSecurityError as exc:
+                raise DomainError(f"资源文件路径非法：{filename}") from exc
+            if asset_path.is_symlink() or not asset_path.is_file():
                 raise DomainError(f"资源文件缺失：{filename}")
 
-        fm, sections = parse_problem_md(md_path.read_text(encoding="utf-8"))
+        fm, sections = parse_problem_md(
+            self._read_workspace_text(md_path, "problem.md", MAX_MARKDOWN_BYTES)
+        )
         if fm.get("id") and str(fm["id"]) != problem_id:
             raise DomainError("problem.md 与 metadata.json 的 id 不一致")
 

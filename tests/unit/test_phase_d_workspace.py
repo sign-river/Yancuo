@@ -183,6 +183,23 @@ def test_missing_asset_fails(bundle, tmp_path: Path) -> None:
         workspace.import_workspace(root)
 
 
+def test_workspace_asset_reference_cannot_escape_the_problem_directory(
+    bundle, tmp_path: Path
+) -> None:
+    services, _ai, workspace = bundle
+    image = tmp_path / "source.jpg"
+    image.write_bytes(b"\xff\xd8\xffworkspace-traversal")
+    problem_id = services.import_images([image])["created"][0]
+    root = workspace.export_workspace([problem_id], dest_dir=tmp_path / "safe-ws")
+    metadata_path = root / "problems" / problem_id / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["asset_files"][0]["filename"] = "../../../../source.jpg"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(DomainError, match="资源文件路径非法"):
+        workspace.import_workspace(root)
+
+
 def test_invalid_manifest(bundle, tmp_path: Path) -> None:
     _services, _ai, workspace = bundle
     bad = tmp_path / "badws"
