@@ -149,14 +149,20 @@ def test_settings_page_consolidates_account_services_and_data(window: MainWindow
     assert window.settings_pages.currentIndex() == 1
 
 
-def test_data_transfer_actions_are_grouped_in_accessible_menus(
+def test_data_transfer_actions_are_grouped_in_accessible_dropdowns(
     window: MainWindow,
 ) -> None:
+    settings = window.main_nav.findItems("设置", Qt.MatchFlag.MatchExactly)
+    window.main_nav.setCurrentItem(settings[0])
+    window.settings_nav.setCurrentRow(3)
+
     backup_actions = [
-        action.text() for action in window.backup_menu_button.menu().actions()
+        window.backup_action_combo.itemText(index)
+        for index in range(window.backup_action_combo.count())
     ]
     transfer_actions = [
-        action.text() for action in window.transfer_menu_button.menu().actions()
+        window.transfer_action_combo.itemText(index)
+        for index in range(window.transfer_action_combo.count())
     ]
 
     assert backup_actions == [
@@ -173,8 +179,8 @@ def test_data_transfer_actions_are_grouped_in_accessible_menus(
         "导入分享包",
         "导入工作区",
     ]
-    assert window.backup_menu_button.accessibleName() == "备份与恢复操作"
-    assert window.transfer_menu_button.accessibleName() == "导入与导出操作"
+    assert window.backup_action_combo.accessibleName() == "备份与恢复操作"
+    assert window.transfer_action_combo.accessibleName() == "导入与导出操作"
 
 
 def test_primary_navigation_and_large_views_are_keyboard_accessible(

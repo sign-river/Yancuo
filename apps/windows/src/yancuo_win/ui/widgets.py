@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 
 from PySide6.QtCore import (
@@ -18,6 +18,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -149,6 +150,34 @@ def default_button(text: str, parent: QWidget | None = None) -> QPushButton:
     """Standard secondary action with the global button treatment."""
 
     return QPushButton(text, parent)
+
+
+def action_combo_box(
+    placeholder: str,
+    actions: Sequence[tuple[str, Callable[[], None]] | None],
+    parent: QWidget | None = None,
+) -> QComboBox:
+    """Create an action picker using the standard form-control dropdown style."""
+
+    combo = QComboBox(parent)
+    combo.setPlaceholderText(placeholder)
+    combo.setCurrentIndex(-1)
+    for action in actions:
+        if action is None:
+            combo.insertSeparator(combo.count())
+            continue
+        label, callback = action
+        combo.addItem(label, callback)
+
+    def trigger(index: int) -> None:
+        callback = combo.itemData(index)
+        if not callable(callback):
+            return
+        combo.setCurrentIndex(-1)
+        callback()
+
+    combo.activated.connect(trigger)
+    return combo
 
 
 class SoftItemDelegate(QStyledItemDelegate):
@@ -980,7 +1009,7 @@ class CardFrame(QFrame):
         return label
 
 
-def button_row(*buttons: QPushButton) -> QHBoxLayout:
+def button_row(*buttons: QWidget) -> QHBoxLayout:
     row = QHBoxLayout()
     row.setSpacing(8)
     for btn in buttons:
