@@ -73,6 +73,48 @@ def test_migrate_v4_to_v5_adds_review_region(tmp_path: Path) -> None:
     assert "region_json" in columns
 
 
+def test_migrate_v21_to_v22_adds_persistent_ai_job_events(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path / "ai-events-upgrade.db")
+    assert migrate(engine, target_version=21) == 21
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE ai_job_events"))
+        for column in (
+            "domain",
+            "context_id",
+            "config_json",
+            "response_text",
+            "result_json",
+            "attempt_count",
+            "started_at",
+            "heartbeat_at",
+        ):
+            connection.execute(text(f"ALTER TABLE ai_jobs DROP COLUMN {column}"))
+
+    assert migrate(engine, target_version=22) == 22
+    with engine.connect() as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            )
+        }
+        columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(ai_jobs)"))
+        }
+    assert "ai_job_events" in tables
+    assert {
+        "domain",
+        "context_id",
+        "config_json",
+        "response_text",
+        "result_json",
+        "attempt_count",
+        "started_at",
+        "heartbeat_at",
+    } <= columns
+
+
 def test_migrate_v5_to_v6_adds_dedicated_intake_tables(tmp_path: Path) -> None:
     engine = make_engine(tmp_path / "intake-upgrade.db")
     assert migrate(engine, target_version=5) == 5

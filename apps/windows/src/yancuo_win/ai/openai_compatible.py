@@ -11,6 +11,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -186,6 +187,96 @@ class OpenAICompatibleProvider(AIProvider):
             diagnostics["server_timing"] = dict(self._last_server_timing)
         return diagnostics
 
+    def _request_stream_json(
+        self,
+        endpoint: str,
+        *,
+        timeout_seconds: int,
+        payload: dict[str, Any],
+        on_text_delta: Callable[[str], None],
+        retry_attempts: int | None = None,
+    ) -> dict[str, Any]:
+        """Read an OpenAI-compatible SSE response and rebuild its final body."""
+
+        key = self._api_key()
+        stream_payload = dict(payload)
+        stream_payload["stream"] = True
+        data = json.dumps(stream_payload).encode("utf-8")
+        max_attempts = max(1, min(retry_attempts or _MAX_REQUEST_ATTEMPTS, _MAX_REQUEST_ATTEMPTS))
+        self._last_request_attempts = 0
+        self._last_server_timing = {}
+        emitted = False
+        for attempt in range(1, max_attempts + 1):
+            self._last_request_attempts = attempt
+            request = urllib.request.Request(
+                f"{self.base_url}{endpoint}",
+                data=data,
+                headers={
+                    "Accept": "text/event-stream",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {key}",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                    headers = getattr(response, "headers", None)
+                    content_type = str(headers.get("Content-Type") if headers else "")
+                    if "text/event-stream" not in content_type.lower():
+                        body = json.loads(response.read().decode("utf-8"))
+                        content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+                        if isinstance(content, str) and content:
+                            on_text_delta(content)
+                        return body
+
+                    parts: list[str] = []
+                    model_name = str(payload.get("model") or "")
+                    usage: dict[str, Any] = {}
+                    for raw_line in response:
+                        line = raw_line.decode("utf-8").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        event_data = line[5:].strip()
+                        if event_data == "[DONE]":
+                            break
+                        if not event_data:
+                            continue
+                        event = json.loads(event_data)
+                        if isinstance(event.get("model"), str):
+                            model_name = event["model"]
+                        if isinstance(event.get("usage"), dict):
+                            usage = event["usage"]
+                        choices = event.get("choices")
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+                        content = delta.get("content") if isinstance(delta, dict) else None
+                        if isinstance(content, str) and content:
+                            emitted = True
+                            parts.append(content)
+                            on_text_delta(content)
+                    if not parts:
+                        raise DomainError("AI 流式响应未返回可用内容")
+                    return {
+                        "model": model_name,
+                        "usage": usage,
+                        "choices": [{"message": {"content": "".join(parts)}}],
+                    }
+            except urllib.error.HTTPError as exc:
+                if exc.code in _RETRYABLE_HTTP_CODES and attempt < max_attempts and not emitted:
+                    time.sleep(0.6 * attempt)
+                    continue
+                detail = exc.read().decode("utf-8", errors="replace").replace(key, "***")
+                raise DomainError(f"AI 流式请求失败 HTTP {exc.code}：{detail[:240]}") from exc
+            except _TRANSIENT_NETWORK_ERRORS as exc:
+                if attempt < max_attempts and not emitted:
+                    time.sleep(0.6 * attempt)
+                    continue
+                raise DomainError("AI 流式连接中断，已接收内容会保留，可重新尝试任务") from exc
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise DomainError("AI 流式响应格式无效") from exc
+        raise DomainError("AI 流式请求未完成")
+
     def structure_from_image(
         self,
         *,
@@ -251,6 +342,73 @@ class OpenAICompatibleProvider(AIProvider):
         )
         request_ms = (time.perf_counter() - request_started) * 1000
 
+        return self._parse_structured_response(
+            body,
+            requested_model=model,
+            image_encode_ms=image_encode_ms,
+            request_ms=request_ms,
+        )
+
+    def stream_structure_from_images(
+        self,
+        *,
+        image_paths: list[str],
+        prompt: str,
+        model: str,
+        timeout_seconds: int,
+        on_text_delta: Callable[[str], None],
+        retry_attempts: int | None = None,
+    ) -> StructuredResult:
+        encode_started = time.perf_counter()
+        if not image_paths:
+            raise DomainError("未选择图片")
+        image_content: list[dict[str, Any]] = []
+        for image_path in image_paths:
+            path = Path(image_path)
+            if not path.is_file():
+                raise DomainError(f"图片不存在：{path}")
+            mime = {".png": "image/png", ".webp": "image/webp"}.get(
+                path.suffix.lower(), "image/jpeg"
+            )
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            image_content.append(
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+            )
+        image_encode_ms = (time.perf_counter() - encode_started) * 1000
+        payload = {
+            "model": model or "gpt-4o-mini",
+            "temperature": 0,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}, *image_content],
+                }
+            ],
+        }
+        request_started = time.perf_counter()
+        body = self._request_stream_json(
+            "/chat/completions",
+            timeout_seconds=timeout_seconds,
+            payload=payload,
+            on_text_delta=on_text_delta,
+            retry_attempts=retry_attempts,
+        )
+        request_ms = (time.perf_counter() - request_started) * 1000
+        return self._parse_structured_response(
+            body,
+            requested_model=model,
+            image_encode_ms=image_encode_ms,
+            request_ms=request_ms,
+        )
+
+    def _parse_structured_response(
+        self,
+        body: dict[str, Any],
+        *,
+        requested_model: str,
+        image_encode_ms: float,
+        request_ms: float,
+    ) -> StructuredResult:
         parse_started = time.perf_counter()
         raw_text = ""
         try:
@@ -302,7 +460,7 @@ class OpenAICompatibleProvider(AIProvider):
             candidates=candidates,
             raw_text=raw_text,
             cost_estimate=cost,
-            model=str(body.get("model") or model),
+            model=str(body.get("model") or requested_model),
             timings_ms={
                 "image_encode": image_encode_ms,
                 "request": request_ms,

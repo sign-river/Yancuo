@@ -31,6 +31,21 @@ class _Response:
         return json.dumps(self.payload).encode("utf-8")
 
 
+class _StreamResponse:
+    def __init__(self, lines: list[bytes]) -> None:
+        self.lines = lines
+        self.headers = {"Content-Type": "text/event-stream; charset=utf-8"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def __iter__(self):
+        return iter(self.lines)
+
+
 def test_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("YANCUO_AI_API_KEY", "sk-from-env")
     monkeypatch.setattr(
@@ -170,6 +185,59 @@ def test_structure_from_image_sends_multimodal_chat_completion(
         "server-timing": "model;dur=42",
         "openai-processing-ms": "42",
     }
+
+
+def test_stream_structure_from_images_emits_ordered_sse_deltas(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    image = tmp_path / "stream.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nstream-image")
+    raw_text = json.dumps(
+        {"title": "流式结果", "question_markdown": "题干"}, ensure_ascii=False
+    )
+    parts = [raw_text[:12], raw_text[12:]]
+    captured = {}
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        lines = [
+            (
+                "data: "
+                + json.dumps(
+                    {
+                        "model": "vision-stream",
+                        "choices": [{"delta": {"content": part}}],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            ).encode("utf-8")
+            for part in parts
+        ]
+        lines.append(b"data: [DONE]\n\n")
+        return _StreamResponse(lines)
+
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1", api_key_env="FARO_API_KEY"
+    )
+    deltas: list[str] = []
+    result = provider.stream_structure_from_images(
+        image_paths=[str(image)],
+        prompt="提取题目",
+        model="vision-stream",
+        timeout_seconds=20,
+        on_text_delta=deltas.append,
+    )
+
+    assert deltas == parts
+    assert result.fields["title"] == "流式结果"
+    assert captured["payload"]["stream"] is True
+    assert captured["timeout"] == 20
 
 
 def test_structure_from_image_accepts_multi_problem_envelope(

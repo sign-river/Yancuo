@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from time import perf_counter
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from yancuo_win.ai.base import normalize_region
+from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.note_ai_service import (
     NoteAiService,
     NoteBlockDraft,
@@ -45,7 +47,7 @@ from yancuo_win.application.note_ai_search_service import NoteAiSearchService
 from yancuo_win.application.unified_search_service import UnifiedSearchIndexService
 from yancuo_win.data.models import NoteBlock, NoteDocument, NoteIntakeSession
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.tasks.note_worker import NoteExtractionWorker
+from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.tasks.note_search_worker import NoteAiSearchWorker
 from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.icons import bind_icon
@@ -667,7 +669,12 @@ class NotePage(QWidget):
     notes_changed = Signal()
     add_to_review_requested = Signal(str)
 
-    def __init__(self, notes: NoteService, parent=None) -> None:
+    def __init__(
+        self,
+        notes: NoteService,
+        coordinator: AIJobCoordinator | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.notes = notes
         self._notes: list[NoteDocument] = []
@@ -681,11 +688,17 @@ class NotePage(QWidget):
         self._collection_note_ids: dict[str, set[str]] = {}
         self.note_ai = NoteAiService(notes.runtime)
         self.note_intake = NoteIntakeService(notes.runtime)
+        self.ai_coordinator = coordinator or AIJobCoordinator(
+            AIService(notes.runtime), self
+        )
+        self.note_job_id: str | None = None
+        self.ai_coordinator.register_handler("note_intake", self._run_note_job)
+        self.ai_coordinator.job_finished.connect(self._on_note_job_finished)
+        self.ai_coordinator.job_failed.connect(self._on_note_job_failed)
         self.note_search = UnifiedSearchIndexService(notes.runtime)
         self.note_ai_search = NoteAiSearchService(notes.runtime)
         self.note_search_worker: NoteAiSearchWorker | None = None
         self._note_ai_search_ids: set[str] | None = None
-        self.note_worker: NoteExtractionWorker | None = None
         self._library_state: dict[str, object] | None = None
         self._build()
         self.reload()
@@ -1030,8 +1043,6 @@ class NotePage(QWidget):
         return page
 
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802
-        if self.note_worker and self.note_worker.isRunning():
-            self.note_worker.wait(3000)
         super().closeEvent(event)
 
     def _build_detail(self) -> QWidget:
@@ -1721,9 +1732,6 @@ class NotePage(QWidget):
         self.status_message.emit("笔记合集已更新")
 
     def _start_ai_extraction(self) -> None:
-        if self.note_worker and self.note_worker.isRunning():
-            self.status_message.emit("AI 笔记录入正在处理中，请稍候")
-            return
         image_path = Path(self.ai_source_path.text())
         if not image_path.is_file():
             self.ai_intake_status.setText("请选择一张可读取的笔记图片。")
@@ -1747,21 +1755,91 @@ class NotePage(QWidget):
         except DomainError as exc:
             self.status_message.emit(str(exc))
             return
-        self.ai_start_button.setEnabled(False)
-        self.ai_intake_status.setText("正在整理笔记图片，请留在此页面等待结果。")
-        self.status_message.emit("正在整理笔记图片…")
-        self.note_worker = NoteExtractionWorker(
-            self.note_ai,
-            intake.id,
-            image_path,
-            intake.user_instruction,
-            intake.classification_mode,
-            self,
+        job = self.ai_coordinator.ai.create_background_job(
+            domain="note_intake",
+            context_id=intake.id,
+            job_type="note_extract",
+            config={"classification_mode": intake.classification_mode},
         )
-        self.note_worker.finished_ok.connect(self._on_ai_extraction_ready)
-        self.note_worker.failed.connect(self._on_ai_extraction_failed)
-        self.note_worker.finished.connect(self._on_ai_worker_finished)
-        self.note_worker.start()
+        self.note_job_id = job.id
+        self.ai_coordinator.enqueue(job.id)
+        self.ai_intake_status.setText(
+            "笔记已提交到后台队列，可以继续录入其他内容。"
+        )
+        self.ai_source_path.clear()
+        self.status_message.emit("AI 笔记录入任务已提交")
+
+    def _run_note_job(self, job_id: str, emit_progress, should_cancel) -> dict[str, str]:
+        job = self.ai_coordinator.ai.get_job(job_id)
+        if job is None:
+            raise DomainError("笔记录入任务不存在")
+        intake = self.note_intake.get_session(job.context_id)
+        if intake is None or not intake.assets:
+            raise DomainError("笔记录入草稿或来源图片不存在")
+        self.note_intake.mark_processing(intake.id)
+        image_path = self.note_intake.resolve_source_path(intake.assets[0])
+        chunks: list[str] = []
+        last_flush = [perf_counter()]
+
+        def flush(*, force: bool = False) -> None:
+            length = sum(len(value) for value in chunks)
+            if not chunks or (
+                not force and length < 128 and perf_counter() - last_flush[0] < 0.35
+            ):
+                return
+            text = "".join(chunks)
+            chunks.clear()
+            last_flush[0] = perf_counter()
+            self.ai_coordinator.ai.append_job_event(
+                job_id,
+                "text_delta",
+                text_value=text,
+                append_response=True,
+            )
+
+        def receive(delta: str) -> None:
+            if should_cancel() or not delta:
+                return
+            chunks.append(delta)
+            emit_progress(
+                {"stage": "streaming", "label": "正在接收 AI 回复", "text_delta": delta}
+            )
+            flush()
+
+        try:
+            draft = self.note_ai.extract_from_image(
+                image_path,
+                instruction=intake.user_instruction,
+                classification_mode=intake.classification_mode,
+                on_text_delta=receive,
+                provider_name=job.provider,
+                model=job.model,
+            )
+            flush(force=True)
+            if should_cancel():
+                raise DomainError("笔记录入任务已取消")
+            self.note_intake.save_grouped_draft(intake.id, draft)
+            return {"session_id": intake.id}
+        except Exception as exc:
+            flush(force=True)
+            self.note_intake.mark_failed(intake.id, str(exc))
+            raise
+
+    def _on_note_job_finished(self, job_id: str) -> None:
+        job = self.ai_coordinator.ai.get_job(job_id)
+        if job is None or job.domain != "note_intake":
+            return
+        if job_id == self.note_job_id:
+            self.ai_intake_status.setText("AI 笔记已生成，可从待审核队列继续。")
+        self.status_message.emit("一个 AI 笔记草稿已进入待审核队列")
+
+    def _on_note_job_failed(self, job_id: str, message: str) -> None:
+        job = self.ai_coordinator.ai.get_job(job_id)
+        if job is None or job.domain != "note_intake":
+            return
+        if job_id == self.note_job_id:
+            self.ai_intake_status.setText(f"识别失败：{message}")
+        self.status_message.emit(f"AI 笔记录入失败：{message}")
 
     def _on_ai_extraction_ready(self, payload: object) -> None:
         session_id, draft = payload
@@ -1786,13 +1864,9 @@ class NotePage(QWidget):
         self.status_message.emit(f"AI 笔记录入失败：{message}")
 
     def _on_ai_worker_finished(self) -> None:
-        self.note_worker = None
         self.ai_start_button.setEnabled(True)
 
     def _resume_note_draft(self) -> None:
-        if self.note_worker and self.note_worker.isRunning():
-            self.status_message.emit("AI 笔记录入正在处理中，请稍候")
-            return
         if self.page_stack.currentWidget() is not self.ai_intake_page:
             self._show_ai_intake()
         intake = self.note_intake.latest_resumable_session()

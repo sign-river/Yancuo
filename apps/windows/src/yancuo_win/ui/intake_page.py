@@ -13,7 +13,7 @@ from time import perf_counter
 from typing import Any
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
@@ -47,8 +47,8 @@ from yancuo_win.application.intake_service import (
     RegionRecognitionProposal,
 )
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.tasks.worker import (
-    AIJobWorker,
     RegionRecognitionWorker,
     UserAnswerRecognitionWorker,
 )
@@ -929,13 +929,18 @@ class IntakePage(QWidget):
     open_problem_requested = Signal(str)
     ai_review_ready = Signal(str, int)
 
-    def __init__(self, intake: ProblemIntakeService, parent=None) -> None:
+    def __init__(
+        self,
+        intake: ProblemIntakeService,
+        coordinator: AIJobCoordinator | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.intake = intake
+        self.coordinator = coordinator or AIJobCoordinator(intake.ai, self)
         self.manual_images: list[Path] = []
         self.ai_files: list[Path] = []
         self.ai_job_id: str | None = None
-        self.ai_worker: AIJobWorker | None = None
         self._cancelled_ai_jobs: set[str] = set()
         self.region_worker: RegionRecognitionWorker | None = None
         self.answer_recognition_worker: UserAnswerRecognitionWorker | None = None
@@ -977,6 +982,9 @@ class IntakePage(QWidget):
         self.progress_timer.timeout.connect(self._poll_progress)
         self._restore_manual_draft()
         self._restore_existing_session()
+        self.coordinator.job_progress.connect(self._on_coordinator_progress)
+        self.coordinator.job_finished.connect(self._on_ai_done)
+        self.coordinator.job_failed.connect(self._on_ai_failed)
 
     @staticmethod
     def _scroll(widget: QWidget) -> QScrollArea:
@@ -1010,7 +1018,7 @@ class IntakePage(QWidget):
 
     @staticmethod
     def _ai_step_bar(current_step: int) -> WorkflowStepBar:
-        return WorkflowStepBar(("上传图片", "后台处理", "确认结果"), current_step)
+        return WorkflowStepBar(("上传与识别", "审核并入库"), current_step)
 
     def _build_manual(self) -> QWidget:
         page, layout = self._page()
@@ -1069,6 +1077,18 @@ class IntakePage(QWidget):
         )
         self.ai_upload_steps = self._ai_step_bar(0)
         layout.addWidget(self.ai_upload_steps)
+        self.ai_task_surface = QFrame()
+        self.ai_task_surface.setObjectName("IntakeStatusSurface")
+        task_row = QHBoxLayout(self.ai_task_surface)
+        task_row.setContentsMargins(14, 10, 14, 10)
+        self.ai_task_status = QLabel("AI 任务正在排队")
+        self.ai_task_status.setWordWrap(True)
+        self.ai_task_button = primary_button("查看实时回复")
+        self.ai_task_button.clicked.connect(self._open_current_ai_task)
+        task_row.addWidget(self.ai_task_status, stretch=1)
+        task_row.addWidget(self.ai_task_button)
+        self.ai_task_surface.hide()
+        layout.addWidget(self.ai_task_surface)
         upload = CardFrame()
         upload.setObjectName("IntakePrimarySurface")
         upload.add_title("1. 添加图片")
@@ -1199,24 +1219,23 @@ class IntakePage(QWidget):
         page, layout = self._page()
         layout.addWidget(
             self._header(
-                "AI 录题 · 后台处理中",
-                "可以返回工作台，任务仍会继续；再次进入录题即可查看当前进度。",
-                self.dashboard_requested.emit,
+                "AI 实时回复",
+                "这里展示模型公开输出和处理阶段；返回上传页不会中断任务。",
+                self.show_ai_upload,
+                back_tooltip="返回上传页",
             )
         )
-        self.ai_processing_steps_bar = self._ai_step_bar(1)
+        self.ai_processing_steps_bar = self._ai_step_bar(0)
         layout.addWidget(self.ai_processing_steps_bar)
         card = CardFrame()
         card.setObjectName("IntakeStatusSurface")
-        card.add_title("正在整理图片")
+        card.add_title("模型回复")
         self.processing_status = card.add_hint("正在准备任务…")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         card.body.addWidget(self.progress_bar)
-        self.processing_steps = QLabel(
-            "将先识别题干、公式和答案，再在后台补全解析与分类。"
-        )
+        self.processing_steps = QLabel("图片提交后，模型回复会在下方持续显示。")
         self.processing_steps.setWordWrap(True)
         card.body.addWidget(self.processing_steps)
         self.processing_preview = QTextEdit()
@@ -1224,7 +1243,7 @@ class IntakePage(QWidget):
         self.processing_preview.setReadOnly(True)
         self.processing_preview.setMinimumHeight(132)
         self.processing_preview.setMaximumHeight(220)
-        self.processing_preview.hide()
+        self.processing_preview.setPlaceholderText("等待 AI 返回第一个内容…")
         card.body.addWidget(self.processing_preview)
         self.processing_error = QLabel("")
         self.processing_error.setWordWrap(True)
@@ -1238,7 +1257,8 @@ class IntakePage(QWidget):
         self.processing_retry.setVisible(False)
         self.processing_back = QPushButton("返回修改上传内容")
         self.processing_back.clicked.connect(self.show_ai_upload)
-        self.processing_back.setVisible(False)
+        self.processing_back.setText("返回上传页")
+        self.processing_back.setVisible(True)
         actions.addWidget(self.processing_cancel_button)
         actions.addWidget(self.processing_retry)
         actions.addWidget(self.processing_back)
@@ -1257,7 +1277,7 @@ class IntakePage(QWidget):
                 self.dashboard_requested.emit,
             )
         )
-        self.ai_confirmation_steps = self._ai_step_bar(2)
+        self.ai_confirmation_steps = self._ai_step_bar(1)
         layout.addWidget(self.ai_confirmation_steps)
         self.ai_result_tabs = QTabWidget()
         self.ai_result_tabs.setObjectName("AIResultTabs")
@@ -1683,18 +1703,21 @@ class IntakePage(QWidget):
             except DomainError:
                 self.ai_job_id = None
                 self.ai_candidates = []
+        self.show_ai_upload()
         if self.ai_candidates:
-            self._load_candidate()
-            self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
+            self.ai_task_surface.show()
+            self.ai_task_status.setText(
+                f"AI 已完成，生成 {len(self.ai_candidates)} 道待审核题目"
+            )
+            self.ai_task_button.setText("审核结果")
         elif self.ai_job_id:
-            self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
-            if not (self.ai_worker and self.ai_worker.isRunning()):
+            self.ai_task_surface.show()
+            self.ai_task_button.setText("查看实时回复")
+            if self.coordinator.active_job_id != self.ai_job_id:
                 self._start_worker(self.ai_job_id)
             else:
                 self.progress_timer.start()
                 self._poll_progress()
-        else:
-            self.show_ai_upload()
 
     def show_ai_review(self, job_id: str) -> bool:
         """Open exactly the review batch named by a completion notification."""
@@ -1729,8 +1752,8 @@ class IntakePage(QWidget):
             != QMessageBox.StandardButton.Yes
         ):
             return
-        if job_id == self.ai_job_id and self.ai_worker and self.ai_worker.isRunning():
-            self.ai_worker.cancel()
+        if job_id == self.ai_job_id:
+            self.coordinator.cancel(job_id)
         try:
             self.intake.abandon_ai_batch(job_id)
         except DomainError as exc:
@@ -1746,16 +1769,6 @@ class IntakePage(QWidget):
     def _restore_existing_session(self) -> None:
         job_id = self.intake.latest_resumable_ai_job()
         if not job_id:
-            return
-        try:
-            progress = self.intake.progress(job_id)
-            if progress.status == "running":
-                self.intake.abandon_ai_batch(job_id)
-                self.status_message.emit(
-                    "已取消上次意外中断的 AI 录题任务，请重新开始识别"
-                )
-                return
-        except DomainError:
             return
         self.ai_job_id = job_id
         try:
@@ -1972,12 +1985,8 @@ class IntakePage(QWidget):
         self.ai_instruction.setPlainText(f"{current}\n{text}".strip())
 
     def _start_ai(self) -> None:
-        if (
-            self.ai_worker
-            and self.ai_worker.isRunning()
-            and self.ai_worker.job_id == self.ai_job_id
-        ):
-            self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
+        if self.ai_job_id and self.ai_job_id == self.coordinator.active_job_id:
+            self._open_current_ai_task()
             return
         try:
             started = self.intake.start_ai(
@@ -1995,23 +2004,39 @@ class IntakePage(QWidget):
         self._ai_live_stage_label = ""
         self._ai_live_stage_history.clear()
         self.processing_preview.clear()
-        self.processing_preview.hide()
+        self.processing_preview.show()
         self.processing_error.clear()
         self.processing_retry.setVisible(False)
-        self.processing_back.setVisible(False)
+        self.processing_back.setVisible(True)
         self.processing_cancel_button.setEnabled(True)
-        self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
+        self.ai_task_surface.show()
+        self.ai_task_status.setText("AI 任务已提交，正在后台排队")
+        self.ai_task_button.setText("查看实时回复")
         self._start_worker(started.job_id)
-        self.status_message.emit("AI 录题任务已在后台开始")
+        self.ai_files.clear()
+        self.ai_file_list.clear()
+        self.ai_instruction.clear()
+        self.status_message.emit("AI 录题任务已提交，可以继续上传下一批图片")
 
-    def _start_worker(self, job_id: str) -> None:
-        self.ai_worker = AIJobWorker(self.intake.ai, job_id, self)
-        self.ai_worker.finished_ok.connect(self._on_ai_done)
-        self.ai_worker.failed.connect(self._on_ai_failed)
-        self.ai_worker.progress.connect(self._on_ai_progress)
-        self.ai_worker.start()
+    def _open_current_ai_task(self) -> None:
+        if not self.ai_job_id:
+            return
+        if self.show_ai_review(self.ai_job_id):
+            return
+        job = self.intake.ai.get_job(self.ai_job_id)
+        self.processing_preview.setPlainText(job.response_text if job else "")
+        self.stack.setCurrentIndex(_PAGE_AI_PROCESSING)
         self.progress_timer.start()
         self._poll_progress()
+
+    def _start_worker(self, job_id: str) -> None:
+        self.coordinator.enqueue(job_id)
+        self.progress_timer.start()
+        self._poll_progress()
+
+    def _on_coordinator_progress(self, job_id: str, event: object) -> None:
+        if job_id == self.ai_job_id:
+            self._on_ai_progress(event)
 
     def _poll_progress(self) -> None:
         if not self.ai_job_id:
@@ -2028,6 +2053,10 @@ class IntakePage(QWidget):
         self.processing_status.setText(
             f"{stage_label} · "
             f"完成 {progress.done} / {progress.total} · 失败 {progress.failed}"
+        )
+        self.ai_task_surface.show()
+        self.ai_task_status.setText(
+            f"{stage_label} · 完成 {progress.done}/{progress.total} · 失败 {progress.failed}"
         )
         timing_labels = (
             ("queue_wait", "任务排队"),
@@ -2104,6 +2133,15 @@ class IntakePage(QWidget):
                 self._ai_live_stage_history = self._ai_live_stage_history[-4:]
             self.processing_status.setText(label)
             self.processing_steps.setText(" · ".join(self._ai_live_stage_history))
+            self.ai_task_surface.show()
+            self.ai_task_status.setText(label)
+        text_delta = event.get("text_delta")
+        if isinstance(text_delta, str) and text_delta:
+            cursor = self.processing_preview.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(text_delta)
+            self.processing_preview.setTextCursor(cursor)
+            self.processing_preview.ensureCursorVisible()
         preview = event.get("preview")
         if not isinstance(preview, dict):
             return
@@ -2117,8 +2155,8 @@ class IntakePage(QWidget):
             lines.extend(["", "题干：", question])
         if answer:
             lines.extend(["", "答案：", answer])
-        self.processing_preview.setPlainText("\n".join(lines))
-        self.processing_preview.show()
+        if not self.processing_preview.toPlainText().strip():
+            self.processing_preview.setPlainText("\n".join(lines))
 
     def _cancel_ai(self) -> None:
         job_id = self.ai_job_id
@@ -2126,8 +2164,7 @@ class IntakePage(QWidget):
             return
         self.processing_cancel_button.setEnabled(False)
         self._cancelled_ai_jobs.add(job_id)
-        if self.ai_worker and self.ai_worker.isRunning():
-            self.ai_worker.cancel()
+        self.coordinator.cancel(job_id)
         try:
             self.intake.abandon_ai_batch(job_id)
         except DomainError as exc:
@@ -2148,7 +2185,7 @@ class IntakePage(QWidget):
     def _retry_failed_ai(self) -> None:
         if not self.ai_job_id:
             return
-        if self.ai_worker and self.ai_worker.isRunning():
+        if self.coordinator.active_job_id == self.ai_job_id:
             return
         self.processing_error.clear()
         self.processing_retry.setVisible(False)
@@ -2163,17 +2200,7 @@ class IntakePage(QWidget):
         if job_id != self.ai_job_id:
             return
         self.progress_timer.stop()
-        received_at = perf_counter()
-        service_finished_at = (
-            self.ai_worker.service_finished_at
-            if self.ai_worker is not None
-            else None
-        )
-        ui_wait_ms = (
-            max(0.0, (received_at - service_finished_at) * 1000)
-            if service_finished_at is not None
-            else 0.0
-        )
+        ui_wait_ms = 0.0
         try:
             classification_started = perf_counter()
             self.ai_candidates = [
@@ -2204,7 +2231,12 @@ class IntakePage(QWidget):
         self.candidate_index = 0
         self.processing_retry.setVisible(False)
         self._load_candidate()
-        self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
+        self.ai_task_status.setText(
+            f"AI 已完成，生成 {len(self.ai_candidates)} 道待审核题目"
+        )
+        self.ai_task_button.setText("审核结果")
+        if self.stack.currentIndex() == _PAGE_AI_PROCESSING:
+            self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
         self.status_message.emit(
             f"AI 已完成，生成 {len(self.ai_candidates)} 道待确认题目"
         )
@@ -2647,9 +2679,6 @@ class IntakePage(QWidget):
         self.manual_draft_timer.stop()
         self._save_manual_draft()
         self.progress_timer.stop()
-        if self.ai_worker and self.ai_worker.isRunning():
-            self.ai_worker.cancel()
-            self.ai_worker.wait(300)
         if self.region_worker and self.region_worker.isRunning():
             self.region_worker.wait(300)
         if (

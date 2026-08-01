@@ -442,6 +442,41 @@ def _migrate_to_v21(engine: Engine) -> None:
     logger.info("migrated database to schema_version=21")
 
 
+def _migrate_to_v22(engine: Engine) -> None:
+    """Persist resumable AI task ownership, configuration, and streamed events."""
+
+    Base.metadata.create_all(engine)
+    additions = {
+        "domain": "VARCHAR(32) NOT NULL DEFAULT 'generic'",
+        "context_id": "VARCHAR(64) NOT NULL DEFAULT ''",
+        "config_json": "TEXT NOT NULL DEFAULT '{}'",
+        "response_text": "TEXT NOT NULL DEFAULT ''",
+        "result_json": "TEXT NOT NULL DEFAULT '{}'",
+        "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+        "started_at": "DATETIME",
+        "heartbeat_at": "DATETIME",
+    }
+    with engine.begin() as conn:
+        columns = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(ai_jobs)"))
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                conn.execute(
+                    text(f"ALTER TABLE ai_jobs ADD COLUMN {name} {declaration}")
+                )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_ai_jobs_domain_status "
+                "ON ai_jobs(domain, status)"
+            )
+        )
+    with Session(engine) as session:
+        set_schema_version(session, 22)
+        session.commit()
+    logger.info("migrated database to schema_version=22")
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -507,6 +542,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     19: _migrate_to_v19,
     20: _migrate_to_v20,
     21: _migrate_to_v21,
+    22: _migrate_to_v22,
 }
 
 
@@ -544,6 +580,7 @@ def verify_core_tables(engine: Engine) -> list[str]:
         "prompts",
         "ai_jobs",
         "ai_job_items",
+        "ai_job_events",
         "review_sessions",
         "review_items",
         "audit_logs",
