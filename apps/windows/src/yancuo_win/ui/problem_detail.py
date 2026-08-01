@@ -102,7 +102,6 @@ class _ReferenceCanvas(QWidget):
     def set_source(self, asset_id: str, page_index: int, path: Path | None) -> None:
         self._asset_id, self._page_index = asset_id, page_index
         self._pixmap = QPixmap(str(path)) if path else QPixmap()
-        self.setVisible(not self._pixmap.isNull())
         self.update()
 
     def references(self) -> list[ProblemReference]:
@@ -477,7 +476,7 @@ class ProblemDetailPage(QWidget):
         reference_row.addWidget(self.reference_source_combo)
         reference_row.addWidget(self.reference_summary, stretch=1)
         self.chat_card.body.addLayout(reference_row)
-        self.reference_canvas = _ReferenceCanvas()
+        self.reference_canvas = _ReferenceCanvas(self.chat_card)
         self.reference_canvas.changed.connect(self._update_reference_summary)
         prompt_row = QHBoxLayout()
         self.chat_input = QLineEdit()

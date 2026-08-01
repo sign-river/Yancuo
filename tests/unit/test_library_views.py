@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QColor, QImage, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -365,6 +365,23 @@ def test_problem_detail_chat_prefers_reader_width_and_selection_overlay(
     assert page.reference_overlay.geometry().size() == page.reader.size()
 
 
+def test_problem_detail_reference_canvas_never_opens_as_window(
+    window: MainWindow,
+    tmp_path: Path,
+) -> None:
+    page = window.problem_detail_page
+    image_path = tmp_path / "reference.png"
+    image = QImage(20, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor("#FFFFFF"))
+    assert image.save(str(image_path), "PNG")
+
+    page.reference_canvas.set_source("asset_reference", 0, image_path)
+
+    assert page.reference_canvas.parentWidget() is page.chat_card
+    assert page.reference_canvas.isHidden()
+    assert not page.reference_canvas.isWindow()
+
+
 def test_service_settings_use_a_compact_aligned_form_surface(
     window: MainWindow,
 ) -> None:
@@ -575,6 +592,18 @@ def test_large_library_only_materializes_rows_near_viewport(
 
     assert window.problem_list.itemWidget(window.problem_list.item(79)) is not None
     assert window.problem_list.itemWidget(window.problem_list.item(0)) is None
+
+
+def test_releasing_inline_question_widget_does_not_create_window(
+    window: MainWindow,
+) -> None:
+    item = window.problem_list.item(0)
+    widget = window.problem_list.itemWidget(item)
+
+    assert widget is not None
+    window._release_inline_question_widget(0)
+
+    assert not widget.isWindow()
 
 
 def test_question_preview_expands_inline_and_remains_single(window: MainWindow) -> None:
