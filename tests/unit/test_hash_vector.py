@@ -36,3 +36,27 @@ def test_object_store_rejects_paths_outside_the_content_addressed_root(
 
     with pytest.raises(DomainError):
         store.resolve(value)
+
+
+def test_object_store_refuses_to_trust_a_corrupted_existing_hash_path(
+    tmp_path: Path,
+) -> None:
+    store = ObjectStore(tmp_path / "objects")
+    source = tmp_path / "source.bin"
+    source.write_bytes(VECTOR)
+    stored = store.store_copy(source, role="derived")
+    stored.absolute_path.write_bytes(b"corrupted")
+
+    with pytest.raises(DomainError, match="已损坏"):
+        store.store_copy(source, role="derived")
+
+
+def test_object_store_writes_through_a_verified_temporary_file(tmp_path: Path) -> None:
+    store = ObjectStore(tmp_path / "objects")
+    source = tmp_path / "source.bin"
+    source.write_bytes(VECTOR)
+
+    stored = store.store_copy(source, role="derived")
+
+    assert stored.absolute_path.read_bytes() == VECTOR
+    assert not list(store.objects_root.rglob("*.tmp"))

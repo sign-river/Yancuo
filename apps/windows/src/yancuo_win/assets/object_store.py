@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,13 +49,36 @@ class ObjectStore:
         suffix = source.suffix.lower() or ".bin"
         dest = self.object_path(sha, suffix)
         rel = self.relative_of(sha, suffix)
+        root = self.objects_root.resolve()
+        try:
+            dest.resolve(strict=False).relative_to(root)
+        except ValueError as exc:
+            raise DomainError("对象写入路径超出对象库") from exc
+        if dest.is_symlink():
+            raise DomainError("对象写入目标不能是符号链接")
         already = dest.is_file()
         if already:
             # 内容寻址：相同哈希视为同一对象，不覆盖写入
-            pass
+            if self.hash_file(dest) != sha:
+                raise DomainError("对象库中的同名文件内容已损坏")
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, dest)
+            resolved_parent = dest.parent.resolve()
+            try:
+                resolved_parent.relative_to(root)
+            except ValueError as exc:
+                raise DomainError("对象写入目录超出对象库") from exc
+            temporary = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                with source.open("rb") as src, temporary.open("xb") as out:
+                    shutil.copyfileobj(src, out, length=1024 * 1024)
+                    out.flush()
+                    os.fsync(out.fileno())
+                if self.hash_file(temporary) != sha:
+                    raise DomainError("对象写入后哈希校验失败")
+                os.replace(temporary, dest)
+            finally:
+                temporary.unlink(missing_ok=True)
             # 原图只读保护（文件系统层尽力而为）
             if role == "original":
                 try:
