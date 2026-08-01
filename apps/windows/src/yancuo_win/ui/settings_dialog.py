@@ -151,6 +151,7 @@ class ServiceSettingsPage(QWidget):
                 button.setObjectName("ThemeModeButton")
                 button.setCheckable(True)
                 button.setProperty("themeMode", mode)
+                button.setProperty("themeSelected", False)
                 button.setAccessibleDescription("选择此主题模式")
                 self.theme_button_group.addButton(button)
                 self.theme_buttons[mode] = button
@@ -552,8 +553,12 @@ class ServiceSettingsPage(QWidget):
     def _refresh_theme_status(self) -> None:
         selected_mode = str(self.theme_mode.currentData())
         resolved_mode = current_theme_name()
+        # The highlighted choice represents the saved/pending preference; in
+        # system mode the resolved light/dark palette is only a status.
         for mode, button in self.theme_buttons.items():
-            button.setChecked(mode == resolved_mode)
+            button.setProperty("themeSelected", mode == selected_mode)
+            button.style().unpolish(button)
+            button.style().polish(button)
         source = "跟随系统" if selected_mode == "system" else "固定选择"
         label = "浅色" if resolved_mode == "light" else "深色"
         self.theme_status.setText(f"{label}（{source}）")

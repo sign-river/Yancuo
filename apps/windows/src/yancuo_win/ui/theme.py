@@ -1038,17 +1038,17 @@ def app_stylesheet(theme: str = "light") -> str:
         border-radius: {m.radius_control}px;
         padding: 6px 14px;
     }}
-    QPushButton#ThemeModeButton:hover:!checked:!disabled {{
+    QPushButton#ThemeModeButton[themeSelected="false"]:hover:!disabled {{
         background: {t.list_hover};
         border-color: {t.hover_border};
     }}
-    QPushButton#ThemeModeButton:checked {{
+    QPushButton#ThemeModeButton[themeSelected="true"] {{
         background: {t.primary};
         color: {t.nav_text};
         border-color: {t.primary};
         font-weight: 600;
     }}
-    QPushButton#ThemeModeButton:checked:hover {{
+    QPushButton#ThemeModeButton[themeSelected="true"]:hover {{
         background: {t.primary_hover};
         border-color: {t.primary_hover};
     }}

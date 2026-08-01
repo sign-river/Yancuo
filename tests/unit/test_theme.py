@@ -221,7 +221,8 @@ def test_soft_visual_tokens_and_library_surfaces_are_rendered() -> None:
 def test_theme_mode_buttons_have_a_distinct_selected_state(mode: str) -> None:
     rendered = app_stylesheet(mode)
 
-    assert "QPushButton#ThemeModeButton:checked" in rendered
+    assert 'QPushButton#ThemeModeButton[themeSelected="true"]' in rendered
+    assert 'QPushButton#ThemeModeButton[themeSelected="false"]:hover' in rendered
     assert "QPushButton#ThemeModeButton:focus" in rendered
     assert "QPushButton#ThemeModeButton:disabled" in rendered
     assert "QLabel#ThemeModeStatus" in rendered
