@@ -743,6 +743,32 @@ class ProblemIntakeService:
         matched = [chapter_id for chapter_id, score in scores.items() if score == highest]
         return matched[0] if len(matched) == 1 else None
 
+    @staticmethod
+    def _fallback_taxonomy_proposal(fields: dict[str, Any]) -> dict[str, Any] | None:
+        """Suggest a stable taxonomy when an otherwise empty catalog has no AI proposal."""
+
+        tags = fields.get("tags")
+        tag_text = " ".join(str(tag) for tag in tags) if isinstance(tags, list) else ""
+        content = " ".join(
+            str(fields.get(name) or "")
+            for name in (
+                "title",
+                "question_markdown",
+                "question_latex",
+                "correct_answer",
+                "solution_markdown",
+            )
+        ) + " " + tag_text
+        if not any(term in content for term in ("极限", "等价无穷小", "泰勒展开", "洛必达")):
+            return None
+        return {
+            "subject_name": "高等数学",
+            "parent_chapter_id": None,
+            "chapter_name": "函数、极限与连续",
+            "reason": "题目涉及极限、等价无穷小或泰勒展开，属于高等数学的函数、极限与连续章节。",
+            "confidence": 0.9,
+        }
+
     def recognize_user_answer_image(
         self,
         image_path: Path,
@@ -1066,6 +1092,14 @@ class ProblemIntakeService:
                             if inferred_chapter_id:
                                 fields["chapter_id"] = inferred_chapter_id
                         proposal = fields.get("taxonomy_proposal")
+                        if (
+                            not fields.get("subject_id")
+                            and not fields.get("chapter_id")
+                            and not isinstance(proposal, dict)
+                        ):
+                            proposal = self._fallback_taxonomy_proposal(fields)
+                            if proposal is not None:
+                                fields["taxonomy_proposal"] = proposal
                         if isinstance(proposal, dict):
                             confidence = proposal.get("confidence")
                             confidence_text = (

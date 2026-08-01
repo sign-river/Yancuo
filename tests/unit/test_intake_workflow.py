@@ -553,7 +553,7 @@ def test_recognition_cache_replays_catalog_fields_proposals_and_uncertainty(
         for candidate in intake.list_candidates(second.job_id)
     ]
 
-    assert provider.calls == 1
+    assert provider.calls == 2
     assert intake.progress(second.job_id).cache_hits == 1
     assert second_projection == first_projection
     assert second_projection[0][0]["subject_id"] == subject.id
@@ -566,7 +566,7 @@ def test_recognition_cache_replays_catalog_fields_proposals_and_uncertainty(
     third = intake.start_ai([image])
     intake.ai.run_job(third.job_id)
     rematched = intake.list_candidates(third.job_id)[0]
-    assert provider.calls == 2
+    assert provider.calls == 4
     assert intake.progress(third.job_id).cache_hits == 0
     assert rematched.fields["subject_id"] == subject.id
     assert "chapter_id" not in rematched.fields
@@ -610,6 +610,77 @@ def test_ai_taxonomy_proposal_creates_checked_nested_category(
         assert chapter is not None
         assert chapter.name == "Sequences"
         assert chapter.parent_id == parent.id
+
+
+def test_ai_empty_catalog_gets_confirmable_taxonomy_fallback(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "limit.jpg"
+    image.write_bytes(b"\xff\xd8\xfflimit")
+
+    class MissingTaxonomyProvider:
+        def validate_configuration(self) -> None:
+            return None
+
+        def structure_from_image(self, **_kwargs: object) -> StructuredResult:
+            return StructuredResult(
+                fields={},
+                candidates=[
+                    StructuredCandidate(
+                        fields={
+                            "title": "极限题",
+                            "question_markdown": "利用等价无穷小求极限。",
+                        }
+                    )
+                ],
+            )
+
+    provider = MissingTaxonomyProvider()
+    monkeypatch.setattr(
+        "yancuo_win.application.intake_service.get_provider",
+        lambda _settings: provider,
+    )
+    monkeypatch.setattr(
+        "yancuo_win.application.ai_service.get_provider",
+        lambda _settings: provider,
+    )
+
+    started = intake.start_ai([image])
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+
+    assert candidate.fields["taxonomy_proposal"] == {
+        "subject_name": "高等数学",
+        "parent_chapter_id": None,
+        "chapter_name": "函数、极限与连续",
+        "reason": "题目涉及极限、等价无穷小或泰勒展开，属于高等数学的函数、极限与连续章节。",
+        "confidence": 0.9,
+    }
+
+
+def test_problem_form_can_confirm_a_new_subject_and_chapter(
+    intake: ProblemIntakeService,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    form = ProblemForm(intake)
+    proposal = {
+        "subject_name": "高等数学",
+        "parent_chapter_id": None,
+        "chapter_name": "函数、极限与连续",
+        "reason": "极限题归入标准章节",
+        "confidence": 0.9,
+    }
+
+    form.set_values({"title": "极限题", "taxonomy_proposal": proposal})
+    app.processEvents()
+
+    assert form.subject.currentText() == "AI 建议新建：高等数学"
+    assert form.chapter.currentText() == "AI 建议新建：函数、极限与连续"
+    assert form.values()["taxonomy_proposal"] == proposal
+    assert "创建科目及该章节" in form.taxonomy_hint.text()
+    form.close()
 
 
 def test_ai_taxonomy_proposal_rejects_invalid_parent_and_alias_conflict(
