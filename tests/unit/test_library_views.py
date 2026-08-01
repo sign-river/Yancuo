@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
 import yancuo_win.ui.intake_page as intake_page_module
 import yancuo_win.ui.note_page as note_page_module
 import yancuo_win.ui.problem_detail as problem_detail_module
-import yancuo_win.ui.review_plan_builder as review_plan_builder_module
 import yancuo_win.ui.review_page as review_page_module
 import yancuo_win.ui.settings_dialog as settings_dialog_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
@@ -356,24 +355,17 @@ def test_service_settings_use_a_compact_aligned_form_surface(
 
 def test_review_plan_builder_warns_before_creating_an_empty_plan(
     window: MainWindow,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     builder = window.review_page.plan_builder_page
     builder.services.clear_review_waiting_queue(builder.content_type)
     builder._refresh_queue()
     messages: list[tuple[str, str]] = []
     builder.status_message.connect(messages.append)
-    notices: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        review_plan_builder_module.QMessageBox,
-        "information",
-        lambda _parent, title, message: notices.append((title, message)),
-    )
-
     builder._confirm_create()
 
     assert messages == ["请先从左侧选择题目或笔记，并加入计划草稿。"]
-    assert notices == [("尚未加入复习内容", messages[0])]
+    assert not builder.toast.isHidden()
+    assert builder.toast.label.text() == messages[0]
 
 
 def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(

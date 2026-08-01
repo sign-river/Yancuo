@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -32,6 +31,7 @@ from yancuo_win.ui.widgets import (
     SearchInput,
     SoftItemDelegate,
     StatusTag,
+    ToastMessage,
     apply_themed_tree_branches,
     describe_field,
     deferred_view_updates,
@@ -58,6 +58,7 @@ class ReviewPlanBuilder(QWidget):
         self._narrow_layout = False
         self._showing_draft = False
         self._build()
+        self.toast = ToastMessage(self)
         self.reload()
 
     def _build(self) -> None:
@@ -482,12 +483,12 @@ class ReviewPlanBuilder(QWidget):
         if not ids:
             message = "请先从左侧选择题目或笔记，并加入计划草稿。"
             self.status_message.emit(message)
-            QMessageBox.information(self, "尚未加入复习内容", message)
+            self.toast.show_message(message)
             return
         if not name:
             message = "请填写复习计划名称。"
             self.status_message.emit(message)
-            QMessageBox.information(self, "请填写计划名称", message)
+            self.toast.show_message(message)
             self.plan_name.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         count = len(ids)
