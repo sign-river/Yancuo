@@ -273,6 +273,29 @@ def test_session_shortcut_hints_match_the_active_content_type(monkeypatch) -> No
     page.plan_combo.setCurrentIndex(0)
     page.start_session()
 
-    assert "Right 暂时跳过" in page.keyboard_hint.text()
+    assert "→ 暂时跳过" in page.keyboard_hint.text()
     assert page.keyboard_hint.accessibleDescription() == page.keyboard_hint.text()
+    page.close()
+
+
+def test_note_session_uses_the_same_accessible_shortcut_legend(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    note = SimpleNamespace(
+        id="note_shortcut_ui",
+        title="快捷键笔记",
+        status="active",
+        blocks=[],
+        tags=[],
+        summary="",
+    )
+    page = review_page_module.ReviewPage(
+        _NoteServicesStub(note), _NotesStub(note)
+    )
+    page.plan_combo.setCurrentIndex(0)
+    page.start_session()
+
+    assert page.keyboard_hint.text() == "快捷键：Enter 标记已阅读并继续。"
+    assert page.keyboard_hint.accessibleDescription() == page.keyboard_hint.text()
+    assert page.grade_card.isHidden()
     page.close()

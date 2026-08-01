@@ -745,7 +745,7 @@ class ReviewPage(QWidget):
 
     def _render(self) -> None:
         if self._content_type == "note":
-            self._set_keyboard_hint("键盘：Enter 标记已阅读并继续。")
+            self._set_keyboard_hint("快捷键：Enter 标记已阅读并继续。")
             note = self._current_note()
             self.grade_card.setVisible(False)
             self.detail_button.setVisible(False)
@@ -769,7 +769,7 @@ class ReviewPage(QWidget):
             return
         problem = self._current()
         self._set_keyboard_hint(
-            "键盘：Space 显示或隐藏答案；1-5 评分；Left 上一题；Right 暂时跳过并进入下一题。"
+            "快捷键：空格 显示或隐藏答案；数字 1–5 评分；← 上一题；→ 暂时跳过并进入下一题。"
         )
         self.grade_card.setVisible(True)
         self.detail_button.setVisible(True)
