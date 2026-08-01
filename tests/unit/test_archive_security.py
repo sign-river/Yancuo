@@ -177,3 +177,27 @@ def test_local_folder_skips_non_object_operation_lines(tmp_path: Path) -> None:
     assert provider.list_remote_operations("local", "repo") == [
         {"operation_id": "op_valid", "timestamp": "1"}
     ]
+
+
+def test_local_folder_rejects_oversized_operation_logs(tmp_path: Path) -> None:
+    provider = LocalFolderProvider(tmp_path / "cloud")
+    provider.append_operations(
+        "local", "repo", "dev-a", [{"operation_id": "op_valid", "timestamp": "1"}]
+    )
+    provider.MAX_OPERATION_FILE_BYTES = 1
+
+    with pytest.raises(DomainError, match="size limit"):
+        provider.list_remote_operations("local", "repo")
+
+
+def test_local_folder_rejects_non_utf8_operation_logs(tmp_path: Path) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.append_operations(
+        "local", "repo", "dev-a", [{"operation_id": "op_valid", "timestamp": "1"}]
+    )
+    ops_file = root / "local" / "repo" / "changes" / "dev-a" / "ops.jsonl"
+    ops_file.write_bytes(b"\xff\xfe")
+
+    with pytest.raises(DomainError, match="UTF-8"):
+        provider.list_remote_operations("local", "repo")

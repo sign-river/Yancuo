@@ -21,6 +21,9 @@ from yancuo_win.domain.rules import DomainError
 
 class LocalFolderProvider(CloudProvider):
     name = "local_folder"
+    MAX_OPERATION_FILE_BYTES = 64 * 1024 * 1024
+    MAX_REMOTE_OPERATIONS = 100_000
+    MAX_REMOTE_DEVICES = 10_000
     # 本地同步目录可能位于 U 盘或网络盘；锁文件无法保证进程崩溃时
     # 自动清理，因此保留一个明确的过期窗口作为最后兜底。
     LOCK_TTL_SECONDS = 15 * 60
@@ -403,15 +406,28 @@ class LocalFolderProvider(CloudProvider):
         items: list[dict[str, Any]] = []
         if not root.is_dir():
             return items
-        for device_dir in sorted(root.iterdir()):
+        device_dirs = sorted(root.iterdir())
+        if len(device_dirs) > self.MAX_REMOTE_DEVICES:
+            raise DomainError("remote operation device directory count exceeds limit")
+        for device_dir in device_dirs:
             if not device_dir.is_dir() or device_dir.is_symlink():
                 continue
             if exclude_device and device_dir.name == exclude_device:
                 continue
             ops_file = device_dir / "ops.jsonl"
+            if ops_file.is_symlink():
+                raise DomainError("ops.jsonl must not be a symlink")
             if not ops_file.is_file():
                 continue
-            for line in ops_file.read_text(encoding="utf-8").splitlines():
+            if ops_file.stat().st_size > self.MAX_OPERATION_FILE_BYTES:
+                raise DomainError("ops.jsonl exceeds size limit")
+            try:
+                lines = ops_file.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError as exc:
+                raise DomainError("ops.jsonl must be valid UTF-8") from exc
+            if len(items) + len(lines) > self.MAX_REMOTE_OPERATIONS:
+                raise DomainError("remote operation count exceeds limit")
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue

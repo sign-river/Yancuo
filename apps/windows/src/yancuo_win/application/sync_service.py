@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import hashlib
+import re
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -34,6 +35,12 @@ from yancuo_win.domain.sync_merge import apply_patch, merge_snapshots
 from yancuo_win.import_export.ebpack import EbpackService
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.review.changeset import snapshot_problem_fields
+
+
+MAX_REMOTE_OPERATION_BATCHES = 10_000
+MAX_REMOTE_OPERATION_BATCH_BYTES = 64 * 1024 * 1024
+MAX_REMOTE_OPERATIONS_PER_BATCH = 100_000
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 _SYNC_MUTABLE_FIELDS = frozenset(
@@ -274,19 +281,41 @@ class SyncService:
             raise DomainError("云端 Operation 批次索引无效")
         if not isinstance(batches, list):
             return []
+        if len(batches) > MAX_REMOTE_OPERATION_BATCHES:
+            raise DomainError("云端 Operation 批次索引过大")
         items: list[dict[str, Any]] = []
+        seen_batches: set[str] = set()
         for batch in batches:
             if not isinstance(batch, dict) or batch.get("profile_id") != self.runtime.identity.profile_id or batch.get("device_id") == self.runtime.identity.device_id:
                 continue
             tag, asset_name, expected = str(batch.get("tag") or ""), str(batch.get("asset_name") or ""), str(batch.get("sha256") or "")
-            if not tag or not asset_name or len(expected) != 64:
+            batch_id = str(batch.get("batch_id") or "")
+            if (
+                not tag
+                or asset_name != "operations.jsonl"
+                or not _SHA256_RE.fullmatch(expected)
+                or not batch_id
+                or batch_id in seen_batches
+            ):
                 continue
+            seen_batches.add(batch_id)
             with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
-                path = Path(temporary) / asset_name
+                path = Path(temporary) / "operations.jsonl"
                 provider.download_release_asset(self.owner, self.repo, tag=tag, asset_name=asset_name, dest=path)
+                if (
+                    not path.is_file()
+                    or path.stat().st_size > MAX_REMOTE_OPERATION_BATCH_BYTES
+                ):
+                    raise DomainError("远端 Operation 批次文件过大或不存在")
                 if self._sha256(path) != expected:
                     raise DomainError("远端 Operation 批次哈希不一致")
-                for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    lines = path.read_text(encoding="utf-8").splitlines()
+                except UnicodeDecodeError as exc:
+                    raise DomainError("远端 Operation 批次不是有效 UTF-8") from exc
+                if len(lines) > MAX_REMOTE_OPERATIONS_PER_BATCH:
+                    raise DomainError("远端 Operation 批次记录过多")
+                for line in lines:
                     try:
                         value = json.loads(line)
                     except json.JSONDecodeError:

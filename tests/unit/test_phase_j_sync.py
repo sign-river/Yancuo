@@ -561,3 +561,26 @@ def test_github_batch_rejects_malformed_index(runtime) -> None:
     provider.read_sync_manifest = lambda *_args: {"operation_batches": {}}  # type: ignore[method-assign]
     with pytest.raises(DomainError, match="索引无效"):
         SyncService(runtime, provider)._github_remote_operations(provider)
+
+
+def test_github_batch_never_uses_remote_asset_name_as_a_local_path(runtime) -> None:
+    provider = GitHubProvider(token="ghp_test")
+    downloads: list[Path] = []
+    provider.read_sync_manifest = lambda *_args: {  # type: ignore[method-assign]
+        "operation_batches": [
+            {
+                "batch_id": "batch_malicious",
+                "profile_id": runtime.identity.profile_id,
+                "device_id": "remote-device",
+                "tag": "safe-tag",
+                "asset_name": "../../outside.jsonl",
+                "sha256": "a" * 64,
+            }
+        ]
+    }
+    provider.download_release_asset = (  # type: ignore[method-assign]
+        lambda *_args, **kwargs: downloads.append(Path(kwargs["dest"]))
+    )
+
+    assert SyncService(runtime, provider)._github_remote_operations(provider) == []
+    assert downloads == []
