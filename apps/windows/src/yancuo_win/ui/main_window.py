@@ -76,6 +76,7 @@ from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
 from yancuo_win.ui.settings_dialog import ServiceSettingsPage
 from yancuo_win.ui.widgets import (
+    action_combo_box,
     CardFrame,
     ConfirmDialog,
     CompletionNotification,
@@ -1392,38 +1393,42 @@ class MainWindow(QMainWindow):
         self.local_backup_summary.setObjectName("MutedLabel")
         self.local_backup_summary.setWordWrap(True)
         pack.body.addWidget(self.local_backup_summary)
-        self.backup_menu_button = primary_button("备份与恢复")
-        self.backup_menu_button.setAccessibleName("备份与恢复操作")
-        self.backup_menu_button.setAccessibleDescription(
-            "打开菜单，选择完整备份、恢复或旧版 ZIP 操作"
+        self.backup_action_combo = action_combo_box(
+            "备份与恢复",
+            [
+                ("导出完整备份", self._export_ebpack),
+                ("导入完整备份", self._import_ebpack),
+                None,
+                ("创建 ZIP 备份（旧版兼容）", self._backup),
+                ("从 ZIP 恢复（旧版兼容）", self._restore_backup),
+            ],
         )
-        backup_menu = QMenu(self.backup_menu_button)
-        backup_menu.addAction("导出完整备份", self._export_ebpack)
-        backup_menu.addAction("导入完整备份", self._import_ebpack)
-        backup_menu.addSeparator()
-        backup_menu.addAction("创建 ZIP 备份（旧版兼容）", self._backup)
-        backup_menu.addAction("从 ZIP 恢复（旧版兼容）", self._restore_backup)
-        self.backup_menu_button.setMenu(backup_menu)
-        pack.body.addLayout(button_row(self.backup_menu_button))
+        self.backup_action_combo.setAccessibleName("备份与恢复操作")
+        self.backup_action_combo.setAccessibleDescription(
+            "选择完整备份、恢复或旧版 ZIP 操作"
+        )
+        pack.body.addLayout(button_row(self.backup_action_combo))
         workspace.addWidget(pack, 0, 0, 1, 2)
 
         share = CardFrame()
         share.setProperty("surfaceRole", "data")
         share.add_title("导入与导出")
         share.add_hint("分享包适合发送给其他用户；工作区适合使用 Markdown 外部编辑。")
-        self.transfer_menu_button = QPushButton("导入与导出")
-        self.transfer_menu_button.setAccessibleName("导入与导出操作")
-        self.transfer_menu_button.setAccessibleDescription(
-            "打开菜单，选择分享包或工作区的导入与导出操作"
+        self.transfer_action_combo = action_combo_box(
+            "导入与导出",
+            [
+                ("导出分享包", self._export_gmshare),
+                ("导出工作区", self._export_workspace),
+                None,
+                ("导入分享包", self._import_gmshare),
+                ("导入工作区", self._import_workspace),
+            ],
         )
-        transfer_menu = QMenu(self.transfer_menu_button)
-        transfer_menu.addAction("导出分享包", self._export_gmshare)
-        transfer_menu.addAction("导出工作区", self._export_workspace)
-        transfer_menu.addSeparator()
-        transfer_menu.addAction("导入分享包", self._import_gmshare)
-        transfer_menu.addAction("导入工作区", self._import_workspace)
-        self.transfer_menu_button.setMenu(transfer_menu)
-        share.body.addLayout(button_row(self.transfer_menu_button))
+        self.transfer_action_combo.setAccessibleName("导入与导出操作")
+        self.transfer_action_combo.setAccessibleDescription(
+            "选择分享包或工作区的导入与导出操作"
+        )
+        share.body.addLayout(button_row(self.transfer_action_combo))
 
         workspace.addWidget(share, 1, 0)
 

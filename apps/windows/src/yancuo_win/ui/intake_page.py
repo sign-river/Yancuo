@@ -565,13 +565,10 @@ class ProblemForm(QWidget):
         content = CardFrame()
         content.add_title("题目内容")
         self.question = self._text_area("题干 Markdown / 文本", 150)
-        self.latex = self._text_area("公式 LaTeX（可留空）", 78)
+        self._question_latex = ""
         describe_field(self.question, "题干")
-        describe_field(self.latex, "题干 LaTeX")
         content.body.addWidget(QLabel("题干"))
         content.body.addWidget(self.question)
-        content.body.addWidget(QLabel("LaTeX"))
-        content.body.addWidget(self.latex)
         if self.show_render_previews:
             self._add_field_preview(content.body, "question", "题目内容预览")
         root.addWidget(content)
@@ -635,7 +632,6 @@ class ProblemForm(QWidget):
             self.original_number,
             self.tags,
             self.question,
-            self.latex,
             self.answer_capture_button,
             self.user_answer,
             self.correct_answer,
@@ -659,7 +655,6 @@ class ProblemForm(QWidget):
             editor.textChanged.connect(notify)
         for editor in (
             self.question,
-            self.latex,
             self.user_answer,
             self.correct_answer,
             self.solution,
@@ -702,7 +697,7 @@ class ProblemForm(QWidget):
         if not self.show_render_previews:
             return
         question = self.question.toPlainText()
-        latex = self.latex.toPlainText().strip()
+        latex = self._question_latex.strip()
         if latex:
             question = f"{question}\n\n\\[{latex}\\]".strip()
         values = {
@@ -722,7 +717,6 @@ class ProblemForm(QWidget):
     def _resize_text_areas_to_content(self) -> None:
         for editor in (
             self.question,
-            self.latex,
             self.user_answer,
             self.correct_answer,
             self.solution,
@@ -819,7 +813,7 @@ class ProblemForm(QWidget):
             "source_year": self._optional(self.source_year.text()),
             "original_number": self._optional(self.original_number.text()),
             "question_markdown": self.question.toPlainText(),
-            "question_latex": self.latex.toPlainText(),
+            "question_latex": self._question_latex,
             "user_answer": self.user_answer.toPlainText(),
             "correct_answer": self.correct_answer.toPlainText(),
             "solution_markdown": self.solution.toPlainText(),
@@ -910,7 +904,7 @@ class ProblemForm(QWidget):
         self.source_year.setText(str(values.get("source_year") or ""))
         self.original_number.setText(str(values.get("original_number") or ""))
         self.question.setPlainText(str(values.get("question_markdown") or ""))
-        self.latex.setPlainText(str(values.get("question_latex") or ""))
+        self._question_latex = str(values.get("question_latex") or "")
         self.user_answer.setPlainText(
             ""
             if self.clear_user_answer_on_load
@@ -2318,7 +2312,7 @@ class IntakePage(QWidget):
             "subject_id": "科目",
             "chapter_id": "章节",
             "question_markdown": "题干",
-            "question_latex": "LaTeX",
+            "question_latex": "题干公式",
             "user_answer": "我的作答",
             "correct_answer": "正确答案",
             "solution_markdown": "解析",
@@ -2332,7 +2326,7 @@ class IntakePage(QWidget):
             "subject_id": self.ai_form.subject,
             "chapter_id": self.ai_form.chapter,
             "question_markdown": self.ai_form.question,
-            "question_latex": self.ai_form.latex,
+            "question_latex": self.ai_form.question,
             "user_answer": self.ai_form.user_answer,
             "correct_answer": self.ai_form.correct_answer,
             "solution_markdown": self.ai_form.solution,
