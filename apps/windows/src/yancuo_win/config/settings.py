@@ -116,6 +116,13 @@ class CloudProviderEndpointConfig(BaseModel):
     credential_key: str = ""
 
 
+class CloudBaseConfig(CloudProviderEndpointConfig):
+    """CloudBase gateway connection details; tokens stay in system credentials."""
+
+    environment_id: str = ""
+    gateway_url: str = ""
+
+
 class CloudConfig(BaseModel):
     enabled: bool = False
     default_provider: str = "gitlink"
@@ -141,6 +148,12 @@ class CloudConfig(BaseModel):
             base_url="https://api.github.com",
             auth_method="token",
             credential_key="yancuo_github_token",
+        )
+    )
+    cloudbase: CloudBaseConfig = Field(
+        default_factory=lambda: CloudBaseConfig(
+            auth_method="gateway_token",
+            credential_key="yancuo_cloudbase_gateway_token",
         )
     )
 
@@ -326,7 +339,7 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
     if isinstance(cloud, dict):
         provider = str(cloud.get("default_provider") or "").strip()
         if provider:
-            if provider not in {"local_folder", "gitlink", "github"}:
+            if provider not in {"local_folder", "gitlink", "github", "cloudbase"}:
                 raise ConfigError(f"本地偏好设置包含未知云端提供商：{provider}")
             settings.cloud.default_provider = provider
         repository = cloud.get("repository")
@@ -339,6 +352,14 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
             if branch:
                 settings.cloud.repository.branch = branch
         settings.cloud.local_root = str(cloud.get("local_root") or "").strip()
+        cloudbase = cloud.get("cloudbase")
+        if isinstance(cloudbase, dict):
+            settings.cloud.cloudbase.environment_id = str(
+                cloudbase.get("environment_id") or ""
+            ).strip()
+            settings.cloud.cloudbase.gateway_url = str(
+                cloudbase.get("gateway_url") or ""
+            ).strip()
         if "enabled" in cloud:
             settings.cloud.enabled = bool(cloud["enabled"])
     return settings
@@ -393,12 +414,14 @@ def save_cloud_preferences(
     repository: str,
     local_root: str,
     branch: str = "",
+    cloudbase_environment_id: str = "",
+    cloudbase_gateway_url: str = "",
     enabled: bool = True,
 ) -> Path:
     """Persist non-sensitive cloud fields without writing access tokens."""
 
     provider = provider.strip()
-    if provider not in {"local_folder", "gitlink", "github"}:
+    if provider not in {"local_folder", "gitlink", "github", "cloudbase"}:
         raise ConfigError(f"未知云端提供商：{provider}")
     repository = repository.strip() or "graduate-mistake-book-data"
 
@@ -423,6 +446,11 @@ def save_cloud_preferences(
         },
         "local_root": local_root.strip(),
     }
+    if provider == "cloudbase":
+        payload["cloud"]["cloudbase"] = {
+            "environment_id": cloudbase_environment_id.strip(),
+            "gateway_url": cloudbase_gateway_url.strip(),
+        }
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
