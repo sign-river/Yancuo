@@ -2561,7 +2561,6 @@ class MainWindow(QMainWindow):
         if old_widget is not None:
             self.problem_list.removeItemWidget(item)
             old_widget.hide()
-            old_widget.setParent(None)
             old_widget.deleteLater()
         widget = self._make_inline_question_widget(problem)
         reader = widget.findChild(MathContentView)
@@ -2583,7 +2582,6 @@ class MainWindow(QMainWindow):
         if widget is not None:
             self.problem_list.removeItemWidget(item)
             widget.hide()
-            widget.setParent(None)
             widget.deleteLater()
         problem_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
         problem = self._problem_rows.get(problem_id)
