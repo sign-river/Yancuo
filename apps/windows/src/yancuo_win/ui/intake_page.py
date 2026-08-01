@@ -953,6 +953,8 @@ class IntakePage(QWidget):
         self.candidate_index = 0
         self.last_problem_id: str | None = None
         self._restoring_manual_draft = False
+        self._ai_live_stage_label = ""
+        self._ai_live_stage_history: list[str] = []
 
         self.manual_draft_timer = QTimer(self)
         self.manual_draft_timer.setSingleShot(True)
@@ -1219,10 +1221,17 @@ class IntakePage(QWidget):
         self.progress_bar.setValue(0)
         card.body.addWidget(self.progress_bar)
         self.processing_steps = QLabel(
-            "每张图片只发起一次主 AI 请求；完成首张后会显示各阶段实测耗时。"
+            "将先识别题干、公式和答案，再在后台补全解析与分类。"
         )
         self.processing_steps.setWordWrap(True)
         card.body.addWidget(self.processing_steps)
+        self.processing_preview = QTextEdit()
+        self.processing_preview.setObjectName("AIQuickPreview")
+        self.processing_preview.setReadOnly(True)
+        self.processing_preview.setMinimumHeight(132)
+        self.processing_preview.setMaximumHeight(220)
+        self.processing_preview.hide()
+        card.body.addWidget(self.processing_preview)
         self.processing_error = QLabel("")
         self.processing_error.setWordWrap(True)
         self.processing_error.setObjectName("DangerLabel")
@@ -1990,6 +1999,10 @@ class IntakePage(QWidget):
         self.ai_job_id = started.job_id
         self._cancelled_ai_jobs.discard(started.job_id)
         self.ai_candidates.clear()
+        self._ai_live_stage_label = ""
+        self._ai_live_stage_history.clear()
+        self.processing_preview.clear()
+        self.processing_preview.hide()
         self.processing_error.clear()
         self.processing_retry.setVisible(False)
         self.processing_back.setVisible(False)
@@ -2002,6 +2015,7 @@ class IntakePage(QWidget):
         self.ai_worker = AIJobWorker(self.intake.ai, job_id, self)
         self.ai_worker.finished_ok.connect(self._on_ai_done)
         self.ai_worker.failed.connect(self._on_ai_failed)
+        self.ai_worker.progress.connect(self._on_ai_progress)
         self.ai_worker.start()
         self.progress_timer.start()
         self._poll_progress()
@@ -2017,8 +2031,9 @@ class IntakePage(QWidget):
             return
         self.progress_bar.setRange(0, max(1, progress.total))
         self.progress_bar.setValue(progress.done + progress.failed)
+        stage_label = self._ai_live_stage_label or progress.stage_label
         self.processing_status.setText(
-            f"{progress.stage_label} · "
+            f"{stage_label} · "
             f"完成 {progress.done} / {progress.total} · 失败 {progress.failed}"
         )
         timing_labels = (
@@ -2026,6 +2041,8 @@ class IntakePage(QWidget):
             ("preflight", "本地预检查"),
             ("cache_lookup", "缓存查找"),
             ("image_encode", "图片读取与编码"),
+            ("quick_request", "首轮题干与答案识别"),
+            ("enrichment_request", "解析与分类补全"),
             ("request", "AI 请求与等待"),
             ("response_parse", "响应 JSON 解析"),
             ("validation", "字段校验"),
@@ -2082,6 +2099,33 @@ class IntakePage(QWidget):
             return
         if progress.status == "completed":
             self.progress_timer.stop()
+
+    def _on_ai_progress(self, event: object) -> None:
+        if not isinstance(event, dict):
+            return
+        label = str(event.get("label") or "").strip()
+        if label:
+            self._ai_live_stage_label = label
+            if not self._ai_live_stage_history or self._ai_live_stage_history[-1] != label:
+                self._ai_live_stage_history.append(label)
+                self._ai_live_stage_history = self._ai_live_stage_history[-4:]
+            self.processing_status.setText(label)
+            self.processing_steps.setText(" · ".join(self._ai_live_stage_history))
+        preview = event.get("preview")
+        if not isinstance(preview, dict):
+            return
+        title = str(preview.get("title") or "").strip()
+        question = str(preview.get("question_markdown") or preview.get("question_latex") or "").strip()
+        answer = str(preview.get("correct_answer") or "").strip()
+        lines = ["首轮识别结果（后台仍在补全，请以最终确认页内容为准）"]
+        if title:
+            lines.extend(["", f"题目：{title}"])
+        if question:
+            lines.extend(["", "题干：", question])
+        if answer:
+            lines.extend(["", "答案：", answer])
+        self.processing_preview.setPlainText("\n".join(lines))
+        self.processing_preview.show()
 
     def _cancel_ai(self) -> None:
         job_id = self.ai_job_id
@@ -2167,13 +2211,11 @@ class IntakePage(QWidget):
         self.candidate_index = 0
         self.processing_retry.setVisible(False)
         self._load_candidate()
-        was_processing = self.stack.currentIndex() == _PAGE_AI_PROCESSING
         self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
         self.status_message.emit(
             f"AI 已完成，生成 {len(self.ai_candidates)} 道待确认题目"
         )
-        if not was_processing:
-            self.ai_review_ready.emit(job_id, len(self.ai_candidates))
+        self.ai_review_ready.emit(job_id, len(self.ai_candidates))
 
     def _on_ai_failed(self, job_id: str, error: str) -> None:
         if job_id in self._cancelled_ai_jobs:

@@ -54,6 +54,11 @@ from yancuo_win.review.changeset import (
     validate_and_filter_proposal,
 )
 
+_QUICK_INTAKE_PROMPT = """这是题目图片的首轮快速识别。只返回严格 JSON，且只包含一个 problems 数组。
+每个对象仅包含 title、question_markdown、question_latex、correct_answer、region。
+优先准确转写题干、公式和最终答案；不要生成解析、标签、分类、说明文字或 Markdown 代码块。
+无法确认的字段使用空字符串，region 无法判断时使用整图。"""
+
 
 def _structured_result_from_cache(
     payload: dict[str, object] | None, raw_response: str
@@ -869,7 +874,13 @@ class AIService:
             s.expunge(job)
             return job
 
-    def run_job(self, job_id: str, *, should_cancel: Callable[[], bool] | None = None) -> AiJob:
+    def run_job(
+        self,
+        job_id: str,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AiJob:
         """同步执行任务（可由后台线程调用）。不直接写入正式题库字段。"""
         provider = get_provider(self.runtime.settings)
 
@@ -918,6 +929,7 @@ class AIService:
                 provider,
                 session_holder := [],
                 should_cancel=should_cancel,
+                on_progress=on_progress,
             )
             if should_cancel and should_cancel():
                 with self.session() as s:
@@ -977,6 +989,7 @@ class AIService:
         session_holder: list[str],
         *,
         should_cancel: Callable[[], bool] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         item_started = perf_counter()
         active_stage = "preflight"
@@ -1053,6 +1066,9 @@ class AIService:
             if not intake_assets:
                 intake_assets = [asset]
 
+            if on_progress:
+                on_progress({"stage": "preflight", "label": "正在检查原图并准备识别"})
+
             # 预处理：存在性 / 大小；不修改原图
             image_paths = [self.store.resolve(value.relative_path) for value in intake_assets]
             for source, image_path in zip(intake_assets, image_paths, strict=True):
@@ -1107,6 +1123,8 @@ class AIService:
                 if cached_result is not None:
                     active_stage = "cache"
                     result = cached_result
+                    if on_progress:
+                        on_progress({"stage": "cache", "label": "已命中历史识别缓存，正在整理结果"})
                     self._audit(
                         s,
                         "ai_item_cache_hit",
@@ -1117,6 +1135,44 @@ class AIService:
                 else:
                     active_stage = "provider"
                     provider_started = perf_counter()
+                    if job.job_type == "intake_structure":
+                        if on_progress:
+                            on_progress({"stage": "quick_request", "label": "正在识别题干、公式和最终答案"})
+                        quick_started = perf_counter()
+                        quick_result = (
+                            provider.structure_from_image(
+                                image_path=str(image_paths[0]),
+                                prompt=_QUICK_INTAKE_PROMPT,
+                                model=job.model,
+                                timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+                            )
+                            if len(image_paths) == 1
+                            else provider.structure_from_images(
+                                image_paths=[str(path) for path in image_paths],
+                                prompt=_QUICK_INTAKE_PROMPT,
+                                model=job.model,
+                                timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+                            )
+                        )
+                        timings_ms["quick_request"] = (
+                            perf_counter() - quick_started
+                        ) * 1000
+                        quick_candidates = quick_result.candidate_results()
+                        if on_progress and quick_candidates:
+                            quick_fields = quick_candidates[0].fields
+                            preview = {
+                                key: str(quick_fields.get(key) or "").strip()
+                                for key in ("title", "question_markdown", "question_latex", "correct_answer")
+                            }
+                            if preview["question_markdown"] or preview["question_latex"] or preview["correct_answer"]:
+                                on_progress({
+                                    "stage": "quick_ready",
+                                    "label": "首轮结果已到，正在补全解析、标签和分类",
+                                    "preview": preview,
+                                })
+                        if on_progress:
+                            on_progress({"stage": "enrichment", "label": "正在生成完整解析、标签和分类"})
+                    enrichment_started = perf_counter()
                     if len(image_paths) == 1:
                         result = provider.structure_from_image(
                             image_path=str(image_paths[0]),
@@ -1131,6 +1187,9 @@ class AIService:
                             model=job.model,
                             timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
                         )
+                    timings_ms["enrichment_request"] = (
+                        perf_counter() - enrichment_started
+                    ) * 1000
                     timings_ms["provider_total"] = (
                         perf_counter() - provider_started
                     ) * 1000
@@ -1202,6 +1261,8 @@ class AIService:
                 item.cost_estimate = float(result.cost_estimate)
 
                 active_stage = "candidate_write"
+                if on_progress:
+                    on_progress({"stage": "candidate_write", "label": "正在校验字段并写入待确认结果"})
                 write_started = perf_counter()
                 with s.begin_nested():
                     if intake_session and isinstance(asset, IntakeAsset):

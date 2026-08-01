@@ -36,7 +36,7 @@ class CallableWorker(QThread):
 class AIJobWorker(QThread):
     finished_ok = Signal(str)
     failed = Signal(str, str)
-    progress = Signal(str)
+    progress = Signal(object)
 
     def __init__(self, ai: AIService, job_id: str, parent=None) -> None:
         super().__init__(parent)
@@ -50,8 +50,12 @@ class AIJobWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.progress.emit(f"running:{self.job_id}")
-            self.ai.run_job(self.job_id, should_cancel=lambda: self._cancel)
+            self.progress.emit({"stage": "started", "label": "任务已开始"})
+            self.ai.run_job(
+                self.job_id,
+                should_cancel=lambda: self._cancel,
+                on_progress=self.progress.emit,
+            )
             self.service_finished_at = perf_counter()
             self.finished_ok.emit(self.job_id)
         except Exception as exc:  # noqa: BLE001
