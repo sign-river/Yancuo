@@ -142,17 +142,22 @@ def _nav_modes(window: MainWindow) -> list[str]:
     ]
 
 
-def test_settings_page_consolidates_account_services_and_data(window: MainWindow) -> None:
-    labels = [window.main_nav.item(row).text() for row in range(window.main_nav.count())]
+def test_settings_page_consolidates_account_services_and_data(
+    window: MainWindow,
+) -> None:
+    labels = [
+        window.main_nav.item(row).text() for row in range(window.main_nav.count())
+    ]
     assert labels == ["工作台", "题库", "笔记", "复习", "设置"]
 
     items = window.main_nav.findItems("设置", Qt.MatchFlag.MatchExactly)
     assert len(items) == 1
 
     window.main_nav.setCurrentItem(items[0])
-    assert [window.settings_nav.item(index).text() for index in range(window.settings_nav.count())] == [
-        "账户与设备", "AI 服务", "外观与显示", "本地数据", "云端同步"
-    ]
+    assert [
+        window.settings_nav.item(index).text()
+        for index in range(window.settings_nav.count())
+    ] == ["账户与设备", "AI 服务", "外观与显示", "本地数据", "云端同步"]
 
     window.settings_nav.setCurrentRow(0)
 
@@ -367,7 +372,7 @@ def test_problem_detail_toolbar_groups_actions_and_keeps_priority_controls(
     assert page._toolbar_priority_layout.itemAt(2).widget() is page.management_group
 
 
-def test_problem_detail_chat_prefers_reader_width_and_selection_overlay(
+def test_problem_detail_chat_prefers_reader_width_and_image_reference_canvas(
     window: MainWindow,
 ) -> None:
     app = QApplication.instance()
@@ -382,8 +387,9 @@ def test_problem_detail_chat_prefers_reader_width_and_selection_overlay(
     assert left > right
     assert page.chat_card.minimumWidth() == 360
 
-    page.reference_overlay.setGeometry(page.reader.rect())
-    assert page.reference_overlay.geometry().size() == page.reader.size()
+    assert page.reader_stack.count() == 2
+    assert page.reader_stack.currentWidget() is page.reader
+    assert page.reference_canvas.parentWidget() is page.reader_stack
 
 
 def test_problem_detail_chat_preserves_focus_layout_scroll_and_conversation(
@@ -439,7 +445,7 @@ def test_problem_detail_chat_preserves_focus_layout_scroll_and_conversation(
     assert page.conversation_combo.findData(first.id) >= 0
 
 
-def test_problem_detail_reference_canvas_never_opens_as_window(
+def test_problem_detail_reference_canvas_stays_embedded_and_keeps_normalized_regions(
     window: MainWindow,
     tmp_path: Path,
 ) -> None:
@@ -451,8 +457,16 @@ def test_problem_detail_reference_canvas_never_opens_as_window(
 
     page.reference_canvas.set_source("asset_reference", 0, image_path)
 
-    assert page.reference_canvas.parentWidget() is page.chat_card
-    assert page.reference_canvas.isHidden()
+    page.reader_stack.setCurrentWidget(page.reference_canvas)
+    page.reference_canvas.add_normalized_region(0.1, 0.2, 0.3, 0.4)
+    before = page.reference_canvas.references()
+    page.reference_canvas.resize(640, 480)
+
+    assert page.reference_canvas.parentWidget() is page.reader_stack
+    assert page.reader_stack.currentWidget() is page.reference_canvas
+    assert page.reference_canvas.references() == before
+    assert page.reference_previews.count() == 1
+    assert page.reference_summary.text() == "本次引用 1 个区域"
     assert not page.reference_canvas.isWindow()
 
 
@@ -466,8 +480,13 @@ def test_service_settings_use_a_compact_aligned_form_surface(
     for page in (ai_settings, appearance_settings, cloud_settings):
         assert page.settings_content.maximumWidth() == 800
 
-    assert all(button.isCheckable() for button in appearance_settings.theme_buttons.values())
-    assert ai_settings.fetch_ai_models.parentWidget() is ai_settings.ai_model.parentWidget()
+    assert all(
+        button.isCheckable() for button in appearance_settings.theme_buttons.values()
+    )
+    assert (
+        ai_settings.fetch_ai_models.parentWidget()
+        is ai_settings.ai_model.parentWidget()
+    )
     assert ai_settings.clear_ai_button.objectName() == "DangerButton"
     assert cloud_settings.clear_cloud_token_button.objectName() == "DangerButton"
 
@@ -527,8 +546,7 @@ def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
     assert page.ai_upload_file_actions.itemAt(0).spacerItem() is not None
     assert page.ai_upload_file_actions.itemAt(3).spacerItem() is not None
     assert (
-        page.ai_upload_content_layout.itemAt(1).alignment()
-        == Qt.AlignmentFlag.AlignTop
+        page.ai_upload_content_layout.itemAt(1).alignment() == Qt.AlignmentFlag.AlignTop
     )
 
 
@@ -607,7 +625,13 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
     window._set_library_view("process")
     assert window.library_process_button.isChecked()
     assert _nav_modes(window) == [
-        "active", "due", "favorite", "recent", "inbox", "archived", "trashed"
+        "active",
+        "due",
+        "favorite",
+        "recent",
+        "inbox",
+        "archived",
+        "trashed",
     ]
     assert _problem_titles(window) == ["待整理题"]
     assert window.new_subject_button.isHidden()
@@ -615,7 +639,9 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
     _select_mode(window, "archived")
     assert _problem_titles(window) == ["归档题"]
     window._set_library_view("browse")
-    _select_mode(window, next(mode for mode in _nav_modes(window) if mode.startswith("subject:")))
+    _select_mode(
+        window, next(mode for mode in _nav_modes(window) if mode.startswith("subject:"))
+    )
     assert set(_problem_titles(window)) == {
         "未分类极限题",
         "积分基础题",
@@ -652,8 +678,7 @@ def test_question_delete_action_is_next_to_edit_and_not_in_more_menu(
     )
     assert window.question_delete_button.objectName() == "DangerButton"
     assert "删除" not in {
-        action.text()
-        for action in window._build_question_more_menu().actions()
+        action.text() for action in window._build_question_more_menu().actions()
     }
 
 
@@ -794,9 +819,7 @@ def test_knowledge_tree_aggregates_descendants_and_preserves_expansion(
     subject_mode = next(
         mode for mode in _nav_modes(window) if mode.startswith("subject:")
     )
-    chapter_modes = [
-        mode for mode in _nav_modes(window) if mode.startswith("chapter:")
-    ]
+    chapter_modes = [mode for mode in _nav_modes(window) if mode.startswith("chapter:")]
     parent_mode = next(
         mode
         for mode in chapter_modes
@@ -834,44 +857,65 @@ def test_knowledge_tree_aggregates_descendants_and_preserves_expansion(
 
 
 def test_catalog_menu_and_editor_use_valid_full_paths(window: MainWindow) -> None:
-    child_mode = next(mode for mode in _nav_modes(window) if mode.startswith("chapter:"))
+    child_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("chapter:")
+    )
     _select_mode(window, child_mode)
     assert [spec.action_id for spec in window.get_create_actions()] == [
-        "create_chapter", "create_tag"
+        "create_chapter",
+        "create_tag",
     ]
     assert [spec.action_id for spec in window.get_manage_actions()] == [
-        "rename_node", "move_node_up", "move_node_down", "delete_node"
+        "rename_node",
+        "move_node_up",
+        "move_node_down",
+        "delete_node",
     ]
 
 
-def test_catalog_actions_follow_selected_node_type_and_position(window: MainWindow) -> None:
+def test_catalog_actions_follow_selected_node_type_and_position(
+    window: MainWindow,
+) -> None:
     window.knowledge_tree.setCurrentItem(None)
     window._update_catalog_action_buttons()
     assert [spec.action_id for spec in window.get_create_actions()] == [
-        "create_subject", "create_tag"
+        "create_subject",
+        "create_tag",
     ]
     assert window.get_manage_actions() == ()
     assert not window.catalog_menu_button.isEnabled()
 
-    subject_mode = next(mode for mode in _nav_modes(window) if mode.startswith("subject:"))
+    subject_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("subject:")
+    )
     _select_mode(window, subject_mode)
     assert [spec.action_id for spec in window.get_create_actions()] == [
-        "create_chapter", "create_tag"
+        "create_chapter",
+        "create_tag",
     ]
     subject_actions = window.get_manage_actions()
     assert [spec.label for spec in subject_actions] == [
-        "重命名科目", "科目上移", "科目下移", "删除科目"
+        "重命名科目",
+        "科目上移",
+        "科目下移",
+        "删除科目",
     ]
     assert not subject_actions[1].enabled
     assert not subject_actions[-1].enabled
 
-    chapter_mode = next(mode for mode in _nav_modes(window) if mode.startswith("chapter:"))
+    chapter_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("chapter:")
+    )
     _select_mode(window, chapter_mode)
     assert [spec.action_id for spec in window.get_create_actions()] == [
-        "create_chapter", "create_tag"
+        "create_chapter",
+        "create_tag",
     ]
     assert [spec.label for spec in window.get_manage_actions()] == [
-        "重命名章节", "章节上移", "章节下移", "删除章节"
+        "重命名章节",
+        "章节上移",
+        "章节下移",
+        "删除章节",
     ]
 
     uncategorized_mode = next(
@@ -907,9 +951,7 @@ def test_empty_uncategorized_filter_is_hidden(window: MainWindow) -> None:
     )
     window.refresh_nav()
 
-    assert not any(
-        mode.startswith("uncategorized:") for mode in _nav_modes(window)
-    )
+    assert not any(mode.startswith("uncategorized:") for mode in _nav_modes(window))
 
 
 def test_smart_views_and_search_scopes_are_stable(window: MainWindow) -> None:
@@ -1057,7 +1099,10 @@ def test_low_risk_selection_and_intake_hints_do_not_open_message_box(
     window.intake_page.status_message.connect(messages.append)
     window.intake_page.answer_image = None
     window.intake_page._start_answer_recognition()
-    assert window.intake_page.answer_recognition_status.text() == "请先选择包含作答的图片。"
+    assert (
+        window.intake_page.answer_recognition_status.text()
+        == "请先选择包含作答的图片。"
+    )
     window.intake_page.answer_recognition_result.clear()
     window.intake_page._apply_answer_recognition()
     assert messages[-2:] == ["请先选择包含作答的图片", "没有可填入的作答内容"]
@@ -1099,9 +1144,7 @@ def test_settings_expose_loading_failure_disabled_and_permission_states(
 
     monkeypatch.setattr(settings_dialog_module, "get_secret", lambda _key: None)
     cloud_settings = window.cloud_settings_page
-    cloud_settings.provider.setCurrentIndex(
-        cloud_settings.provider.findData("github")
-    )
+    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("github"))
     assert cloud_settings.cloud_permission_notice.property("state") == "permission"
     assert "当前不可用" in cloud_settings.cloud_permission_notice.text()
     cloud_settings.provider.setCurrentIndex(
@@ -1116,7 +1159,10 @@ def test_settings_dirty_state_only_updates_the_attached_save_button(
 ) -> None:
     pages = (
         (window.ai_settings_page, window.ai_settings_page.apply_ai_button),
-        (window.appearance_settings_page, window.appearance_settings_page.apply_theme_button),
+        (
+            window.appearance_settings_page,
+            window.appearance_settings_page.apply_theme_button,
+        ),
         (window.cloud_settings_page, window.cloud_settings_page.apply_cloud_button),
     )
     for page, save_button in pages:
@@ -1134,9 +1180,7 @@ def test_settings_show_field_level_validation_errors(window: MainWindow) -> None
     assert not ai_settings._field_errors["ai_model"].isHidden()
 
     cloud_settings = window.cloud_settings_page
-    cloud_settings.provider.setCurrentIndex(
-        cloud_settings.provider.findData("github")
-    )
+    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("github"))
     cloud_settings.owner_edit.clear()
     cloud_settings.repo_edit.clear()
     cloud_settings._save_cloud_settings()
@@ -1156,9 +1200,7 @@ def test_settings_secrets_are_hidden_by_default_and_can_be_revealed(
     assert ai_settings.ai_token_visibility_button.text() == "隐藏"
 
     cloud_settings = window.cloud_settings_page
-    cloud_settings.provider.setCurrentIndex(
-        cloud_settings.provider.findData("github")
-    )
+    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("github"))
     assert cloud_settings.token_edit.echoMode() == QLineEdit.EchoMode.Password
     cloud_settings.token_visibility_button.click()
     assert cloud_settings.token_edit.echoMode() == QLineEdit.EchoMode.Normal

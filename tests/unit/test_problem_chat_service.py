@@ -17,10 +17,14 @@ from yancuo_win.ai.base import (
     StructuredResult,
 )
 from yancuo_win.application.bootstrap import bootstrap_runtime
-from yancuo_win.application.problem_chat_service import ProblemChatService, ProblemReference
+from yancuo_win.application.problem_chat_service import (
+    ProblemChatService,
+    ProblemReference,
+)
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.models import Asset
+from yancuo_win.domain.rules import DomainError
 
 
 class _CapturingChatProvider:
@@ -56,7 +60,9 @@ class _CapturingChatProvider:
 
 
 @pytest.fixture()
-def chat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AppServices, ProblemChatService]:
+def chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[AppServices, ProblemChatService]:
     monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
     runtime = bootstrap_runtime()
@@ -82,12 +88,14 @@ def test_problem_chat_persists_snapshot_messages_and_export(
     assert loaded.messages[0].status == "complete"
     problem_chat.save_conversation(conversation.id)
     assert problem_chat.get_conversation(conversation.id).status == "saved"  # type: ignore[union-attr]
-    export = problem_chat.export_conversation_markdown(conversation.id, tmp_path / "chat.md")
+    export = problem_chat.export_conversation_markdown(
+        conversation.id, tmp_path / "chat.md"
+    )
     assert "积分讨论" in export.read_text(encoding="utf-8")
 
 
 def test_failed_chat_keeps_pending_user_message_as_failed(
-    chat: tuple[AppServices, ProblemChatService]
+    chat: tuple[AppServices, ProblemChatService],
 ) -> None:
     services, problem_chat = chat
     problem = services.create_problem(title="失败题", status="active")
@@ -237,17 +245,45 @@ def test_visual_reference_snapshot_is_ordered_and_immutable(
     assert image.save(str(image_path), "PNG")
     stored = services.store.store_copy(image_path, role="original")
     with problem_chat._session() as session:
-        session.add(Asset(id="asset_reference", problem_id=problem.id, role="original", sha256=stored.sha256, relative_path=stored.relative_path, mime_type="image/png"))
+        session.add(
+            Asset(
+                id="asset_reference",
+                problem_id=problem.id,
+                role="original",
+                sha256=stored.sha256,
+                relative_path=stored.relative_path,
+                mime_type="image/png",
+            )
+        )
         session.commit()
     provider = _CapturingChatProvider()
     monkeypatch.setattr(chat_module, "get_provider", lambda *_args: provider)
     conversation = problem_chat.create_conversation(problem.id)
     reference = ProblemReference("asset_reference", 0, 0.25, 0.0, 0.5, 1.0)
 
-    assert problem_chat.send_message(conversation.id, "只解释中间部分", [reference]).status == "complete"
+    assert (
+        problem_chat.send_message(conversation.id, "只解释中间部分", [reference]).status
+        == "complete"
+    )
     loaded = problem_chat.get_conversation(conversation.id)
     assert loaded is not None
-    assert loaded.messages[0].reference_snapshot_json == '[{"asset_id": "asset_reference", "page_index": 0, "x": 0.25, "y": 0.0, "width": 0.5, "height": 1.0}]'
+    assert (
+        loaded.messages[0].reference_snapshot_json
+        == '[{"asset_id": "asset_reference", "page_index": 0, "x": 0.25, "y": 0.0, "width": 0.5, "height": 1.0}]'
+    )
     payload = provider.requests[0][1]["content"]
     assert payload[0]["type"] == "text"
     assert payload[2]["type"] == "image_url"
+    assert payload[2]["image_url"]["url"].startswith("data:image/png;base64,")
+    crop = QImage.fromData(
+        base64.b64decode(payload[2]["image_url"]["url"].split(",", 1)[1])
+    )
+    assert crop.size().width() == 20
+    assert crop.size().height() == 20
+
+    with pytest.raises(DomainError, match="不属于当前题目"):
+        problem_chat.send_message(
+            conversation.id,
+            "伪造引用",
+            [ProblemReference("asset_reference", 1, 0.0, 0.0, 1.0, 1.0)],
+        )

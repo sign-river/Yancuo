@@ -34,17 +34,37 @@ class ProblemReference:
     height: float
 
     def as_dict(self) -> dict[str, Any]:
-        return {"asset_id": self.asset_id, "page_index": self.page_index, "x": self.x, "y": self.y, "width": self.width, "height": self.height}
+        return {
+            "asset_id": self.asset_id,
+            "page_index": self.page_index,
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+        }
 
     @classmethod
     def from_value(cls, value: ProblemReference | dict[str, Any]) -> ProblemReference:
         if isinstance(value, cls):
             return value
         try:
-            reference = cls(str(value["asset_id"]), int(value["page_index"]), float(value["x"]), float(value["y"]), float(value["width"]), float(value["height"]))
+            reference = cls(
+                str(value["asset_id"]),
+                int(value["page_index"]),
+                float(value["x"]),
+                float(value["y"]),
+                float(value["width"]),
+                float(value["height"]),
+            )
         except (KeyError, TypeError, ValueError) as exc:
             raise DomainError("引用区域格式无效") from exc
-        if not reference.asset_id or not 0 <= reference.x < 1 or not 0 <= reference.y < 1 or not 0 < reference.width <= 1 - reference.x or not 0 < reference.height <= 1 - reference.y:
+        if (
+            not reference.asset_id
+            or not 0 <= reference.x < 1
+            or not 0 <= reference.y < 1
+            or not 0 < reference.width <= 1 - reference.x
+            or not 0 < reference.height <= 1 - reference.y
+        ):
             raise DomainError("引用区域坐标无效")
         return reference
 
@@ -100,11 +120,13 @@ class ProblemChatService:
 
     def list_conversations(self, problem_id: str) -> list[ProblemConversation]:
         with self._session() as session:
-            rows = list(session.scalars(
-                select(ProblemConversation)
-                .where(ProblemConversation.problem_id == problem_id)
-                .order_by(ProblemConversation.updated_at.desc())
-            ).all())
+            rows = list(
+                session.scalars(
+                    select(ProblemConversation)
+                    .where(ProblemConversation.problem_id == problem_id)
+                    .order_by(ProblemConversation.updated_at.desc())
+                ).all()
+            )
             session.expunge_all()
             return rows
 
@@ -112,10 +134,20 @@ class ProblemChatService:
         """Return immutable originals in the same stable order used for consented sends."""
 
         with self._session() as session:
-            assets = list(session.scalars(select(Asset).where(Asset.problem_id == problem_id, Asset.role == "original").order_by(Asset.created_at.asc(), Asset.id.asc())))
+            assets = list(
+                session.scalars(
+                    select(Asset)
+                    .where(Asset.problem_id == problem_id, Asset.role == "original")
+                    .order_by(Asset.created_at.asc(), Asset.id.asc())
+                )
+            )
             sources = [(asset.id, asset.relative_path) for asset in assets]
         store = ObjectStore(self.runtime.paths.asset_objects_dir)
-        return [{"asset_id": asset_id, "page_index": index, "path": store.resolve(relative_path)} for index, (asset_id, relative_path) in enumerate(sources) if store.resolve(relative_path).is_file()]
+        return [
+            {"asset_id": asset_id, "page_index": index, "path": store.resolve(relative_path)}
+            for index, (asset_id, relative_path) in enumerate(sources)
+            if store.resolve(relative_path).is_file()
+        ]
 
     def get_conversation(self, conversation_id: str) -> ProblemConversation | None:
         with self._session() as session:
@@ -154,16 +186,38 @@ class ProblemChatService:
             session.delete(conversation)
             session.commit()
 
-    def send_message(self, conversation_id: str, content: str, references: Sequence[ProblemReference | dict[str, Any]] = ()) -> ProblemMessage:
+    def send_message(
+        self,
+        conversation_id: str,
+        content: str,
+        references: Sequence[ProblemReference | dict[str, Any]] = (),
+    ) -> ProblemMessage:
         content = content.strip()
         if not content:
             raise DomainError("请输入要讨论的问题")
-        reference_snapshot = [ProblemReference.from_value(value).as_dict() for value in references]
-        reference_json = json.dumps(reference_snapshot, ensure_ascii=False)
+        parsed_references = [ProblemReference.from_value(value) for value in references]
         with self._session() as session:
             conversation = session.get(ProblemConversation, conversation_id)
             if conversation is None:
                 raise DomainError("对话不存在")
+            originals = list(
+                session.scalars(
+                    select(Asset)
+                    .where(
+                        Asset.problem_id == conversation.problem_id,
+                        Asset.role == "original",
+                    )
+                    .order_by(Asset.created_at.asc(), Asset.id.asc())
+                )
+            )
+            source_pages = {asset.id: index for index, asset in enumerate(originals)}
+            for reference in parsed_references:
+                if source_pages.get(reference.asset_id) != reference.page_index:
+                    raise DomainError("引用区域不属于当前题目或页码已失效")
+            reference_json = json.dumps(
+                [reference.as_dict() for reference in parsed_references],
+                ensure_ascii=False,
+            )
             latest = session.scalar(
                 select(ProblemMessage)
                 .where(ProblemMessage.conversation_id == conversation_id)
@@ -181,14 +235,17 @@ class ProblemChatService:
                 user_message.status = "pending"
                 user_message.error_message = ""
             else:
-                sequence = int(
-                    session.scalar(
-                        select(func.max(ProblemMessage.sequence)).where(
-                            ProblemMessage.conversation_id == conversation_id
+                sequence = (
+                    int(
+                        session.scalar(
+                            select(func.max(ProblemMessage.sequence)).where(
+                                ProblemMessage.conversation_id == conversation_id
+                            )
                         )
+                        or 0
                     )
-                    or 0
-                ) + 1
+                    + 1
+                )
                 user_message = ProblemMessage(
                     id=new_id("message"),
                     conversation_id=conversation_id,
@@ -225,9 +282,14 @@ class ProblemChatService:
             pending.status = "complete"
             next_sequence = pending.sequence + 1
             assistant = ProblemMessage(
-                id=new_id("message"), conversation_id=conversation_id, sequence=next_sequence,
-                role="assistant", content_markdown=response.content_markdown, status="complete",
-                prompt_tokens=response.prompt_tokens, completion_tokens=response.completion_tokens,
+                id=new_id("message"),
+                conversation_id=conversation_id,
+                sequence=next_sequence,
+                role="assistant",
+                content_markdown=response.content_markdown,
+                status="complete",
+                prompt_tokens=response.prompt_tokens,
+                completion_tokens=response.completion_tokens,
                 cost_estimate=response.cost_estimate,
             )
             session.add(assistant)
@@ -257,11 +319,20 @@ class ProblemChatService:
             }
         ]
         for message in conversation.messages:
-            include = (
-                message.role == "user" and message.status in {"complete", "pending"}
-            ) or (message.role == "assistant" and message.status == "complete")
+            include = (message.role == "user" and message.status in {"complete", "pending"}) or (
+                message.role == "assistant" and message.status == "complete"
+            )
             if include:
-                messages.append({"role": message.role, "content": self._message_content(conversation.problem_id, message, provider.capabilities.supports_chat_images)})
+                messages.append(
+                    {
+                        "role": message.role,
+                        "content": self._message_content(
+                            conversation.problem_id,
+                            message,
+                            provider.capabilities.supports_chat_images,
+                        ),
+                    }
+                )
         if conversation.include_original_image and provider.capabilities.supports_chat_images:
             image_content = self._original_image_context(conversation.problem_id)
             if image_content:
@@ -272,7 +343,9 @@ class ProblemChatService:
             timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
         )
 
-    def _message_content(self, problem_id: str, message: ProblemMessage, include_images: bool) -> str | list[dict[str, Any]]:
+    def _message_content(
+        self, problem_id: str, message: ProblemMessage, include_images: bool
+    ) -> str | list[dict[str, Any]]:
         if message.role != "user":
             return message.content_markdown
         try:
@@ -283,15 +356,27 @@ class ProblemChatService:
             return message.content_markdown
         if not include_images:
             return f"{message.content_markdown}\n\n用户选择了 {len(references)} 个视觉引用，但当前提供商不支持图片对话。"
-        content: list[dict[str, Any]] = [{"type": "text", "text": f"{message.content_markdown}\n\n用户明确框选了以下 {len(references)} 个视觉引用；请优先回答选区，同时结合完整题目上下文。"}]
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": f"{message.content_markdown}\n\n用户明确框选了以下 {len(references)} 个视觉引用；请优先回答选区，同时结合完整题目上下文。",
+            }
+        ]
         content.extend(self._reference_image_context(problem_id, references))
         return content
 
-    def _reference_image_context(self, problem_id: str, references: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _reference_image_context(
+        self, problem_id: str, references: Sequence[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Rebuild ordered crops from immutable originals without sending full images."""
 
         with self._session() as session:
-            sources = {asset.id: (asset.relative_path, asset.mime_type or "image/png") for asset in session.scalars(select(Asset).where(Asset.problem_id == problem_id, Asset.role == "original"))}
+            sources = {
+                asset.id: asset.relative_path
+                for asset in session.scalars(
+                    select(Asset).where(Asset.problem_id == problem_id, Asset.role == "original")
+                )
+            }
         store = ObjectStore(self.runtime.paths.asset_objects_dir)
         content: list[dict[str, Any]] = []
         for index, value in enumerate(references, start=1):
@@ -299,19 +384,34 @@ class ProblemChatService:
             source = sources.get(reference.asset_id)
             if source is None:
                 continue
-            relative_path, mime_type = source
-            image = QImage(str(store.resolve(relative_path)))
+            image = QImage(str(store.resolve(source)))
             if image.isNull():
                 continue
             x, y = round(image.width() * reference.x), round(image.height() * reference.y)
-            width, height = max(1, round(image.width() * reference.width)), max(1, round(image.height() * reference.height))
+            width, height = (
+                max(1, round(image.width() * reference.width)),
+                max(1, round(image.height() * reference.height)),
+            )
             crop = image.copy(x, y, min(width, image.width() - x), min(height, image.height() - y))
             encoded = QByteArray()
             buffer = QBuffer(encoded)
             buffer.open(QIODevice.OpenModeFlag.WriteOnly)
             crop.save(buffer, "PNG")
             buffer.close()
-            content.extend([{"type": "text", "text": f"引用区域 {index}（第 {reference.page_index + 1} 页）"}, {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64.b64encode(bytes(encoded)).decode('ascii')}"}}])
+            content.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": f"引用区域 {index}（第 {reference.page_index + 1} 页）",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{base64.b64encode(bytes(encoded)).decode('ascii')}"
+                        },
+                    },
+                ]
+            )
         return content
 
     def _original_image_context(self, problem_id: str) -> list[dict[str, Any]]:
@@ -320,7 +420,7 @@ class ProblemChatService:
         with self._session() as session:
             assets = list(
                 session.scalars(
-                select(Asset)
+                    select(Asset)
                     .where(
                         Asset.problem_id == problem_id,
                         Asset.role == "original",
@@ -330,10 +430,7 @@ class ProblemChatService:
             )
             if not assets:
                 return []
-            sources = [
-                (asset.relative_path, asset.mime_type or "image/jpeg")
-                for asset in assets
-            ]
+            sources = [(asset.relative_path, asset.mime_type or "image/jpeg") for asset in assets]
         store = ObjectStore(self.runtime.paths.asset_objects_dir)
         content: list[dict[str, Any]] = [
             {"type": "text", "text": "用户已明确授权附带当前题目的原图。"},
