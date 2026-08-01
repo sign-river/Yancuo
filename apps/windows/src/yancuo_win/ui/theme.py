@@ -926,6 +926,20 @@ def app_stylesheet(theme: str = "light") -> str:
     QLineEdit#SearchInput:focus {{
         border-color: {t.focus_ring};
     }}
+    QLineEdit#ReviewPlanNameInput {{
+        background: {t.surface};
+        border: 1px solid {t.border_strong};
+        border-radius: {m.radius_control}px;
+        padding: 0 10px;
+        min-height: 0;
+        max-height: 38px;
+    }}
+    QLineEdit#ReviewPlanNameInput:hover {{
+        border-color: {t.hover_border};
+    }}
+    QLineEdit#ReviewPlanNameInput:focus {{
+        border: 1px solid #7C5CFF;
+    }}
 
     QPushButton {{
         background: {t.surface};
@@ -1133,9 +1147,7 @@ def app_stylesheet(theme: str = "light") -> str:
     QFrame#ToastContent {{
         background: {t.card};
         border: 1px solid {t.border_strong};
-        border-bottom: none;
-        border-top-left-radius: {m.radius_floating}px;
-        border-top-right-radius: {m.radius_floating}px;
+        border-radius: {m.radius_item}px;
     }}
     QFrame#ToastProgressFrame {{
         background: {t.card};

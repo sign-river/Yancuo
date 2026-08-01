@@ -260,6 +260,8 @@ class ReviewPlanBuilder(QWidget):
         remove.clicked.connect(self._remove_selected)
         layout.addWidget(remove)
         self.plan_name = QLineEdit()
+        self.plan_name.setObjectName("ReviewPlanNameInput")
+        self.plan_name.setFixedHeight(38)
         describe_field(self.plan_name, "复习计划名称")
         self.plan_name.setPlaceholderText("复习计划名称")
         layout.addWidget(self.plan_name)

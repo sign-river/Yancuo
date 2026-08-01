@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -409,8 +410,8 @@ class ToastMessage(QFrame):
         self.setObjectName("ToastMessage")
         self.setAccessibleName("操作反馈")
         self.setCursor(Qt.CursorShape.ArrowCursor)
-        self.setMinimumWidth(300)
-        self.setMaximumWidth(420)
+        self.setMinimumWidth(280)
+        self.setMaximumWidth(360)
         self.setVisible(False)
         self._on_activated: Callable[[], None] | None = None
         self._duration_ms = 2800
@@ -422,11 +423,16 @@ class ToastMessage(QFrame):
         self.content = QFrame()
         self.content.setObjectName("ToastContent")
         content_layout = QHBoxLayout(self.content)
-        content_layout.setContentsMargins(14, 10, 14, 10)
+        content_layout.setContentsMargins(12, 9, 12, 9)
         self.label = QLabel("")
         self.label.setObjectName("ToastText")
         self.label.setWordWrap(True)
         content_layout.addWidget(self.label)
+        shadow = QGraphicsDropShadowEffect(self.content)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 5)
+        shadow.setColor(QColor(15, 23, 42, 42))
+        self.content.setGraphicsEffect(shadow)
         self.progress_frame = QFrame()
         self.progress_frame.setObjectName("ToastProgressFrame")
         progress_layout = QVBoxLayout(self.progress_frame)
@@ -436,6 +442,8 @@ class ToastMessage(QFrame):
         self.progress.setTextVisible(False)
         self.progress.setInvertedAppearance(True)
         progress_layout.addWidget(self.progress)
+        # Keep the countdown state for timing and tests without rendering it as a progress bar.
+        self.progress_frame.setVisible(False)
         layout.addWidget(self.content)
         layout.addWidget(self.progress_frame)
         self._timer = QTimer(self)
@@ -467,8 +475,8 @@ class ToastMessage(QFrame):
         self.progress.setRange(0, self._duration_ms)
         self.progress.setValue(self._remaining_ms)
         self.adjustSize()
-        target_x = max(12, parent.width() - self.width() - 20)
-        target_y = 48
+        target_x = max(12, parent.width() - self.width() - 16)
+        target_y = 52
         self.move(parent.width() + 8, target_y)
         self.raise_()
         self.show()
