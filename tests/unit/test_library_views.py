@@ -381,6 +381,25 @@ def test_service_settings_use_a_compact_aligned_form_surface(
     assert cloud_settings.clear_cloud_token_button.objectName() == "DangerButton"
 
 
+def test_system_theme_choice_remains_highlighted_when_system_is_dark(
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appearance_settings = window.appearance_settings_page
+    monkeypatch.setattr(settings_dialog_module, "current_theme_name", lambda: "dark")
+
+    appearance_settings.theme_mode.setCurrentIndex(
+        appearance_settings.theme_mode.findData("system")
+    )
+    assert appearance_settings.theme_mode.currentData() == "system"
+    appearance_settings._refresh_theme_status()
+
+    assert appearance_settings.theme_buttons["system"].property("themeSelected") is True
+    assert appearance_settings.theme_buttons["light"].property("themeSelected") is False
+    assert appearance_settings.theme_buttons["dark"].property("themeSelected") is False
+    assert "深色" in appearance_settings.theme_status.text()
+
+
 def test_review_plan_builder_warns_before_creating_an_empty_plan(
     window: MainWindow,
 ) -> None:
