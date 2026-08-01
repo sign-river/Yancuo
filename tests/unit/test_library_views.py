@@ -36,6 +36,10 @@ from yancuo_win.ui.widgets import SoftItemDelegate, ThemedTreeBranchStyle
 
 
 class _ReaderStub(QWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._scroll_position = 0
+
     def set_accessible_content(self, name, description="") -> None:
         self.setAccessibleName(name)
         self.setAccessibleDescription(description)
@@ -64,6 +68,15 @@ class _ReaderStub(QWidget):
 
     def set_note(self, *_args, **_kwargs) -> None:
         pass
+
+    def scroll_position(self) -> int:
+        return self._scroll_position
+
+    def restore_scroll_position(self, value: int) -> None:
+        self._scroll_position = value
+
+    def scroll_to_bottom(self) -> None:
+        self._scroll_position = 999
 
 
 @pytest.fixture()
@@ -370,6 +383,59 @@ def test_problem_detail_chat_prefers_reader_width_and_selection_overlay(
 
     page.reference_overlay.setGeometry(page.reader.rect())
     assert page.reference_overlay.geometry().size() == page.reader.size()
+
+
+def test_problem_detail_chat_preserves_focus_layout_scroll_and_conversation(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    window.show()
+    app.processEvents()
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
+    first = window.problem_chat.create_conversation(problem.id, title="第一段讨论")
+    second = window.problem_chat.create_conversation(problem.id, title="当前讨论")
+    window._open_problem_detail(problem.id)
+    page = window.problem_detail_page
+    window.resize(1366, 760)
+    app.processEvents()
+    page.chat_button.setFocus()
+    page._toggle_chat()
+    app.processEvents()
+
+    assert page.workspace.orientation() == Qt.Orientation.Horizontal
+    assert page.reader.isVisible()
+    assert page.chat_card.isVisible()
+    assert app.focusWidget() is page.chat_input
+    page.conversation_combo.setCurrentIndex(page.conversation_combo.findData(second.id))
+    page.reader._scroll_position = 47
+
+    window.resize(760, 760)
+    app.processEvents()
+    assert page.workspace.orientation() == Qt.Orientation.Vertical
+    assert page.reader.isHidden()
+    assert page.chat_button.text() == "查看题目"
+    page._toggle_chat()
+    app.processEvents()
+    assert page.chat_card.isHidden()
+    assert page.reader.isVisible()
+    assert app.focusWidget() is page.reader
+
+    window._close_problem_detail()
+    window._open_problem_detail(problem.id)
+    page._restore_reader_scroll()
+    assert page.conversation_combo.currentData() == second.id
+    assert page.reader.scroll_position() == 47
+
+    window.resize(1920, 900)
+    page._toggle_chat()
+    app.processEvents()
+    assert page.workspace.orientation() == Qt.Orientation.Horizontal
+    assert page.reader.isVisible()
+    assert page.chat_card.isVisible()
+    assert page.conversation_combo.findData(first.id) >= 0
 
 
 def test_problem_detail_reference_canvas_never_opens_as_window(

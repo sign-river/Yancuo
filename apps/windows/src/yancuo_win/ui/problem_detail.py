@@ -8,6 +8,7 @@ from typing import Any
 from PySide6.QtCore import QPoint, QRect, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QCheckBox,
     QBoxLayout,
@@ -319,6 +320,10 @@ class ProblemDetailPage(QWidget):
         self.problem_id: str | None = None
         self._image_path: Path | None = None
         self._chat_worker: ProblemChatWorker | None = None
+        self._conversation_by_problem: dict[str, str] = {}
+        self._reader_scroll_by_problem: dict[str, int] = {}
+        self._pending_reader_scroll = 0
+        self._focus_before_chat: QWidget | None = None
         self.setObjectName("PageRoot")
 
         root = QVBoxLayout(self)
@@ -414,6 +419,8 @@ class ProblemDetailPage(QWidget):
             "只读题目内容；可使用方向键或翻页键浏览长内容",
         )
         self.reader.setMinimumWidth(0)
+        if hasattr(self.reader, "render_completed"):
+            self.reader.render_completed.connect(self._restore_reader_scroll)
         self.reference_overlay = _ReaderReferenceOverlay(self.reader)
         self.reference_overlay.region_selected.connect(self._add_reader_reference)
         self.workspace = QSplitter(Qt.Orientation.Horizontal)
@@ -429,7 +436,7 @@ class ProblemDetailPage(QWidget):
         chat_toolbar.setSpacing(8)
         self.conversation_combo = QComboBox()
         describe_field(self.conversation_combo, "AI 讨论会话", "选择已保存的题目讨论")
-        self.conversation_combo.currentIndexChanged.connect(self._load_conversation)
+        self.conversation_combo.currentIndexChanged.connect(self._conversation_changed)
         new_chat = QPushButton("新对话")
         new_chat.clicked.connect(self._new_conversation)
         rename_chat = QPushButton("命名")
@@ -464,6 +471,8 @@ class ProblemDetailPage(QWidget):
             "AI 讨论记录",
             "只读对话历史；可使用方向键浏览",
         )
+        if hasattr(self.chat_history, "render_completed"):
+            self.chat_history.render_completed.connect(self.chat_history.scroll_to_bottom)
         self.chat_card.body.addWidget(self.chat_history)
         reference_row = QHBoxLayout()
         self.add_reference_button = QPushButton("添加框选")
@@ -529,7 +538,14 @@ class ProblemDetailPage(QWidget):
         subject_name: str | None = None,
         chapter_name: str | None = None,
     ) -> None:
+        if self.problem_id:
+            scroll_position = getattr(self.reader, "scroll_position", None)
+            if callable(scroll_position):
+                self._reader_scroll_by_problem[self.problem_id] = scroll_position()
+            if conversation_id := self._conversation_id():
+                self._conversation_by_problem[self.problem_id] = conversation_id
         self.problem_id = problem.id
+        self._pending_reader_scroll = self._reader_scroll_by_problem.get(problem.id, 0)
         self.title_label.setText(problem.title or "无标题题目")
         is_trashed = problem.status == "trashed"
         self.review_button.setVisible(not is_trashed and problem.status != "archived")
@@ -573,6 +589,8 @@ class ProblemDetailPage(QWidget):
             "打开可缩放原图" if self._image_path else "原始图片不存在或不可读取"
         )
         self.chat_card.setVisible(False)
+        self.reader.setVisible(True)
+        self.chat_button.setText("AI 讨论")
         self._configure_reference_source()
         self._refresh_conversations()
 
@@ -591,7 +609,12 @@ class ProblemDetailPage(QWidget):
             self.reader.setVisible(True)
             self.chat_card.setVisible(False)
             self.chat_button.setText("AI 讨论")
+            self.reader.setFocus(Qt.FocusReason.OtherFocusReason)
             return
+        opening = not self.chat_card.isVisible()
+        if opening:
+            focus = QApplication.focusWidget()
+            self._focus_before_chat = focus if focus and self.isAncestorOf(focus) else self.reader
         self.chat_card.setVisible(not self.chat_card.isVisible())
         if self.chat_card.isVisible():
             if self.width() < 860:
@@ -599,6 +622,11 @@ class ProblemDetailPage(QWidget):
                 self.chat_button.setText("查看题目")
             self._set_chat_split_sizes()
             self._refresh_conversations()
+            self.chat_input.setFocus(Qt.FocusReason.OtherFocusReason)
+        else:
+            target = self._focus_before_chat or self.reader
+            if target.isVisible() and target.isEnabled():
+                target.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
@@ -607,7 +635,10 @@ class ProblemDetailPage(QWidget):
         self._update_toolbar_layout()
         narrow = self.width() < 860
         self.workspace.setOrientation(Qt.Orientation.Vertical if narrow else Qt.Orientation.Horizontal)
-        if not narrow:
+        if narrow and self.chat_card.isVisible():
+            self.reader.setVisible(False)
+            self.chat_button.setText("查看题目")
+        elif not narrow:
             self.reader.setVisible(True)
             self.chat_button.setText("AI 讨论")
             if self.chat_card.isVisible():
@@ -674,13 +705,31 @@ class ProblemDetailPage(QWidget):
         )
 
     def _refresh_conversations(self) -> None:
+        preferred = (
+            self._conversation_by_problem.get(self.problem_id or "")
+            or self._conversation_id()
+        )
         self.conversation_combo.blockSignals(True)
         self.conversation_combo.clear()
         if self.chat is not None and self.problem_id:
             for conversation in self.chat.list_conversations(self.problem_id):
                 self.conversation_combo.addItem(conversation.title, conversation.id)
+        if preferred:
+            index = self.conversation_combo.findData(preferred)
+            if index >= 0:
+                self.conversation_combo.setCurrentIndex(index)
         self.conversation_combo.blockSignals(False)
         self._load_conversation()
+
+    def _conversation_changed(self, *_args) -> None:
+        if self.problem_id and (conversation_id := self._conversation_id()):
+            self._conversation_by_problem[self.problem_id] = conversation_id
+        self._load_conversation()
+
+    def _restore_reader_scroll(self) -> None:
+        restore = getattr(self.reader, "restore_scroll_position", None)
+        if callable(restore):
+            restore(self._pending_reader_scroll)
 
     def _conversation_id(self) -> str | None:
         value = self.conversation_combo.currentData()

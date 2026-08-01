@@ -637,6 +637,7 @@ class MathContentView(QWidget):
     """
 
     content_height_changed = Signal()
+    render_completed = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -842,6 +843,19 @@ class MathContentView(QWidget):
         page.deleteLater()
         if self.last_html != rendered_html:
             self._schedule_render()
+        else:
+            self.render_completed.emit()
+
+    def scroll_position(self) -> int:
+        return self._view.verticalScrollBar().value()
+
+    def restore_scroll_position(self, value: int) -> None:
+        scrollbar = self._view.verticalScrollBar()
+        scrollbar.setValue(max(scrollbar.minimum(), min(int(value), scrollbar.maximum())))
+
+    def scroll_to_bottom(self) -> None:
+        scrollbar = self._view.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _html_loaded(
         self, page: QWebEnginePage, generation: int, loaded: bool

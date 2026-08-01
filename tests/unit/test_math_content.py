@@ -196,6 +196,19 @@ def test_adaptive_reader_fits_short_content_and_scrolls_long_content() -> None:
     app.processEvents()
 
 
+def test_reader_scroll_helpers_restore_position_and_follow_long_chat() -> None:
+    QApplication.instance() or QApplication([])
+    reader = MathContentView()
+    scrollbar = reader._view.verticalScrollBar()
+    scrollbar.setRange(0, 240)
+
+    reader.restore_scroll_position(73)
+    assert reader.scroll_position() == 73
+
+    reader.scroll_to_bottom()
+    assert reader.scroll_position() == 240
+
+
 def test_reserved_adaptive_reader_keeps_stable_height() -> None:
     app = QApplication.instance() or QApplication([])
     reader = MathContentView()
