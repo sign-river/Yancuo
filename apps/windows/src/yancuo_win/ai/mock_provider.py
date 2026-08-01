@@ -60,8 +60,15 @@ class MockProvider(AIProvider):
         )
 
     def structure_from_images(
-        self, *, image_paths: list[str], prompt: str, model: str, timeout_seconds: int
+        self,
+        *,
+        image_paths: list[str],
+        prompt: str,
+        model: str,
+        timeout_seconds: int,
+        retry_attempts: int | None = None,
     ) -> StructuredResult:
+        del retry_attempts
         if not image_paths:
             raise ValueError("image_paths must not be empty")
         result = self.structure_from_image(

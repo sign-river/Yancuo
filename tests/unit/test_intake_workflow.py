@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -1180,3 +1181,35 @@ def test_user_answer_image_recognition_extracts_only_answer(
     )
 
     assert answer == "（Mock）用户作答占位"
+
+
+def test_user_answer_recognition_uses_bounded_single_attempt_and_logs_metadata(
+    intake: ProblemIntakeService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    image = tmp_path / "answer.jpg"
+    image.write_bytes(b"\xff\xd8\xffanswer-image")
+    calls: dict[str, object] = {}
+
+    class Provider:
+        def validate_configuration(self) -> None:
+            pass
+
+        def structure_from_images(self, **kwargs: object) -> StructuredResult:
+            calls.update(kwargs)
+            return StructuredResult(fields={"user_answer": "x = 1"})
+
+    intake.runtime.settings.ai.request_timeout_seconds = 120
+    monkeypatch.setattr(
+        "yancuo_win.application.intake_service.get_provider", lambda _settings: Provider()
+    )
+    caplog.set_level(logging.INFO, logger="yancuo")
+
+    assert intake.recognize_user_answer_image(image) == "x = 1"
+    assert calls["timeout_seconds"] == 45
+    assert calls["retry_attempts"] == 1
+    assert "user answer recognition started" in caplog.text
+    assert "user answer recognition completed" in caplog.text
+    assert str(image) not in caplog.text
