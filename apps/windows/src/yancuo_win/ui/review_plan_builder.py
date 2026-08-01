@@ -485,12 +485,12 @@ class ReviewPlanBuilder(QWidget):
         if not ids:
             message = "请先从左侧选择题目或笔记，并加入计划草稿。"
             self.status_message.emit(message)
-            self.toast.show_message(message)
+            self.toast.show_message(message, tone="warning")
             return
         if not name:
             message = "请填写复习计划名称。"
             self.status_message.emit(message)
-            self.toast.show_message(message)
+            self.toast.show_message(message, tone="warning")
             self.plan_name.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         count = len(ids)
