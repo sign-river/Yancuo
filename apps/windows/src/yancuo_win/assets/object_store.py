@@ -74,10 +74,23 @@ class ObjectStore:
     def resolve(self, relative_path: str) -> Path:
         # relative_path 形如 objects/ab/ab….jpg，根为 asset_dir
         # objects_root 即 asset_dir/objects，故相对路径若含 objects/ 前缀需剥掉
+        if not isinstance(relative_path, str) or not relative_path.strip():
+            raise DomainError("资源相对路径为空")
         rel = relative_path.replace("\\", "/")
+        if "\x00" in rel or Path(rel).is_absolute() or ":" in rel:
+            raise DomainError("资源相对路径无效")
+        root = self.objects_root.resolve()
         if rel.startswith("objects/"):
-            return (self.objects_root.parent / rel).resolve()
-        return (self.objects_root / rel).resolve()
+            candidate = (root.parent / rel).resolve(strict=False)
+        else:
+            candidate = (root / rel).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise DomainError("资源路径超出对象库") from exc
+        if candidate == root:
+            raise DomainError("资源路径必须指向对象文件")
+        return candidate
 
     def assert_can_replace(self, role: str, is_immutable: bool) -> None:
         assert_asset_writable(role, is_immutable)
