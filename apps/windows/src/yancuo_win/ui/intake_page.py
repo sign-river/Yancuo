@@ -871,8 +871,13 @@ class ProblemForm(QWidget):
             not chapter_id
             and isinstance(proposal, dict)
             and str(proposal.get("chapter_name") or "").strip()
-            and subject_id
         ):
+            if not subject_id and proposal_subject:
+                self.subject.insertItem(1, f"AI 建议新建：{proposal_subject}", None)
+                self.subject.setItemData(
+                    1, True, Qt.ItemDataRole.UserRole + 1
+                )
+                self.subject.setCurrentIndex(1)
             self._taxonomy_proposal = dict(proposal)
             chapter_name = str(proposal["chapter_name"]).strip()
             self.chapter.insertItem(1, f"AI 建议新建：{chapter_name}", None)
@@ -887,9 +892,10 @@ class ProblemForm(QWidget):
                 else ""
             )
             reason = str(proposal.get("reason") or "请确认后创建")
+            target = "科目及该章节" if not subject_id else "该章节"
             self.taxonomy_hint.setText(
                 f"章节建议{confidence_text}：{reason}。"
-                "确认入库时会创建该章节；也可以改选现有章节或“未指定”。"
+                f"确认入库时会创建{target}；也可以改选现有章节或“未指定”。"
             )
             self._sync_taxonomy_hint_visibility()
         else:
