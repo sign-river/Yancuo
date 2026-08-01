@@ -126,8 +126,10 @@ class ServiceSettingsPage(QWidget):
             self.theme_buttons: dict[str, QPushButton] = {}
             for label, mode in (("跟随系统", "system"), ("浅色", "light"), ("深色", "dark")):
                 button = QPushButton(label)
+                button.setObjectName("ThemeModeButton")
                 button.setCheckable(True)
                 button.setProperty("themeMode", mode)
+                button.setAccessibleDescription("选择此主题模式")
                 self.theme_button_group.addButton(button)
                 self.theme_buttons[mode] = button
                 theme_row.addWidget(button)
@@ -171,7 +173,9 @@ class ServiceSettingsPage(QWidget):
             self.apply_theme_button.clicked.connect(self._apply_theme)
             appearance.body.addLayout(button_row(self.apply_theme_button))
             set_tab_order_chain(
-                self.theme_mode,
+                self.theme_buttons["system"],
+                self.theme_buttons["light"],
+                self.theme_buttons["dark"],
                 self.preview_zoom,
                 self.apply_theme_button,
             )
