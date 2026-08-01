@@ -57,3 +57,21 @@ def test_toast_message_slides_in_counts_down_and_supports_click_actions() -> Non
     assert activated == ["open"]
     assert toast.isHidden()
     toast.close()
+
+
+def test_warning_toast_is_larger_and_uses_warning_tone() -> None:
+    app = QApplication.instance() or QApplication([])
+    host = QWidget()
+    host.resize(900, 600)
+    host.show()
+    app.processEvents()
+    toast = ToastMessage(host)
+
+    toast.show_message("请填写复习计划名称。", tone="warning")
+
+    assert toast.isVisible()
+    assert toast.property("tone") == "warning"
+    assert toast.content.property("tone") == "warning"
+    assert toast.minimumWidth() == 420
+    assert toast.content.minimumHeight() == 68
+    toast.close()

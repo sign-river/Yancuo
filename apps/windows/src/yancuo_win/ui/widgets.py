@@ -487,10 +487,20 @@ class ToastMessage(QFrame):
         message: str,
         duration_ms: int = 2800,
         on_activated: Callable[[], None] | None = None,
+        *,
+        tone: str = "default",
     ) -> None:
         parent = self.parentWidget()
         if parent is None:
             return
+        is_warning = tone == "warning"
+        self.setProperty("tone", tone)
+        self.content.setProperty("tone", tone)
+        self.setMinimumWidth(420 if is_warning else 280)
+        self.setMaximumWidth(500 if is_warning else 360)
+        self.content.setMinimumHeight(68 if is_warning else 0)
+        self.content.style().unpolish(self.content)
+        self.content.style().polish(self.content)
         self.label.setText(message)
         self.setAccessibleDescription(message)
         self._on_activated = on_activated
