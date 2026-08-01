@@ -16,6 +16,10 @@
       "type": "array",
       "items": { "type": "string" }
     },
+    "content_blocks": {
+      "type": "array",
+      "items": {"type": "object", "required": ["type"], "properties": {"type": {"enum": ["text", "formula", "table", "figure"]}, "content": {"type": "string"}, "rows": {"type": "array", "items": {"type": "array"}}, "source_image_index": {"type": "integer", "minimum": 0}, "source_region": {"type": "object"}}}
+    },
     "asset_files": {
       "type": "array",
       "items": {
