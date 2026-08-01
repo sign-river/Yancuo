@@ -82,6 +82,13 @@ _BLOCK_LABELS = {
     "image": "图片",
 }
 
+_NOTE_STATUS_LABELS = {
+    "active": "正式",
+    "inbox": "草稿",
+    "archived": "已归档",
+    "trashed": "回收站",
+}
+
 
 class NoteDraftGroupTree(QTreeWidget):
     """Tree that translates a block drop into a persistent draft operation."""
@@ -857,7 +864,7 @@ class NotePage(QWidget):
         self.note_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.note_list.setWordWrap(True)
+        self.note_list.setWordWrap(False)
         self.note_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.note_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
@@ -1263,8 +1270,15 @@ class NotePage(QWidget):
             for index, note in enumerate(self._notes):
                 title = note.title or "未命名笔记"
                 preview = note.summary.strip() or self._block_preview(note)
-                item = QListWidgetItem(f"{title}\n{preview or '尚未添加内容'}")
+                status = _NOTE_STATUS_LABELS.get(note.status, note.status)
+                detail = f"{status} · {preview or '尚未添加内容'}"
+                item = QListWidgetItem(f"{title}\n{detail}")
                 item.setData(Qt.ItemDataRole.UserRole, note.id)
+                item.setToolTip(f"{title}\n{detail}")
+                item.setData(
+                    Qt.ItemDataRole.AccessibleDescriptionRole,
+                    f"{status}笔记；双击打开独立详情页",
+                )
                 self.note_list.addItem(item)
                 if note.id == current_id:
                     selected_row = index

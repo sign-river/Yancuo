@@ -181,6 +181,55 @@ def test_note_library_narrow_breakpoint_keeps_list_and_discloses_space(
     assert isinstance(note_page.space_back_button, note_page_module.IconButton)
 
 
+def test_note_library_real_sizes_long_list_and_status_labels(
+    note_page: NotePage,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    for index in range(10):
+        note_page.notes.create_note(
+            title=f"第 {index + 1} 篇超长笔记标题 " + "函数极限与连续性综合整理" * 4,
+            summary="长笔记摘要 " + "用于验证列表无横向滚动与文字遮挡" * 4,
+            status="active",
+        )
+    note_page.notes.create_note(title="待整理草稿", status="inbox")
+    note_page.notes.create_note(title="历史归档", status="archived")
+    note_page.notes.create_note(title="已删除笔记", status="trashed")
+    note_page.status_filter.setCurrentIndex(note_page.status_filter.findData(None))
+    note_page.reload()
+    note_page.show()
+
+    note_page.resize(760, 700)
+    app.processEvents()
+    assert note_page._narrow_layout
+    assert note_page.space_pane.isHidden()
+    assert not note_page.note_library_pane.isHidden()
+
+    for width in (1366, 1920):
+        note_page.resize(width, 800)
+        app.processEvents()
+        assert not note_page._narrow_layout
+        assert not note_page.space_pane.isHidden()
+        assert not note_page.note_library_pane.isHidden()
+        navigation, listing = note_page.workspace.sizes()
+        assert 200 <= navigation <= 260
+        assert listing >= 320
+
+    texts = [
+        note_page.note_list.item(row).text()
+        for row in range(note_page.note_list.count())
+    ]
+    assert any("草稿 ·" in text for text in texts)
+    assert any("已归档 ·" in text for text in texts)
+    assert any("回收站 ·" in text for text in texts)
+    assert note_page.note_list.count() == 13
+    assert not note_page.note_list.wordWrap()
+    assert (
+        note_page.note_list.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+
+
 def test_narrow_note_layout_discloses_space_separately(note_page: NotePage) -> None:
     app = QApplication.instance()
     assert app is not None
