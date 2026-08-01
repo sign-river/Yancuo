@@ -167,6 +167,36 @@ def test_review_decisions_wait_for_final_apply_and_return_safe_presentation(
     assert services.get_problem(problem_id).revision == before.revision + 2  # type: ignore[union-attr]
 
 
+def test_review_applies_only_fields_explicitly_accepted(
+    services: AppServices, ai: AIService, tmp_path: Path
+) -> None:
+    image = tmp_path / "partial-apply.jpg"
+    image.write_bytes(b"\xff\xd8\xffpartial-apply")
+    problem_id = services.import_images([image])["created"][0]
+    before = services.get_problem(problem_id)
+    assert before is not None
+    job = ai.create_structure_job([problem_id])
+    ai.run_job(job.id)
+    item = ai.list_review_items_for_job(job.id)[0]
+    diffs = ai.review_presentation(item.id)["diffs"]
+    assert any(diff["field"] == "question_markdown" for diff in diffs)
+
+    decisions = {
+        str(diff["field"]): {
+            "decision": "accept"
+            if diff["field"] == "question_markdown"
+            else "reject"
+        }
+        for diff in diffs
+    }
+    ai.apply_review_decisions({item.id: decisions})
+
+    after = services.get_problem(problem_id)
+    assert after is not None
+    assert "Mock" in after.question_markdown
+    assert after.title == before.title
+
+
 def test_completion_review_overview_is_resumable_without_problem_details(
     services: AppServices, ai: AIService, tmp_path: Path
 ) -> None:

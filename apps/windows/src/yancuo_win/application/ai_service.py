@@ -648,6 +648,17 @@ class AIService:
             ).all()
             result: list[dict[str, Any]] = []
             for job in jobs:
+                problem_titles = list(
+                    s.scalars(
+                        select(Problem.title)
+                        .join(AiJobItem, AiJobItem.problem_id == Problem.id)
+                        .where(AiJobItem.job_id == job.id)
+                        .order_by(AiJobItem.created_at.asc())
+                    )
+                )
+                title = "、".join((value or "无标题题目") for value in problem_titles[:2])
+                if len(problem_titles) > 2:
+                    title += f" 等 {len(problem_titles)} 道题"
                 open_count = s.scalar(
                     select(func.count(ReviewItem.id))
                     .join(ReviewSession, ReviewSession.id == ReviewItem.session_id)
@@ -662,6 +673,7 @@ class AIService:
                 result.append(
                     {
                         "job_id": job.id,
+                        "title": title or "题目信息补全",
                         "label": labels.get(job.status, "等待处理"),
                         "status": job.status,
                         "completed": job.done_items,
@@ -1756,7 +1768,13 @@ class AIService:
                     payload={"item_id": item_id, "stage": active_stage},
                 )
 
-    def accept_review_item(self, review_item_id: str, *, force: bool = False) -> None:
+    def accept_review_item(
+        self,
+        review_item_id: str,
+        *,
+        force: bool = False,
+        proposed_fields: dict[str, Any] | None = None,
+    ) -> None:
         from yancuo_win.application.sync_service import SyncService, sync_snapshot
 
         with self.session() as s:
@@ -1785,6 +1803,14 @@ class AIService:
                 raise DomainError("审查提案 JSON 无效") from exc
             if not isinstance(proposed, dict):
                 raise DomainError("审查提案必须是对象")
+            if proposed_fields is not None:
+                proposed = {
+                    key: value
+                    for key, value in proposed_fields.items()
+                    if key in proposed and key in _REVIEW_MUTABLE_FIELDS | {"tags"}
+                }
+                if not proposed:
+                    raise DomainError("没有已采纳的字段")
             tags_present = "tags" in proposed
             tags = proposed.pop("tags", None)
             if tags_present and not isinstance(tags, list):
@@ -1922,23 +1948,63 @@ class AIService:
             "warnings": warnings,
         }
 
-    def apply_review_decisions(self, decisions: dict[str, str]) -> dict[str, list[str]]:
+    def apply_review_decisions(
+        self, decisions: dict[str, str | dict[str, dict[str, Any]]]
+    ) -> dict[str, Any]:
         """Materialize explicit human decisions only when the final apply step runs."""
 
         accepted: list[str] = []
         rejected: list[str] = []
+        accepted_field_count = 0
+        rejected_field_count = 0
         for item_id, decision in decisions.items():
-            if decision == "accept":
+            if isinstance(decision, dict):
+                item = self.get_review_item(item_id)
+                if item is None:
+                    raise DomainError("审核项不存在")
+                try:
+                    proposed = json.loads(item.proposed_json)
+                except json.JSONDecodeError as exc:
+                    raise DomainError("审查提案 JSON 无效") from exc
+                accepted_fields: dict[str, Any] = {}
+                for field, field_decision in decision.items():
+                    if not isinstance(field_decision, dict):
+                        raise DomainError("字段审核决定无效")
+                    action = field_decision.get("decision")
+                    if action == "accept" and isinstance(proposed, dict) and field in proposed:
+                        accepted_fields[field] = field_decision.get("value", proposed[field])
+                    elif action != "reject":
+                        raise DomainError("字段审核决定无效")
+                if accepted_fields:
+                    self.accept_review_item(item_id, proposed_fields=accepted_fields)
+                    accepted.append(item.problem_id)
+                    accepted_field_count += len(accepted_fields)
+                else:
+                    self.reject_review_item(item_id)
+                    rejected.append(item_id)
+                rejected_field_count += sum(
+                    value.get("decision") == "reject"
+                    for value in decision.values()
+                    if isinstance(value, dict)
+                )
+            elif decision == "accept":
                 self.accept_review_item(item_id)
                 item = self.get_review_item(item_id)
                 if item:
                     accepted.append(item.problem_id)
+                accepted_field_count += 1
             elif decision == "reject":
                 self.reject_review_item(item_id)
                 rejected.append(item_id)
+                rejected_field_count += 1
             else:
                 raise DomainError("审核决定无效")
-        return {"accepted_problem_ids": accepted, "rejected_item_ids": rejected}
+        return {
+            "accepted_problem_ids": accepted,
+            "rejected_item_ids": rejected,
+            "accepted_field_count": accepted_field_count,
+            "rejected_field_count": rejected_field_count,
+        }
 
     def undo_review_accepts(self, problem_ids: list[str]) -> int:
         """Undo accepted AI changes from one completed review run."""

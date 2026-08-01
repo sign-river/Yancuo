@@ -105,6 +105,7 @@ _PAGE_REVIEW = 3
 _PAGE_NOTES = 4
 _PAGE_SETTINGS = 5
 _PAGE_PROBLEM_DETAIL = 6
+_PAGE_AI_COMPLETION = 7
 
 _STATUS_LABELS = {
     "inbox": "收件箱",
@@ -280,6 +281,7 @@ class MainWindow(QMainWindow):
         self._ai_search_result: AiSearchResult | None = None
         self._ctx_buttons: list[QPushButton] = []
         self._detail_return_page = _PAGE_LIBRARY
+        self._ai_completion_return_page = _PAGE_LIBRARY
         self._sidebar_collapsed = False
         self._sidebar_narrow_open = False
         self._problem_rows: dict[str, Problem] = {}
@@ -393,6 +395,17 @@ class MainWindow(QMainWindow):
             self._restore_problem_from_detail
         )
         self.stack.addWidget(self.problem_detail_page)
+        self.ai_completion_page = ReviewDialog(self.ai, self.services, self)
+        self.ai_completion_page.setWindowFlags(Qt.WindowType.Widget)
+        self.ai_completion_page.background_requested.connect(
+            self._close_ai_completion
+        )
+        self.ai_completion_page.applied.connect(self._on_ai_completion_applied)
+        self.ai_completion_page.review_ready.connect(
+            self._show_ai_completion_notification
+        )
+        self.ai_completion_page.accepted.connect(self._close_ai_completion)
+        self.stack.addWidget(self.ai_completion_page)
         layout.addWidget(self.stack, stretch=1)
         root_layout.addLayout(layout, stretch=1)
 
@@ -605,6 +618,12 @@ class MainWindow(QMainWindow):
         self._on_ai_job_fail(job_id, message)
 
     def _open_completed_ai_review(self, job_id: str) -> None:
+        job = self.ai.get_job(job_id)
+        if job is not None and job.domain == "question_completion":
+            self._open_review(job_id)
+            self.activateWindow()
+            self.raise_()
+            return
         if not self.intake_page.show_ai_review(job_id):
             self.statusBar().showMessage("该 AI 批次已无待确认题目", 3500)
             return
@@ -935,7 +954,7 @@ class MainWindow(QMainWindow):
             ("编辑", self._edit_selected, "normal"),
             ("入正式库", self._promote_selected, "normal"),
             ("加入复习计划", self._schedule_review, "normal"),
-            ("AI 补全", self._ai_recognize, "normal"),
+            ("AI 补全题目信息…", self._ai_recognize, "normal"),
             ("撤销 AI 修改", self._undo_ai, "normal"),
             ("移动分类", self._move_selected_category, "normal"),
             ("删除", self._trash_selected, "danger"),
@@ -3676,7 +3695,7 @@ class MainWindow(QMainWindow):
             msg += "请在工作台打开「待确认变更」处理同步冲突。"
         self._show_operation_result("拉取合并完成", f"已应用 {result.get('applied', 0)} 条记录，发现 {result.get('conflicts', 0)} 个冲突字段。", details=msg)
         if result.get("review_session_id"):
-            ReviewDialog(self.ai, self.services, self).exec()
+            self._open_review()
         self.refresh_all()
 
     def _show_sync_pull_failed(self, error: str) -> None:
@@ -3793,28 +3812,42 @@ class MainWindow(QMainWindow):
         if not ids:
             self._show_status_toast("请先选择带原图的题目")
             return
-        try:
-            job = self.ai.create_structure_job(ids)
-            self.ai_coordinator.enqueue(job.id)
-            self.status.showMessage(f"AI 任务已加入后台队列：{job.id}")
-        except DomainError as exc:
-            QMessageBox.warning(self, "无法创建 AI 任务", str(exc))
+        problems = self.services.list_problems_by_ids(ids)
+        labels = [problem.title or "无标题题目" for problem in problems]
+        self._ai_completion_return_page = self.stack.currentIndex()
+        self.ai_completion_page.prepare_new(ids, labels)
+        self.stack.setCurrentWidget(self.ai_completion_page)
 
     def _on_ai_job_done(self, job_id: str) -> None:
-        QMessageBox.information(
-            self,
-            "AI 完成",
-            f"任务 {job_id} 已完成。结果可从工作台的「待确认变更」继续处理。",
-        )
+        count = len(self.ai.list_open_review_items_for_job(job_id))
+        if count:
+            self._show_ai_completion_notification(job_id, count)
+        else:
+            self._show_status_toast("AI 补全已完成，没有生成可应用的建议。")
         self._refresh_focus_pages()
 
     def _on_ai_job_fail(self, job_id: str, err: str) -> None:
         QMessageBox.warning(self, "AI 失败", f"{job_id}\n{err}")
 
-    def _open_review(self) -> None:
-        ReviewDialog(self.ai, self.services, self).exec()
+    def _open_review(self, job_id: str | None = None) -> None:
+        current = self.stack.currentIndex()
+        if current != _PAGE_AI_COMPLETION:
+            self._ai_completion_return_page = (
+                current if 0 <= current <= _PAGE_SETTINGS else _PAGE_DASHBOARD
+            )
+        self.ai_completion_page.show_queue(preferred_job_id=job_id)
+        self.stack.setCurrentWidget(self.ai_completion_page)
+
+    def _close_ai_completion(self) -> None:
+        self.stack.setCurrentIndex(self._ai_completion_return_page)
         self.refresh_problems(preserve_view=True)
         self._refresh_focus_pages()
+
+    def _on_ai_completion_applied(self, problem_ids: list[str]) -> None:
+        self.refresh_problems(preserve_view=True)
+        if len(problem_ids) == 1:
+            self._open_problem_detail(problem_ids[0])
+            self._show_status_toast("AI 修改已应用；可在题目详情中核对变更。")
 
     def _undo_ai(self) -> None:
         pid = self._require_one()

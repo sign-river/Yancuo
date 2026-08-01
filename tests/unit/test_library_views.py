@@ -470,6 +470,25 @@ def test_problem_detail_reference_canvas_stays_embedded_and_keeps_normalized_reg
     assert not page.reference_canvas.isWindow()
 
 
+def test_ai_completion_entry_opens_page_preparation_without_starting_job(
+    window: MainWindow,
+) -> None:
+    item = window.problem_list.item(0)
+    assert item is not None
+    window.problem_list.setCurrentItem(item)
+    before = len(window.ai.list_jobs(limit=100))
+
+    window._ai_recognize()
+
+    page = window.ai_completion_page
+    assert window.stack.currentWidget() is page
+    assert page.stack.currentWidget() is page.prepare_page
+    assert page.new_task_panel.isVisibleTo(page)
+    assert page.start_analysis_button.text() == "开始分析"
+    assert len(window.ai.list_jobs(limit=100)) == before
+    assert page.review_back_button.accessibleName() == "返回上一页"
+
+
 def test_service_settings_use_a_compact_aligned_form_surface(
     window: MainWindow,
 ) -> None:

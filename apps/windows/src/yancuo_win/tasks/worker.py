@@ -68,7 +68,7 @@ class ReviewApplicationWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, ai: AIService, decisions: dict[str, str], parent=None) -> None:
+    def __init__(self, ai: AIService, decisions: dict[str, Any], parent=None) -> None:
         super().__init__(parent)
         self.ai = ai
         self.decisions = dict(decisions)
