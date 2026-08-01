@@ -60,3 +60,17 @@ def test_object_store_writes_through_a_verified_temporary_file(tmp_path: Path) -
 
     assert stored.absolute_path.read_bytes() == VECTOR
     assert not list(store.objects_root.rglob("*.tmp"))
+
+
+def test_object_store_rejects_empty_and_oversized_inputs(tmp_path: Path) -> None:
+    store = ObjectStore(tmp_path / "objects")
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+    with pytest.raises(DomainError, match="空文件"):
+        store.store_copy(empty)
+
+    oversized = tmp_path / "oversized.bin"
+    oversized.write_bytes(b"12")
+    store.MAX_OBJECT_BYTES = 1
+    with pytest.raises(DomainError, match="不能超过"):
+        store.store_copy(oversized)

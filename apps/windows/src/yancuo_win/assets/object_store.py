@@ -24,6 +24,8 @@ class StoredObject:
 
 
 class ObjectStore:
+    MAX_OBJECT_BYTES = 128 * 1024 * 1024
+
     def __init__(self, objects_root: Path) -> None:
         self.objects_root = objects_root
         self.objects_root.mkdir(parents=True, exist_ok=True)
@@ -45,6 +47,16 @@ class ObjectStore:
     def store_copy(self, source: Path, *, role: str = "original") -> StoredObject:
         if not source.is_file():
             raise DomainError(f"文件不存在：{source}")
+        try:
+            source_size = source.stat().st_size
+        except OSError as exc:
+            raise DomainError(f"无法读取文件大小：{source}") from exc
+        if source_size <= 0:
+            raise DomainError("不能存储空文件")
+        if source_size > self.MAX_OBJECT_BYTES:
+            raise DomainError(
+                f"单个资源不能超过 {self.MAX_OBJECT_BYTES // (1024 * 1024)} MiB"
+            )
         sha = self.hash_file(source)
         suffix = source.suffix.lower() or ".bin"
         dest = self.object_path(sha, suffix)
