@@ -11,12 +11,17 @@ import json
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from yancuo_win.cloud.base import CloudCapabilities, CloudProvider, CloudUser, RemoteRelease
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import get_secret
+
+
+_MAX_GATEWAY_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_ERROR_RESPONSE_BYTES = 4 * 1024
+_MAX_ASSET_BYTES = 512 * 1024 * 1024
 
 
 class CloudBaseGatewayProvider(CloudProvider):
@@ -36,8 +41,20 @@ class CloudBaseGatewayProvider(CloudProvider):
     def _validate_configuration(self) -> None:
         if not self.environment_id:
             raise DomainError("请填写 CloudBase 环境 ID")
-        if not self.gateway_url.startswith(("https://", "http://")):
+        parsed = urlparse(self.gateway_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username:
             raise DomainError("请填写 CloudBase 网关 HTTPS 地址")
+
+    @staticmethod
+    def _validate_storage_url(url: str) -> None:
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise DomainError("CloudBase 存储地址必须是无内嵌凭据的 HTTPS URL")
 
     def _action(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         self._validate_configuration()
@@ -54,9 +71,14 @@ class CloudBaseGatewayProvider(CloudProvider):
         )
         try:
             with urlopen(request, timeout=60) as response:  # noqa: S310 - configured gateway
-                raw = response.read().decode("utf-8")
+                payload = response.read(_MAX_GATEWAY_RESPONSE_BYTES + 1)
+                if len(payload) > _MAX_GATEWAY_RESPONSE_BYTES:
+                    raise DomainError("CloudBase 网关响应过大")
+                raw = payload.decode("utf-8")
         except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            detail = exc.read(_MAX_ERROR_RESPONSE_BYTES).decode(
+                "utf-8", errors="replace"
+            )[:300]
             raise DomainError(f"CloudBase 网关请求失败（HTTP {exc.code}）：{detail}") from exc
         except URLError as exc:
             raise DomainError(f"无法连接 CloudBase 网关：{exc.reason}") from exc
@@ -124,10 +146,12 @@ class CloudBaseGatewayProvider(CloudProvider):
         return RemoteRelease(tag=tag, name=name, assets=[], raw=data)
 
     def upload_release_asset(self, owner: str, repo: str, *, tag: str, file_path: Path, asset_name: str) -> dict[str, Any]:
-        data = self._action("assets/upload-url", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name, "size": file_path.stat().st_size})
+        size = file_path.stat().st_size
+        if size < 0 or size > _MAX_ASSET_BYTES:
+            raise DomainError("CloudBase 上传文件超过 512 MiB 上限")
+        data = self._action("assets/upload-url", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name, "size": size})
         url = str(data.get("url") or "")
-        if not url.startswith(("https://", "http://")):
-            raise DomainError("CloudBase 网关未返回有效上传地址")
+        self._validate_storage_url(url)
         headers = data.get("headers") if isinstance(data.get("headers"), dict) else {}
         request = Request(url, data=file_path.read_bytes(), method="PUT", headers={str(k): str(v) for k, v in headers.items()})
         try:
@@ -140,15 +164,22 @@ class CloudBaseGatewayProvider(CloudProvider):
     def download_release_asset(self, owner: str, repo: str, *, tag: str, asset_name: str, dest: Path) -> Path:
         data = self._action("assets/download-url", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name})
         url = str(data.get("url") or "")
-        if not url.startswith(("https://", "http://")):
-            raise DomainError("CloudBase 网关未返回有效下载地址")
-        try:
-            with urlopen(url, timeout=300) as response:  # noqa: S310 - signed download URL from gateway
-                content = response.read()
-        except (HTTPError, URLError) as exc:
-            raise DomainError(f"CloudBase 存储下载失败：{exc}") from exc
+        self._validate_storage_url(url)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(content)
+        try:
+            with urlopen(url, timeout=300) as response, dest.open("wb") as output:  # noqa: S310 - signed download URL from gateway
+                received = 0
+                while chunk := response.read(1024 * 1024):
+                    received += len(chunk)
+                    if received > _MAX_ASSET_BYTES:
+                        raise DomainError("CloudBase 下载文件超过 512 MiB 上限")
+                    output.write(chunk)
+        except (HTTPError, URLError) as exc:
+            dest.unlink(missing_ok=True)
+            raise DomainError(f"CloudBase 存储下载失败：{exc}") from exc
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
         return dest
 
     def delete_release(self, owner: str, repo: str, *, tag: str) -> None:
@@ -165,4 +196,4 @@ class CloudBaseGatewayProvider(CloudProvider):
         return {"ok": True, "provider": self.name, "environment_id": self.environment_id}
 
     def get_capabilities(self) -> CloudCapabilities:
-        return CloudCapabilities(private_repository=True, release_assets=True, atomic_file_update=True, large_file_upload=True, delete_release=True)
+        return CloudCapabilities(private_repository=True, release_assets=True, atomic_file_update=True, large_file_upload=True, delete_release=True, max_asset_bytes=_MAX_ASSET_BYTES)

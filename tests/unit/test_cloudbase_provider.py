@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import json
+
+import pytest
 
 from yancuo_win.cloud.cloudbase import CloudBaseGatewayProvider
 from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.config.settings import AppSettings
+from yancuo_win.domain.rules import DomainError
 
 
 class _Response:
@@ -19,8 +23,9 @@ class _Response:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size: int = -1) -> bytes:
+        payload = json.dumps(self.payload).encode("utf-8")
+        return payload if size < 0 else payload[:size]
 
 
 def test_health_uses_gateway_token_and_environment_header(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -68,3 +73,58 @@ def test_factory_creates_cloudbase_provider() -> None:
 
     provider = get_cloud_provider(settings)
     assert isinstance(provider, CloudBaseGatewayProvider)
+
+
+def test_cloudbase_rejects_insecure_gateway_url() -> None:
+    provider = CloudBaseGatewayProvider(
+        environment_id="environment",
+        gateway_url="http://gateway.example.test",
+        credential_key="test-key",
+    )
+
+    with pytest.raises(DomainError, match="HTTPS"):
+        provider._validate_configuration()
+
+
+def test_cloudbase_gateway_response_size_is_bounded(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("yancuo_win.cloud.cloudbase.get_secret", lambda _key: "token")
+    monkeypatch.setattr("yancuo_win.cloud.cloudbase._MAX_GATEWAY_RESPONSE_BYTES", 16)
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase.urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(b"{" + b"x" * 32 + b"}"),
+    )
+    provider = CloudBaseGatewayProvider(
+        environment_id="environment",
+        gateway_url="https://gateway.example.test",
+        credential_key="test-key",
+    )
+
+    with pytest.raises(DomainError, match="响应过大"):
+        provider.authenticate()
+
+
+def test_cloudbase_download_cleans_oversized_partial_file(
+    monkeypatch, tmp_path  # type: ignore[no-untyped-def]
+) -> None:
+    monkeypatch.setattr("yancuo_win.cloud.cloudbase._MAX_ASSET_BYTES", 4)
+    provider = CloudBaseGatewayProvider(
+        environment_id="environment",
+        gateway_url="https://gateway.example.test",
+        credential_key="test-key",
+    )
+    monkeypatch.setattr(
+        provider,
+        "_action",
+        lambda *_args, **_kwargs: {"url": "https://storage.example.test/object"},
+    )
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase.urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(b"oversized"),
+    )
+    destination = tmp_path / "snapshot.ebpack"
+
+    with pytest.raises(DomainError, match="超过"):
+        provider.download_release_asset(
+            "owner", "repo", tag="backup", asset_name="snapshot.ebpack", dest=destination
+        )
+    assert not destination.exists()
