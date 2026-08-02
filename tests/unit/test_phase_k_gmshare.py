@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
+import yancuo_win.import_export.gmshare as gmshare_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
@@ -25,11 +26,14 @@ def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _rewrite_entry(source: Path, destination: Path, name: str, payload: bytes) -> Path:
-    with zipfile.ZipFile(source, "r") as incoming, zipfile.ZipFile(
-        destination, "w", compression=zipfile.ZIP_DEFLATED
-    ) as outgoing:
+    with (
+        zipfile.ZipFile(source, "r") as incoming,
+        zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as outgoing,
+    ):
         for item in incoming.infolist():
-            outgoing.writestr(item, payload if item.filename == name else incoming.read(item))
+            outgoing.writestr(
+                item, payload if item.filename == name else incoming.read(item)
+            )
     return destination
 
 
@@ -69,7 +73,9 @@ def test_gmshare_excludes_private_fields(runtime, tmp_path: Path) -> None:
         assert "identity.json" not in zf.namelist()
 
 
-def test_gmshare_import_dedup(runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gmshare_import_dedup(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     services = AppServices(runtime)
     pid = services.create_problem(title="去重题").id
     services.update_problem(pid, {"question_markdown": "Q"})
@@ -129,4 +135,36 @@ def test_gmshare_rejects_incomplete_checksum_coverage(runtime, tmp_path: Path) -
     )
 
     with pytest.raises(DomainError, match="未完整覆盖"):
+        share.import_share(pack)
+
+
+def test_gmshare_rejects_oversized_manifest_before_json_decode(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    problem_id = AppServices(runtime).create_problem(title="metadata budget").id
+    share = GmshareService(runtime)
+    pack = share.export_share([problem_id], dest=tmp_path / "metadata.gmshare").path
+    monkeypatch.setattr(gmshare_module, "MAX_SHARE_METADATA_BYTES", 4)
+
+    with pytest.raises(DomainError, match="manifest.json 无效"):
+        share.import_share(pack)
+
+
+def test_gmshare_counts_blank_checksum_physical_lines(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    problem_id = AppServices(runtime).create_problem(title="physical lines").id
+    share = GmshareService(runtime)
+    source = share.export_share([problem_id], dest=tmp_path / "lines.gmshare").path
+    with zipfile.ZipFile(source, "r") as archive:
+        checksums = archive.read("checksums.sha256")
+    pack = _rewrite_entry(
+        source,
+        tmp_path / "too-many-lines.gmshare",
+        "checksums.sha256",
+        b"\n\n\n" + checksums,
+    )
+    monkeypatch.setattr(gmshare_module, "MAX_SHARE_PHYSICAL_LINES", 2)
+
+    with pytest.raises(DomainError, match="物理行数超限"):
         share.import_share(pack)

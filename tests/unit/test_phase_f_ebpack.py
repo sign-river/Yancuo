@@ -223,7 +223,9 @@ def test_ebpack_rejects_oversized_extracted_checksum_table(
     (root / "checksums.sha256").write_bytes(b"12345")
     monkeypatch.setattr(ebpack_module, "MAX_EBPACK_METADATA_BYTES", 4)
 
-    with pytest.raises(DomainError, match="checksums.sha256 过大"):
+    with pytest.raises(
+        DomainError, match="checksums.sha256.*过大|过大.*checksums.sha256"
+    ):
         EbpackService(runtime)._verify_checksums(root)
 
 

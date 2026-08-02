@@ -159,6 +159,27 @@ def read_zip_member_limited(zf: zipfile.ZipFile, name: str, *, max_bytes: int) -
     return payload
 
 
+def read_regular_file_limited(path: Path, *, max_bytes: int) -> bytes:
+    """Read one ordinary file with symlink, size, and replacement checks."""
+
+    path = Path(path)
+    if max_bytes < 0:
+        raise ValueError("文件读取上限必须为非负数")
+    if path.is_symlink() or not path.is_file():
+        raise ArchiveSecurityError(f"文件不存在或不是普通文件：{path.name}")
+    try:
+        size = path.stat().st_size
+        if size > max_bytes:
+            raise ArchiveSecurityError(f"文件过大：{path.name}")
+        with path.open("rb") as stream:
+            payload = stream.read(max_bytes + 1)
+    except OSError as exc:
+        raise ArchiveSecurityError(f"文件读取失败：{path.name}") from exc
+    if len(payload) != size or len(payload) > max_bytes:
+        raise ArchiveSecurityError(f"文件在读取期间发生变化或超限：{path.name}")
+    return payload
+
+
 def _ensure_no_symlink_components(root: Path, target: Path) -> None:
     """拒绝目标路径中已有的符号链接，避免解压时被重定向。"""
 

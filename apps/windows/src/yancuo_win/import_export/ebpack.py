@@ -27,6 +27,7 @@ from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
     copy_tree_no_symlinks,
     iter_regular_files,
+    read_regular_file_limited,
     read_zip_member_limited,
     safe_extract_zip,
     validate_relative_checksum_path,
@@ -39,19 +40,10 @@ MAX_EBPACK_METADATA_BYTES = 8 * 1024 * 1024
 
 
 def _read_metadata_file(path: Path, label: str) -> bytes:
-    if path.is_symlink() or not path.is_file():
-        raise DomainError(f"ebpack {label} 不存在或不是普通文件")
     try:
-        size = path.stat().st_size
-        if size > MAX_EBPACK_METADATA_BYTES:
-            raise DomainError(f"ebpack {label} 过大")
-        with path.open("rb") as stream:
-            payload = stream.read(MAX_EBPACK_METADATA_BYTES + 1)
-    except OSError as exc:
-        raise DomainError(f"ebpack {label} 读取失败") from exc
-    if len(payload) != size or len(payload) > MAX_EBPACK_METADATA_BYTES:
-        raise DomainError(f"ebpack {label} 在读取期间发生变化或超过大小上限")
-    return payload
+        return read_regular_file_limited(path, max_bytes=MAX_EBPACK_METADATA_BYTES)
+    except ArchiveSecurityError as exc:
+        raise DomainError(f"ebpack {label} 读取被拒绝：{exc}") from exc
 
 
 def _read_zip_metadata(zf: zipfile.ZipFile, name: str) -> bytes:

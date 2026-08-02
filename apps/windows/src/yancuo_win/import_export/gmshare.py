@@ -24,6 +24,7 @@ from yancuo_win.domain.rules import DomainError, validate_priority
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
     iter_regular_files,
+    read_regular_file_limited,
     safe_extract_zip,
     safe_relative_path,
     validate_relative_checksum_path,
@@ -35,6 +36,8 @@ MAX_SHARE_PROBLEMS = 10_000
 MAX_SHARE_ASSET_REFERENCES = 10_000
 MAX_SHARE_JSONL_LINE_BYTES = 4 * 1024 * 1024
 MAX_CHECKSUM_LINE_BYTES = 4 * 1024
+MAX_SHARE_METADATA_BYTES = 8 * 1024 * 1024
+MAX_SHARE_PHYSICAL_LINES = 20_000
 
 # 默认拒绝：无论 includes 如何，这些键不得写入 problems.jsonl
 HARD_DENY_FIELDS = frozenset(
@@ -114,8 +117,10 @@ class GmshareService:
         includes.review_history = False
 
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        dest = Path(dest) if dest else (
-            self.runtime.paths.backup_dir / f"yancuo-share-{stamp}.gmshare"
+        dest = (
+            Path(dest)
+            if dest
+            else (self.runtime.paths.backup_dir / f"yancuo-share-{stamp}.gmshare")
         )
         if dest.suffix.lower() != ".gmshare":
             dest = dest.with_suffix(".gmshare")
@@ -231,9 +236,7 @@ class GmshareService:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    def _serialize_problem(
-        self, problem: Problem, includes: ShareIncludeOptions
-    ) -> dict[str, Any]:
+    def _serialize_problem(self, problem: Problem, includes: ShareIncludeOptions) -> dict[str, Any]:
         rec: dict[str, Any] = {"origin_problem_id": problem.id}
         if includes.question:
             rec["title"] = problem.title
@@ -400,8 +403,12 @@ class GmshareService:
             if not (root / name).is_file():
                 raise DomainError(f"分享包缺少 {name}")
         try:
-            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            manifest = json.loads(
+                read_regular_file_limited(
+                    root / "manifest.json", max_bytes=MAX_SHARE_METADATA_BYTES
+                ).decode("utf-8")
+            )
+        except (ArchiveSecurityError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise DomainError("分享包 manifest.json 无效") from exc
         if not isinstance(manifest, dict):
             raise DomainError("分享包 manifest.json 必须是对象")
@@ -425,11 +432,13 @@ class GmshareService:
 
         # 校验 checksums
         checksummed_paths: set[str] = set()
+        checksum_physical_lines = 0
         try:
             with (root / "checksums.sha256").open("rb") as checksum_stream:
-                while line_bytes := checksum_stream.readline(
-                    MAX_CHECKSUM_LINE_BYTES + 1
-                ):
+                while line_bytes := checksum_stream.readline(MAX_CHECKSUM_LINE_BYTES + 1):
+                    checksum_physical_lines += 1
+                    if checksum_physical_lines > MAX_SHARE_PHYSICAL_LINES:
+                        raise DomainError("checksum 物理行数超限")
                     if len(line_bytes) > MAX_CHECKSUM_LINE_BYTES:
                         raise DomainError("checksum 行过长")
                     line = line_bytes.decode("utf-8").strip()
@@ -478,11 +487,13 @@ class GmshareService:
             raise DomainError("checksum 未完整覆盖分享包文件：" + "；".join(detail))
 
         rows: list[dict[str, Any]] = []
+        problem_physical_lines = 0
         try:
             with (root / "problems.jsonl").open("rb") as problem_stream:
-                while line_bytes := problem_stream.readline(
-                    MAX_SHARE_JSONL_LINE_BYTES + 1
-                ):
+                while line_bytes := problem_stream.readline(MAX_SHARE_JSONL_LINE_BYTES + 1):
+                    problem_physical_lines += 1
+                    if problem_physical_lines > MAX_SHARE_PHYSICAL_LINES:
+                        raise DomainError("分享包题目物理行数超限")
                     if len(line_bytes) > MAX_SHARE_JSONL_LINE_BYTES:
                         raise DomainError("分享包单条题目记录过大")
                     if not line_bytes.strip():
@@ -500,8 +511,12 @@ class GmshareService:
 
         index_path = root / "assets" / "index.json"
         try:
-            asset_index = json.loads(index_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            asset_index = json.loads(
+                read_regular_file_limited(index_path, max_bytes=MAX_SHARE_METADATA_BYTES).decode(
+                    "utf-8"
+                )
+            )
+        except (ArchiveSecurityError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise DomainError("分享包 assets/index.json 无效") from exc
         indexed_assets = asset_index.get("assets") if isinstance(asset_index, dict) else None
         if not isinstance(indexed_assets, list) or not all(
@@ -513,9 +528,7 @@ class GmshareService:
         referenced_assets = 0
         for row in rows:
             assets = row.get("assets") or []
-            if not isinstance(assets, list) or not all(
-                isinstance(item, dict) for item in assets
-            ):
+            if not isinstance(assets, list) or not all(isinstance(item, dict) for item in assets):
                 raise DomainError("分享包题目资源引用必须是对象数组")
             referenced_assets += len(assets)
             if referenced_assets > MAX_SHARE_ASSET_REFERENCES:
