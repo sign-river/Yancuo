@@ -58,10 +58,12 @@ class LocalFolderProvider(CloudProvider):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise DomainError(f"{label} is not valid JSON") from exc
 
-    @staticmethod
-    def _write_text_atomic(path: Path, content: str, label: str) -> None:
+    @classmethod
+    def _write_text_atomic(cls, path: Path, content: str, label: str) -> None:
         if path.is_symlink():
             raise DomainError(f"{label} must not be a symlink")
+        if len(content.encode("utf-8")) > cls.MAX_METADATA_FILE_BYTES:
+            raise DomainError(f"{label} exceeds size limit")
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary_name = tempfile.mkstemp(
             prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
@@ -156,8 +158,10 @@ class LocalFolderProvider(CloudProvider):
             "format_version": 1,
             "created_by_app": "1.0.0",
         }
-        (path / ".mistakebook" / "repository.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        self._write_text_atomic(
+            path / ".mistakebook" / "repository.json",
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+            "repository.json",
         )
         return {"owner": owner, "name": name, "private": True, "path": str(path)}
 
@@ -206,11 +210,23 @@ class LocalFolderProvider(CloudProvider):
             meta = self._read_json_file(meta_path, "release.json") if meta_path.is_file() else {}
             if not isinstance(meta, dict):
                 raise DomainError("release.json must contain an object")
-            assets = [
-                {"name": f.name, "path": str(f), "size": f.stat().st_size}
-                for f in d.iterdir()
-                if f.is_file() and f.name != "release.json"
-            ]
+            assets: list[dict[str, Any]] = []
+            for asset_path in d.iterdir():
+                if asset_path.name == "release.json" or (
+                    asset_path.name.startswith(".up-")
+                    and asset_path.suffix == ".tmp"
+                ):
+                    continue
+                if asset_path.is_symlink():
+                    raise DomainError("release asset must not be a symlink")
+                if asset_path.is_file():
+                    assets.append(
+                        {
+                            "name": asset_path.name,
+                            "path": str(asset_path),
+                            "size": asset_path.stat().st_size,
+                        }
+                    )
             if len(assets) > self.MAX_RELEASE_ASSETS:
                 raise DomainError("release asset count exceeds limit")
             items.append(
@@ -239,9 +255,15 @@ class LocalFolderProvider(CloudProvider):
             "body": body,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        (d / "release.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
+        try:
+            self._write_text_atomic(
+                d / "release.json",
+                json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+                "release.json",
+            )
+        except Exception:
+            d.rmdir()
+            raise
         return RemoteRelease(tag=tag, name=name, assets=[], raw=meta)
 
     def upload_release_asset(
@@ -559,6 +581,8 @@ class LocalFolderProvider(CloudProvider):
         target = d / f"{entity_id}.json"
         if target.is_symlink():
             raise DomainError("tombstone path must not be a symlink")
-        target.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        self._write_text_atomic(
+            target,
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            "tombstone",
         )

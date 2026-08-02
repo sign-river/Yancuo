@@ -219,6 +219,24 @@ def test_local_folder_download_rejects_symlink_source(
         )
 
 
+def test_local_folder_metadata_writes_are_atomic_and_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.create_private_repository("repo")
+    provider.create_release("local", "repo", tag="good", name="good")
+    provider.write_tombstone("local", "repo", "problem_1", {"deleted": True})
+
+    assert list(root.rglob(".*.tmp")) == []
+    monkeypatch.setattr(LocalFolderProvider, "MAX_METADATA_FILE_BYTES", 32)
+    with pytest.raises(DomainError, match="size limit"):
+        provider.create_release(
+            "local", "repo", tag="oversized", name="x" * 128
+        )
+    assert not (root / "local" / "repo" / "releases" / "oversized").exists()
+
+
 def test_local_folder_skips_non_object_operation_lines(tmp_path: Path) -> None:
     root = tmp_path / "cloud"
     provider = LocalFolderProvider(root)
