@@ -1,12 +1,15 @@
 package cn.yancuo.android.data.io
 
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 
 const val MAX_IMPORT_IMAGE_BYTES: Long = 32L * 1024 * 1024
 const val MAX_EBPACK_BYTES: Long = 512L * 1024 * 1024
+const val MAX_EBPACK_METADATA_BYTES: Long = 8L * 1024 * 1024
 
 class InputSizeLimitException(
     val maxBytes: Long,
@@ -36,4 +39,18 @@ fun copyToFileLimited(input: InputStream, destination: File, maxBytes: Long): Lo
         destination.delete()
         throw exc
     }
+}
+
+fun readFileLimited(source: File, maxBytes: Long): ByteArray {
+    require(maxBytes >= 0) { "maxBytes 不能为负数" }
+    if (!source.isFile) throw IllegalArgumentException("输入文件不存在")
+    val expectedSize = source.length()
+    if (expectedSize > maxBytes) throw InputSizeLimitException(maxBytes)
+    val initialCapacity = expectedSize.coerceAtMost(1024L * 1024).toInt()
+    val output = ByteArrayOutputStream(initialCapacity)
+    val copied = FileInputStream(source).use { input ->
+        copyStreamLimited(input, output, maxBytes)
+    }
+    if (copied != expectedSize) throw IllegalStateException("输入文件在读取期间发生变化")
+    return output.toByteArray()
 }

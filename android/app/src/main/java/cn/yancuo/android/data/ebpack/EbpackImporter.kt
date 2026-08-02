@@ -3,6 +3,9 @@ package cn.yancuo.android.data.ebpack
 import cn.yancuo.android.data.assets.ObjectStore
 import cn.yancuo.android.data.db.YancuoDb
 import cn.yancuo.android.data.identity.IdentityStore
+import cn.yancuo.android.data.io.InputSizeLimitException
+import cn.yancuo.android.data.io.MAX_EBPACK_METADATA_BYTES
+import cn.yancuo.android.data.io.readFileLimited
 import cn.yancuo.android.data.paths.DataPaths
 import cn.yancuo.android.domain.EBPACK_FORMAT
 import cn.yancuo.android.domain.EBPACK_FORMAT_VERSION
@@ -131,7 +134,7 @@ class EbpackImporter(
         for (rel in required) {
             if (!File(root, rel).isFile) throw EbpackException("ebpack 缺少条目：$rel")
         }
-        val manifest = JSONObject(File(root, "manifest.json").readText(Charsets.UTF_8))
+        val manifest = JSONObject(readMetadataText(File(root, "manifest.json"), "manifest.json"))
         if (manifest.optString("format") != EBPACK_FORMAT) {
             throw EbpackException("不是研错库 ebpack（format 不匹配）")
         }
@@ -294,7 +297,7 @@ class EbpackImporter(
         val table = File(root, "checksums.sha256")
         val hasher = ObjectStore(File(root, "assets/objects"))
         val checksummed = mutableSetOf<String>()
-        for (line in table.readLines(Charsets.UTF_8)) {
+        for (line in readMetadataText(table, "checksums.sha256").lineSequence()) {
             val trimmed = line.trim()
             if (trimmed.isEmpty() || trimmed.startsWith("#")) continue
             val parts = trimmed.split("  ", limit = 2)
@@ -315,7 +318,9 @@ class EbpackImporter(
             "assets/index.json",
         )
         if (File(root, "identity.json").isFile) required += "identity.json"
-        val index = JSONObject(File(root, "assets/index.json").readText(Charsets.UTF_8))
+        val index = JSONObject(
+            readMetadataText(File(root, "assets/index.json"), "assets/index.json"),
+        )
         val objects = index.optJSONArray("objects")
             ?: throw EbpackException("assets/index.json 缺少 objects 数组")
         val indexedObjects = mutableSetOf<String>()
@@ -372,6 +377,16 @@ class EbpackImporter(
             throw EbpackException("非法包内路径：$relativePath")
         }
         return candidate
+    }
+
+    private fun readMetadataText(file: File, label: String): String {
+        return try {
+            readFileLimited(file, MAX_EBPACK_METADATA_BYTES).toString(Charsets.UTF_8)
+        } catch (_: InputSizeLimitException) {
+            throw EbpackException("$label 超过 8 MiB 上限")
+        } catch (exc: Exception) {
+            throw EbpackException("$label 读取失败：${exc.message ?: exc.javaClass.simpleName}")
+        }
     }
 
     private fun moveWithinDataRoot(source: File, destination: File) {
