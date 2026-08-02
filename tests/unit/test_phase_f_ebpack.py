@@ -20,6 +20,7 @@ from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.identity import SCHEMA_VERSION
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.import_export.ebpack import EbpackService
+import yancuo_win.import_export.ebpack as ebpack_module
 
 
 @pytest.fixture()
@@ -73,9 +74,7 @@ def test_ebpack_roundtrip_consistent(
     assert manifest["authoritative_payload"] == "database/snapshot.sqlite"
     portable_snapshot = tmp_path / "portable-snapshot.sqlite"
     with zipfile.ZipFile(pack, "r") as archive:
-        portable_snapshot.write_bytes(
-            archive.read("database/snapshot.sqlite")
-        )
+        portable_snapshot.write_bytes(archive.read("database/snapshot.sqlite"))
     with closing(sqlite3.connect(portable_snapshot)) as connection:
         portable_tables = {
             row[0]
@@ -123,9 +122,11 @@ def test_ebpack_roundtrip_consistent(
     restored_draft = NoteIntakeService(restored_rt).get_session(draft.id)
     assert restored_draft is not None
     assert restored_draft.groups[0].blocks[0].content_markdown == "包内保留的概念块"
-    assert NoteIntakeService(restored_rt).resolve_source_path(
-        restored_draft.assets[0]
-    ).is_file()
+    assert (
+        NoteIntakeService(restored_rt)
+        .resolve_source_path(restored_draft.assets[0])
+        .is_file()
+    )
 
 
 def test_corrupt_ebpack_rejected(runtime, tmp_path: Path) -> None:
@@ -149,6 +150,31 @@ def test_corrupt_ebpack_rejected(runtime, tmp_path: Path) -> None:
         eb.restore_ebpack(bad, tmp_path / "should_not")
 
 
+def test_ebpack_rejects_oversized_manifest_before_json_decode(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = AppServices(runtime)
+    services.create_problem(title="metadata budget")
+    eb = EbpackService(runtime)
+    pack = eb.export_ebpack(tmp_path / "metadata-budget.ebpack")
+    monkeypatch.setattr(ebpack_module, "MAX_EBPACK_METADATA_BYTES", 4)
+
+    with pytest.raises(DomainError, match="manifest.json 过大"):
+        eb.verify_ebpack(pack)
+
+
+def test_ebpack_rejects_oversized_extracted_checksum_table(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "extracted"
+    root.mkdir()
+    (root / "checksums.sha256").write_bytes(b"12345")
+    monkeypatch.setattr(ebpack_module, "MAX_EBPACK_METADATA_BYTES", 4)
+
+    with pytest.raises(DomainError, match="checksums.sha256 过大"):
+        EbpackService(runtime)._verify_checksums(root)
+
+
 def test_incomplete_checksum_table_is_rejected(runtime, tmp_path: Path) -> None:
     services = AppServices(runtime)
     eb = EbpackService(runtime)
@@ -156,9 +182,10 @@ def test_incomplete_checksum_table_is_rejected(runtime, tmp_path: Path) -> None:
     pack = eb.export_ebpack(tmp_path / "checksums.ebpack")
     incomplete = tmp_path / "checksums-incomplete.ebpack"
 
-    with zipfile.ZipFile(pack, "r") as source, zipfile.ZipFile(
-        incomplete, "w"
-    ) as target:
+    with (
+        zipfile.ZipFile(pack, "r") as source,
+        zipfile.ZipFile(incomplete, "w") as target,
+    ):
         for item in source.infolist():
             payload = source.read(item.filename)
             if item.filename == "checksums.sha256":
@@ -169,7 +196,9 @@ def test_incomplete_checksum_table_is_rejected(runtime, tmp_path: Path) -> None:
         eb.verify_ebpack(incomplete)
 
 
-def test_schema_too_new_rejected(runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_schema_too_new_rejected(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     services = AppServices(runtime)
     eb = EbpackService(runtime)
     services.create_problem(title="y")

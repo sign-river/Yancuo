@@ -30,6 +30,40 @@ from yancuo_win.infrastructure.archive import (
 
 FORMAT_NAME = "graduate-mistake-book-ebpack"
 FORMAT_VERSION = 1
+MAX_EBPACK_METADATA_BYTES = 8 * 1024 * 1024
+
+
+def _read_metadata_file(path: Path, label: str) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise DomainError(f"ebpack {label} 不存在或不是普通文件")
+    try:
+        size = path.stat().st_size
+        if size > MAX_EBPACK_METADATA_BYTES:
+            raise DomainError(f"ebpack {label} 过大")
+        with path.open("rb") as stream:
+            payload = stream.read(MAX_EBPACK_METADATA_BYTES + 1)
+    except OSError as exc:
+        raise DomainError(f"ebpack {label} 读取失败") from exc
+    if len(payload) != size or len(payload) > MAX_EBPACK_METADATA_BYTES:
+        raise DomainError(f"ebpack {label} 在读取期间发生变化或超过大小上限")
+    return payload
+
+
+def _read_zip_metadata(zf: zipfile.ZipFile, name: str) -> bytes:
+    try:
+        info = zf.getinfo(name)
+    except KeyError as exc:
+        raise DomainError(f"ebpack 缺少条目：{name}") from exc
+    if info.file_size > MAX_EBPACK_METADATA_BYTES:
+        raise DomainError(f"ebpack {name} 过大")
+    try:
+        with zf.open(info, "r") as stream:
+            payload = stream.read(MAX_EBPACK_METADATA_BYTES + 1)
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise DomainError(f"ebpack {name} 读取失败") from exc
+    if len(payload) != info.file_size or len(payload) > MAX_EBPACK_METADATA_BYTES:
+        raise DomainError(f"ebpack {name} 实际大小与声明不一致或超限")
+    return payload
 
 
 def _sha256_file(path: Path) -> str:
@@ -50,9 +84,7 @@ class EbpackService:
 
     def export_ebpack(self, dest: Path | None = None) -> Path:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        dest = Path(dest) if dest else (
-            self.runtime.paths.backup_dir / f"yancuo-{stamp}.ebpack"
-        )
+        dest = Path(dest) if dest else (self.runtime.paths.backup_dir / f"yancuo-{stamp}.ebpack")
         if dest.suffix.lower() != ".ebpack":
             dest = dest.with_suffix(".ebpack")
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -122,8 +154,7 @@ class EbpackService:
                         }
                     )
             (assets_dst / "index.json").write_text(
-                json.dumps({"objects": object_entries}, ensure_ascii=False, indent=2)
-                + "\n",
+                json.dumps({"objects": object_entries}, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
 
@@ -216,7 +247,10 @@ class EbpackService:
                 missing = sorted(required - names)
                 if missing:
                     raise DomainError(f"ebpack 缺少条目：{', '.join(missing)}")
-                manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+                try:
+                    manifest = json.loads(_read_zip_metadata(zf, "manifest.json").decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise DomainError("ebpack manifest.json 无效") from exc
                 self._validate_manifest(manifest)
 
                 # 解压到临时目录做校验
@@ -248,9 +282,7 @@ class EbpackService:
         except (TypeError, ValueError) as exc:
             raise DomainError("ebpack manifest 版本字段无效") from exc
         if format_version != FORMAT_VERSION:
-            raise DomainError(
-                f"ebpack format_version={manifest.get('format_version')} 不受支持"
-            )
+            raise DomainError(f"ebpack format_version={manifest.get('format_version')} 不受支持")
         if manifest.get("encrypted"):
             raise DomainError("v1 尚未实现加密包解密，拒绝导入")
         if pkg_schema <= 0:
@@ -269,9 +301,7 @@ class EbpackService:
                 if integrity is None or integrity[0] != "ok":
                     detail = integrity[0] if integrity else "no result"
                     raise DomainError(f"ebpack SQLite 完整性检查失败：{detail}")
-                foreign_key_error = connection.execute(
-                    "PRAGMA foreign_key_check"
-                ).fetchone()
+                foreign_key_error = connection.execute("PRAGMA foreign_key_check").fetchone()
                 if foreign_key_error is not None:
                     raise DomainError("ebpack SQLite 外键检查失败")
                 row = connection.execute(
@@ -313,8 +343,12 @@ class EbpackService:
         table = root / "checksums.sha256"
         if not table.is_file():
             raise DomainError("缺少 checksums.sha256")
+        try:
+            checksum_text = _read_metadata_file(table, "checksums.sha256").decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise DomainError("ebpack checksums.sha256 不是有效 UTF-8") from exc
         checksummed_paths: set[str] = set()
-        for line in table.read_text(encoding="utf-8").splitlines():
+        for line in checksum_text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -346,7 +380,9 @@ class EbpackService:
 
         try:
             asset_index = json.loads(
-                (root / "assets" / "index.json").read_text(encoding="utf-8")
+                _read_metadata_file(root / "assets" / "index.json", "assets/index.json").decode(
+                    "utf-8"
+                )
             )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise DomainError("assets/index.json 无效") from exc
@@ -368,9 +404,7 @@ class EbpackService:
             try:
                 object_path = validate_relative_checksum_path(root, package_path)
             except ArchiveSecurityError as exc:
-                raise DomainError(
-                    f"assets/index.json 对象路径非法：{relative_path}"
-                ) from exc
+                raise DomainError(f"assets/index.json 对象路径非法：{relative_path}") from exc
             if not object_path.is_file():
                 raise DomainError(f"assets/index.json 引用缺失：{relative_path}")
             declared_sha = str(item.get("sha256") or "")
@@ -386,18 +420,14 @@ class EbpackService:
         required_paths.update(indexed_object_paths)
         missing_checksums = sorted(required_paths - checksummed_paths)
         if missing_checksums:
-            raise DomainError(
-                "checksums 未覆盖必要条目：" + ", ".join(missing_checksums)
-            )
+            raise DomainError("checksums 未覆盖必要条目：" + ", ".join(missing_checksums))
         if manifest is not None and int(manifest.get("schema_version") or 0) >= 9:
             try:
                 manifest_asset_count = int(manifest.get("asset_count") or 0)
             except (TypeError, ValueError) as exc:
                 raise DomainError("ebpack manifest asset_count 无效") from exc
             if manifest_asset_count != len(indexed_object_paths):
-                raise DomainError(
-                    "ebpack manifest asset_count 与对象索引数量不一致"
-                )
+                raise DomainError("ebpack manifest asset_count 与对象索引数量不一致")
 
     def restore_ebpack(self, pack: Path, target_root: Path) -> dict[str, Any]:
         """校验后恢复到目标数据根；失败不留下半套数据。"""
