@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 import yancuo_win.ui.note_page as note_page_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
@@ -50,6 +50,30 @@ def note_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NotePage:
     app.processEvents()
     yield page
     page.close()
+
+
+def test_note_page_does_not_show_header_during_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "visibility-data"))
+    monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
+    monkeypatch.setattr(note_page_module, "MathContentView", _ReaderStub)
+    app = QApplication.instance() or QApplication([])
+    runtime = bootstrap_runtime()
+    shown_labels: list[QLabel] = []
+    original_show = QLabel.show
+
+    def track_show(label: QLabel) -> None:
+        shown_labels.append(label)
+        original_show(label)
+
+    monkeypatch.setattr(QLabel, "show", track_show)
+    page = NotePage(NoteService(runtime))
+
+    assert page.note_status not in shown_labels
+    page.close()
+    runtime.engine.dispose()
+    app.processEvents()
 
 
 def test_note_page_creates_edits_and_reads_blocks(note_page: NotePage) -> None:

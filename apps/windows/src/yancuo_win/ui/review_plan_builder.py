@@ -463,7 +463,6 @@ class ReviewPlanBuilder(QWidget):
         placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
         placeholder.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.queue_list.addItem(placeholder)
-        self.queue_list.setVisible(True)
 
     def _remove_selected(self) -> None:
         ids = [item.data(Qt.ItemDataRole.UserRole) for item in self.queue_list.selectedItems()]

@@ -183,9 +183,8 @@ class ReviewPage(QWidget):
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(14)
 
-        header = PageHeader("复习会话")
+        header = PageHeader("复习会话", "复习进度")
         self.progress_label = header.description
-        self.progress_label.setVisible(True)
         back = IconButton("chevron-left", "返回复习")
         back.clicked.connect(self.show_home)
         self.detail_button = QPushButton("打开题目详情")

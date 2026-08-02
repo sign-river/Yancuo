@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 import yancuo_win.ui.review_page as review_page_module
 import yancuo_win.ui.today_review as today_review_module
@@ -118,6 +118,23 @@ class _NotesStub:
 
     def get_note(self, note_id: str):
         return self.note if note_id == self.note.id else None
+
+
+def test_review_page_does_not_show_progress_during_construction(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    visibility_requests: list[tuple[QLabel, bool]] = []
+    original_set_visible = QLabel.setVisible
+
+    def track_visibility(label: QLabel, visible: bool) -> None:
+        visibility_requests.append((label, visible))
+        original_set_visible(label, visible)
+
+    monkeypatch.setattr(QLabel, "setVisible", track_visibility)
+    page = review_page_module.ReviewPage(_ServicesStub())
+
+    assert (page.progress_label, True) not in visibility_requests
+    page.close()
 
 
 def test_answer_control_lives_in_grade_card_and_unlocks_grading(

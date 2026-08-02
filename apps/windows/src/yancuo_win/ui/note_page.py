@@ -1057,10 +1057,9 @@ class NotePage(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
-        detail_header = PageHeader("笔记详情")
+        detail_header = PageHeader("笔记详情", "笔记状态")
         self.note_title_label = detail_header.title
         self.note_status = detail_header.description
-        self.note_status.show()
         self.detail_back_button = IconButton("chevron-left", "返回笔记库")
         self.detail_back_button.clicked.connect(self._return_to_library)
         detail_header.add_leading(self.detail_back_button)

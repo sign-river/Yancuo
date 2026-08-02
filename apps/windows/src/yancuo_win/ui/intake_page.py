@@ -758,7 +758,8 @@ class ProblemForm(QWidget):
         content.body.addWidget(QLabel("题干"))
         content.body.addWidget(self.question)
         self.content_blocks = ContentBlocksEditor()
-        self.content_blocks.setVisible(self.show_render_previews)
+        if not self.show_render_previews:
+            self.content_blocks.hide()
         if self.show_render_previews:
             blocks_label = QLabel("结构化内容块（按原题顺序，可编辑表格、题图区域并拖动顺序）")
             blocks_label.setObjectName("MutedLabel")
