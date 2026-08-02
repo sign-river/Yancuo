@@ -40,6 +40,7 @@ fun TodayReviewScreen(
     onOpenProblem: (String) -> Unit,
 ) {
     val due by viewModel.due.collectAsState()
+    val reviewBusy by viewModel.reviewBusy.collectAsState()
     var feedback by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { viewModel.refreshDue() }
 
@@ -90,10 +91,15 @@ fun TodayReviewScreen(
                                     OutlinedButton(
                                         onClick = {
                                             viewModel.recordReview(item.id, grade) { result ->
-                                                feedback =
-                                                    "已打分 ${result.grade} ${result.label}，下次 ${result.nextReviewAt}"
+                                                feedback = result.fold(
+                                                    onSuccess = {
+                                                        "已打分 ${it.grade} ${it.label}，下次 ${it.nextReviewAt}"
+                                                    },
+                                                    onFailure = { "评分保存失败：${it.message}" },
+                                                )
                                             }
                                         },
+                                        enabled = !reviewBusy,
                                     ) {
                                         Text("$grade $label")
                                     }

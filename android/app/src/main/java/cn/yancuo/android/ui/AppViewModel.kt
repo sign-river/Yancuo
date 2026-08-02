@@ -64,6 +64,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
     private val importGate = ExclusiveOperationGate()
+    private val reviewGate = ExclusiveOperationGate()
+    private val _reviewBusy = MutableStateFlow(false)
+    val reviewBusy: StateFlow<Boolean> = _reviewBusy.asStateFlow()
     private val homeRequestGate = LatestRequestGate()
     private val detailRequestGate = LatestRequestGate()
     private var homeRefreshJob: Job? = null
@@ -156,14 +159,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun recordReview(problemId: String, grade: Int, onDone: (ReviewResult) -> Unit) {
+    fun recordReview(problemId: String, grade: Int, onDone: (Result<ReviewResult>) -> Unit) {
+        if (!reviewGate.tryEnter()) {
+            onDone(Result.failure(IllegalStateException("已有复习评分正在保存")))
+            return
+        }
+        _reviewBusy.value = true
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                app.problems.recordReview(problemId, grade)
+            try {
+                val result = runCatching {
+                    withContext(Dispatchers.IO) {
+                        app.problems.recordReview(problemId, grade)
+                    }
+                }
+                if (result.isSuccess) {
+                    refreshDue()
+                    refreshHome()
+                }
+                onDone(result)
+            } finally {
+                reviewGate.exit()
+                _reviewBusy.value = false
             }
-            refreshDue()
-            refreshHome()
-            onDone(result)
         }
     }
 
