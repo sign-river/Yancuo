@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from typing import Any
@@ -24,8 +25,9 @@ class _Response:
     def __exit__(self, *_args) -> None:
         return None
 
-    def read(self) -> bytes:
-        return json.dumps({"login": "sign-river"}).encode("utf-8")
+    def read(self, size: int = -1) -> bytes:
+        payload = json.dumps({"login": "sign-river"}).encode("utf-8")
+        return payload if size < 0 else payload[:size]
 
 
 def test_factory_returns_github(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,3 +157,57 @@ def test_github_request_retries_transient_tls_disconnect(monkeypatch: pytest.Mon
     assert provider._request_json("GET", "https://api.github.com/user") == {"login": "sign-river"}
     assert attempts == 2
     assert delays == [0.6]
+
+
+def test_authenticated_request_rejects_cross_origin_url() -> None:
+    provider = GitHubProvider(token="ghp_unit_test_token")
+
+    with pytest.raises(DomainError, match="超出允许"):
+        provider._request_json("GET", "https://attacker.example/collect")
+
+
+def test_github_request_rejects_oversized_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = GitHubProvider(token="ghp_unit_test_token")
+    monkeypatch.setattr("yancuo_win.cloud.github._MAX_JSON_RESPONSE_BYTES", 16)
+
+    class LargeResponse(_Response):
+        def read(self, size: int = -1) -> bytes:
+            payload = b"{" + b"x" * 32 + b"}"
+            return payload if size < 0 else payload[:size]
+
+    monkeypatch.setattr(
+        "yancuo_win.cloud.github.urlopen", lambda *_args, **_kwargs: LargeResponse()
+    )
+
+    with pytest.raises(DomainError, match="响应过大"):
+        provider._request_json("GET", "https://api.github.com/user")
+
+
+def test_github_download_enforces_actual_size_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider = GitHubProvider(token="ghp_unit_test_token")
+    provider._caps.max_asset_bytes = 4
+    monkeypatch.setattr(
+        provider,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "assets": [
+                {
+                    "name": "snapshot.ebpack",
+                    "url": "https://api.github.com/repos/o/r/releases/assets/1",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "yancuo_win.cloud.github.urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(b"oversized"),
+    )
+    destination = tmp_path / "snapshot.ebpack"
+
+    with pytest.raises(DomainError, match="实际下载大小超限"):
+        provider.download_release_asset(
+            "o", "r", tag="backup", asset_name="snapshot.ebpack", dest=destination
+        )
+    assert not destination.exists()

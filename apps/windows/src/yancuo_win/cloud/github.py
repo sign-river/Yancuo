@@ -11,12 +11,11 @@ import logging
 import os
 import re
 import ssl
-import shutil
 import time
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from yancuo_win.cloud.base import (
@@ -35,6 +34,8 @@ _LATEST_TAG = "yancuo-latest"
 _SYNC_LOCK_TAG = "yancuo-sync-lock"
 _API_VERSION = "2022-11-28"
 _MAX_REQUEST_ATTEMPTS = 3
+_MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_ERROR_RESPONSE_BYTES = 4 * 1024
 _RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 
@@ -48,7 +49,12 @@ class GitHubProvider(CloudProvider):
         credential_key: str = "yancuo_github_token",
         token: str | None = None,
     ) -> None:
+        parsed = urlparse(base_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise DomainError("GitHub API 地址必须是有效的 HTTPS 源站")
         self.api_base = base_url.rstrip("/")
+        self._api_host = parsed.hostname.lower()
+        self._api_port = parsed.port
         self.credential_key = credential_key
         self._token = token
         self._caps = CloudCapabilities(
@@ -64,6 +70,23 @@ class GitHubProvider(CloudProvider):
         # create_release 后暂存 upload_url，供紧随其后的 upload_release_asset 使用
         self._upload_urls: dict[str, str] = {}
         self._release_ids: dict[str, int] = {}
+
+    def _validate_authenticated_url(self, url: str) -> None:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        same_api_origin = (
+            parsed.scheme == "https"
+            and host == self._api_host
+            and parsed.port == self._api_port
+        )
+        github_upload_origin = (
+            self._api_host == "api.github.com"
+            and parsed.scheme == "https"
+            and host == "uploads.github.com"
+            and parsed.port is None
+        )
+        if not same_api_origin and not github_upload_origin:
+            raise DomainError("GitHub 认证请求地址超出允许的 API 源站")
 
     def _resolve_token(self) -> str:
         if self._token:
@@ -103,6 +126,7 @@ class GitHubProvider(CloudProvider):
         raw_body: bytes | None = None,
         content_type: str | None = None,
     ) -> Any:
+        self._validate_authenticated_url(url)
         data = raw_body
         headers = self._headers(content_type=content_type)
         if body is not None:
@@ -113,14 +137,18 @@ class GitHubProvider(CloudProvider):
             req = Request(url, data=data, method=method, headers=headers)
             try:
                 with urlopen(req, timeout=300) as resp:
-                    raw = resp.read()
+                    raw = resp.read(_MAX_JSON_RESPONSE_BYTES + 1)
+                    if len(raw) > _MAX_JSON_RESPONSE_BYTES:
+                        raise DomainError("GitHub API 响应过大")
                     logger.info("github %s %s -> %s", method, url.split("?")[0], resp.status)
                 break
             except HTTPError as exc:
                 if exc.code in _RETRYABLE_HTTP_CODES and attempt < _MAX_REQUEST_ATTEMPTS:
                     time.sleep(0.6 * attempt)
                     continue
-                detail = exc.read().decode("utf-8", "replace")[:400]
+                detail = exc.read(_MAX_ERROR_RESPONSE_BYTES).decode(
+                    "utf-8", "replace"
+                )[:400]
                 if exc.code == 404:
                     raise DomainError(f"GitHub 资源不存在（404）：{detail}") from exc
                 raise DomainError(f"GitHub HTTP {exc.code}: {detail}") from exc
@@ -350,10 +378,20 @@ class GitHubProvider(CloudProvider):
         )
         if not asset:
             raise DomainError(f"未找到附件：{asset_name}")
+        limit = self._caps.max_asset_bytes
+        try:
+            declared_size = int(asset.get("size")) if asset.get("size") is not None else None
+        except (TypeError, ValueError) as exc:
+            raise DomainError("GitHub 附件大小字段无效") from exc
+        if declared_size is not None and declared_size < 0:
+            raise DomainError("GitHub 附件大小字段无效")
+        if limit is not None and declared_size is not None and declared_size > limit:
+            raise DomainError("GitHub 附件超过允许的下载大小")
         # API 下载需 Accept: application/octet-stream
         url = str(asset.get("url") or "")
         if not url:
             raise DomainError("附件缺少 API url")
+        self._validate_authenticated_url(url)
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         headers = self._headers()
@@ -361,7 +399,12 @@ class GitHubProvider(CloudProvider):
         req = Request(url, headers=headers, method="GET")
         try:
             with urlopen(req, timeout=600) as resp, dest.open("wb") as out:
-                shutil.copyfileobj(resp, out)
+                received = 0
+                while chunk := resp.read(1024 * 1024):
+                    received += len(chunk)
+                    if limit is not None and received > limit:
+                        raise DomainError("GitHub 附件实际下载大小超限")
+                    out.write(chunk)
         except Exception as exc:  # noqa: BLE001
             dest.unlink(missing_ok=True)
             raise DomainError(f"下载附件失败：{exc}") from exc
