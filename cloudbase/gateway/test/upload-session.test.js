@@ -28,6 +28,22 @@ test("failed uploads release their claim for a safe retry", () => {
   );
 });
 
+test("completed upload PUT retries return success without replacing the object", () => {
+  const upload = gateway.slice(gateway.indexOf("async function upload"));
+  const completedAt = upload.indexOf("if (candidate.uploaded_at)");
+  const claimAt = upload.indexOf("set claimed_at=now()");
+  const cloudUploadAt = upload.indexOf("cloud.uploadFile");
+  assert.ok(completedAt >= 0 && completedAt < claimAt && claimAt < cloudUploadAt);
+  assert.match(upload.slice(completedAt, claimAt), /uploaded: true/);
+});
+
+test("upload completion requires a file ID and one persisted session row", () => {
+  const upload = gateway.slice(gateway.indexOf("async function upload"));
+  assert.match(upload, /if \(!stored\?\.fileID\)/);
+  assert.match(upload, /const completed = await pool\.query/);
+  assert.match(upload, /completed\.rowCount !== 1/);
+});
+
 test("expired rows remain retryable when object deletion fails", () => {
   assert.match(
     gateway,
