@@ -303,6 +303,23 @@ class SyncService:
                 },
                 ensure_ascii=False,
             )
+            remote_index = provider.read_sync_manifest(self.owner, self.repo)
+            if remote_index is None:
+                remote_index = {
+                    "format": "yancuo-profile-snapshots",
+                    "format_version": 1,
+                    "profiles": {},
+                    "aliases": {},
+                }
+            if not isinstance(remote_index, dict):
+                raise DomainError("云端 Operation 批次索引无效")
+            index = dict(remote_index)
+            existing_batches = index.get("operation_batches", [])
+            if not isinstance(existing_batches, list):
+                raise DomainError("云端 Operation 批次索引无效")
+            if len(existing_batches) >= MAX_REMOTE_OPERATION_BATCHES:
+                raise DomainError("云端 Operation 批次索引已达到容量上限")
+            batches = list(existing_batches)
             provider.create_release(
                 self.owner, self.repo, tag=tag, name="Yancuo operation batch", body=body
             )
@@ -328,17 +345,6 @@ class SyncService:
                 self._cleanup_unindexed_github_batch(provider, tag, exc)
                 raise
         try:
-            index = provider.read_sync_manifest(self.owner, self.repo) or {
-                "format": "yancuo-profile-snapshots",
-                "format_version": 1,
-                "profiles": {},
-                "aliases": {},
-            }
-            index = dict(index)
-            existing_batches = index.get("operation_batches", [])
-            if not isinstance(existing_batches, list):
-                raise DomainError("云端 Operation 批次索引无效")
-            batches = list(existing_batches)
             batches.append(
                 {
                     "tag": tag,

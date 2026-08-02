@@ -799,11 +799,24 @@ def test_github_batch_rejects_oversized_outgoing_payload_before_release(
     assert released is False
 
 
-def test_github_batch_rejects_malformed_index(runtime) -> None:
+def test_github_batch_rejects_malformed_or_full_index_before_release(
+    runtime, monkeypatch
+) -> None:
     provider = GitHubProvider(token="ghp_test")
+    created: list[str] = []
     provider.read_sync_manifest = lambda *_args: {"operation_batches": {}}  # type: ignore[method-assign]
+    provider.create_release = lambda *_args, tag, **_kwargs: created.append(tag)  # type: ignore[method-assign]
     with pytest.raises(DomainError, match="索引无效"):
         SyncService(runtime, provider)._github_remote_operations(provider)
+    with pytest.raises(DomainError, match="索引无效"):
+        SyncService(runtime, provider)._push_github_batch(provider, [{"value": 1}])
+
+    provider.read_sync_manifest = lambda *_args: {"operation_batches": [{}]}  # type: ignore[method-assign]
+    monkeypatch.setattr(sync_module, "MAX_REMOTE_OPERATION_BATCHES", 1)
+    with pytest.raises(DomainError, match="容量上限"):
+        SyncService(runtime, provider)._push_github_batch(provider, [{"value": 1}])
+
+    assert created == []
 
 
 def test_github_batch_never_uses_remote_asset_name_as_a_local_path(runtime) -> None:
