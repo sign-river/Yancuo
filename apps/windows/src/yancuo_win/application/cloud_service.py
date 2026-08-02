@@ -228,6 +228,7 @@ class CloudBackupService:
             raise DomainError("无法获取主写入锁：另一台设备可能是主编辑设备")
         created_tag: str | None = None
         manifest_published = False
+        pack: Path | None = None
         try:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             profile_id = self.runtime.identity.profile_id
@@ -356,7 +357,11 @@ class CloudBackupService:
         finally:
             # 无论导出、上传或写 latest 哪一步失败，都释放主写入锁；
             # LocalFolder 的 TTL 只是最后一道兜底，不替代显式释放。
-            self.provider.release_lock(self.owner, self.repo, device_id)
+            try:
+                self.provider.release_lock(self.owner, self.repo, device_id)
+            finally:
+                if pack is not None:
+                    pack.unlink(missing_ok=True)
 
     def list_backups(self) -> list[dict[str, Any]]:
         releases = self.provider.list_releases(self.owner, self.repo)

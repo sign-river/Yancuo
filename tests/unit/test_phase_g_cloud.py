@@ -41,6 +41,7 @@ def test_local_folder_upload_latest_restore(runtime, tmp_path: Path) -> None:
     assert uploaded["tag"].startswith(f"data-v1-{runtime.identity.profile_id}-")
     assert uploaded["profile_id"] == runtime.identity.profile_id
     assert len(uploaded["sha256"]) == 64
+    assert list(runtime.paths.cache_dir.glob("data-v1-*.ebpack")) == []
 
     latest_path = cloud_root / "local" / "test-repo" / ".mistakebook" / "latest.json"
     assert latest_path.is_file()
@@ -67,6 +68,25 @@ def test_local_folder_upload_latest_restore(runtime, tmp_path: Path) -> None:
     result = cloud.restore_latest_to(target)
     assert (target / "error_book.db").is_file()
     assert result["schema_version"] >= 1
+
+
+def test_cloud_upload_failure_cleans_export_cache(runtime, tmp_path: Path, monkeypatch) -> None:
+    cloud_root = tmp_path / "cloud-failure"
+    provider = LocalFolderProvider(cloud_root)
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "failure-cleanup"
+    runtime.settings.cloud.enabled = True
+    cloud = CloudBackupService(runtime, provider)
+    cloud.ensure_repository()
+
+    def fail_upload(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise DomainError("simulated upload failure")
+
+    monkeypatch.setattr(provider, "upload_release_asset", fail_upload)
+    with pytest.raises(DomainError, match="simulated upload failure"):
+        cloud.upload_backup()
+
+    assert list(runtime.paths.cache_dir.glob("data-v1-*.ebpack")) == []
 
 
 def test_profiles_are_discovered_and_explicitly_bound(runtime, tmp_path: Path, monkeypatch) -> None:
