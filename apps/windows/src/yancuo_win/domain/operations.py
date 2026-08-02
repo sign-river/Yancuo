@@ -170,6 +170,7 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(attachments, list) or len(attachments) > 100:
         raise DomainError("attachments 必须是最多 100 项的数组")
     attachment_bytes = 0
+    attachment_ids: set[str] = set()
     for attachment in attachments:
         if not isinstance(attachment, dict):
             raise DomainError("attachment 必须是对象")
@@ -177,6 +178,9 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
             raise DomainError("Operation 只允许携带派生题图附件")
         if not isinstance(attachment.get("id"), str) or not attachment["id"].startswith("asset_"):
             raise DomainError("attachment id 无效")
+        if attachment["id"] in attachment_ids:
+            raise DomainError(f"Operation 内 attachment id 重复：{attachment['id']}")
+        attachment_ids.add(attachment["id"])
         if not isinstance(attachment.get("sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", attachment["sha256"]) is None:
             raise DomainError("attachment sha256 无效")
         mime_type = attachment.get("mime_type")

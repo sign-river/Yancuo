@@ -1023,7 +1023,11 @@ class SyncService:
                 )
             for attachment in operation.get("attachments") or []:
                 if isinstance(attachment, dict) and attachment.get("id"):
-                    attachments[str(attachment["id"])] = attachment
+                    asset_id = str(attachment["id"])
+                    previous = attachments.get(asset_id)
+                    if previous is not None and previous != attachment:
+                        raise DomainError(f"同步派生题图 ID 载荷冲突：{asset_id}")
+                    attachments[asset_id] = attachment
         for asset_id in sorted(referenced_ids):
             attachment = attachments.get(asset_id)
             if attachment is None:

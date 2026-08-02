@@ -189,6 +189,43 @@ def test_operation_validation_rejects_oversized_attachment_metadata() -> None:
             validate_operation(
                 {**operation, "attachments": [{**attachment, **patch}]}
             )
+    with pytest.raises(DomainError, match="attachment id 重复"):
+        validate_operation({**operation, "attachments": [attachment, attachment]})
+
+
+def test_entity_operation_batch_rejects_conflicting_attachment_id_payloads(
+    runtime, tmp_path: Path
+) -> None:
+    services = AppServices(runtime)
+    problem = services.create_problem(title="附件冲突题")
+    provider = LocalFolderProvider(tmp_path / "attachment-conflict")
+    first_payload = b"first"
+    second_payload = b"second"
+    asset_id = "asset_conflicting_payload"
+
+    def attachment(payload: bytes) -> dict[str, Any]:
+        return {
+            "id": asset_id,
+            "role": "derived_figure",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "mime_type": "image/png",
+            "size_bytes": len(payload),
+            "width": 1,
+            "height": 1,
+            "content_base64": base64.b64encode(payload).decode("ascii"),
+        }
+
+    operations = [
+        {"changed_fields": {}, "attachments": [attachment(first_payload)]},
+        {"changed_fields": {}, "attachments": [attachment(second_payload)]},
+    ]
+    with runtime.session_factory() as session:
+        stored_problem = session.get(Problem, problem.id)
+        with pytest.raises(DomainError, match="ID 载荷冲突"):
+            SyncService(runtime, provider)._apply_operation_attachments(
+                session, stored_problem, operations
+            )
+        assert session.get(Asset, asset_id) is None
 
 
 def test_local_folder_push_pull_auto_merge(
