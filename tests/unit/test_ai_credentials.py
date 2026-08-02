@@ -27,8 +27,9 @@ class _Response:
     def __exit__(self, *_args) -> None:
         return None
 
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size: int = -1) -> bytes:
+        payload = json.dumps(self.payload).encode("utf-8")
+        return payload if size < 0 else payload[:size]
 
 
 class _StreamResponse:
@@ -44,6 +45,21 @@ class _StreamResponse:
 
     def __iter__(self):
         return iter(self.lines)
+
+
+class _BytesResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.headers = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        return self.payload if size < 0 else self.payload[:size]
 
 
 def test_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,6 +103,47 @@ def test_api_key_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     with pytest.raises(DomainError, match="未配置 AI 密钥"):
         p._api_key()
+
+
+def test_json_response_size_budget_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible._MAX_AI_RESPONSE_BYTES", 16
+    )
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.urllib.request.urlopen",
+        lambda *_args, **_kwargs: _BytesResponse(b"{" + b"x" * 32 + b"}"),
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1", api_key_env="FARO_API_KEY"
+    )
+
+    with pytest.raises(DomainError, match="响应过大"):
+        provider.list_models()
+
+
+def test_stream_response_size_budget_is_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible._MAX_AI_RESPONSE_BYTES", 16
+    )
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.urllib.request.urlopen",
+        lambda *_args, **_kwargs: _StreamResponse([b"data: " + b"x" * 32]),
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1", api_key_env="FARO_API_KEY"
+    )
+
+    with pytest.raises(DomainError, match="流式响应过大"):
+        provider._request_stream_json(
+            "/chat/completions",
+            timeout_seconds=10,
+            payload={"model": "test"},
+            on_text_delta=lambda _text: None,
+        )
 
 
 def test_list_models_uses_faro_compatible_endpoint(

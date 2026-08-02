@@ -29,6 +29,8 @@ from yancuo_win.infrastructure.credentials import get_secret
 
 
 _MAX_REQUEST_ATTEMPTS = 3
+_MAX_AI_RESPONSE_BYTES = 16 * 1024 * 1024
+_MAX_ERROR_RESPONSE_BYTES = 4 * 1024
 _RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 _TRANSIENT_NETWORK_ERRORS = (
     urllib.error.URLError,
@@ -40,6 +42,13 @@ _TRANSIENT_NETWORK_ERRORS = (
     TimeoutError,
     socket.timeout,
 )
+
+
+def _read_limited(response: Any, limit: int, *, label: str) -> bytes:
+    payload = response.read(limit + 1)
+    if len(payload) > limit:
+        raise DomainError(f"{label}过大（上限 {limit} 字节）")
+    return payload
 
 
 class OpenAICompatibleProvider(AIProvider):
@@ -135,13 +144,23 @@ class OpenAICompatibleProvider(AIProvider):
                             value = headers.get(header)
                             if value:
                                 self._last_server_timing[header.lower()] = str(value)
-                    body = json.loads(response.read().decode("utf-8"))
+                    body = json.loads(
+                        _read_limited(
+                            response,
+                            _MAX_AI_RESPONSE_BYTES,
+                            label="AI 响应",
+                        ).decode("utf-8")
+                    )
                 break
             except urllib.error.HTTPError as exc:
                 if exc.code in _RETRYABLE_HTTP_CODES and attempt < max_attempts:
                     time.sleep(0.6 * attempt)
                     continue
-                detail = exc.read().decode("utf-8", errors="replace")
+                detail = _read_limited(
+                    exc,
+                    _MAX_ERROR_RESPONSE_BYTES,
+                    label="AI 错误响应",
+                ).decode("utf-8", errors="replace")
                 detail = detail.replace(key, "***")
                 hints = {
                     400: "请检查模型 ID 与请求兼容性",
@@ -223,7 +242,13 @@ class OpenAICompatibleProvider(AIProvider):
                     headers = getattr(response, "headers", None)
                     content_type = str(headers.get("Content-Type") if headers else "")
                     if "text/event-stream" not in content_type.lower():
-                        body = json.loads(response.read().decode("utf-8"))
+                        body = json.loads(
+                            _read_limited(
+                                response,
+                                _MAX_AI_RESPONSE_BYTES,
+                                label="AI 响应",
+                            ).decode("utf-8")
+                        )
                         content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
                         if isinstance(content, str) and content:
                             on_text_delta(content)
@@ -232,7 +257,14 @@ class OpenAICompatibleProvider(AIProvider):
                     parts: list[str] = []
                     model_name = str(payload.get("model") or "")
                     usage: dict[str, Any] = {}
+                    received_bytes = 0
                     for raw_line in response:
+                        received_bytes += len(raw_line)
+                        if received_bytes > _MAX_AI_RESPONSE_BYTES:
+                            raise DomainError(
+                                "AI 流式响应过大"
+                                f"（上限 {_MAX_AI_RESPONSE_BYTES} 字节）"
+                            )
                         line = raw_line.decode("utf-8").strip()
                         if not line.startswith("data:"):
                             continue
@@ -266,7 +298,11 @@ class OpenAICompatibleProvider(AIProvider):
                 if exc.code in _RETRYABLE_HTTP_CODES and attempt < max_attempts and not emitted:
                     time.sleep(0.6 * attempt)
                     continue
-                detail = exc.read().decode("utf-8", errors="replace").replace(key, "***")
+                detail = _read_limited(
+                    exc,
+                    _MAX_ERROR_RESPONSE_BYTES,
+                    label="AI 错误响应",
+                ).decode("utf-8", errors="replace").replace(key, "***")
                 raise DomainError(f"AI 流式请求失败 HTTP {exc.code}：{detail[:240]}") from exc
             except _TRANSIENT_NETWORK_ERRORS as exc:
                 if attempt < max_attempts and not emitted:
