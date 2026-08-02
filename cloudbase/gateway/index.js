@@ -521,17 +521,33 @@ async function action(name, payload, identity, req) {
       const tag = boundedName(payload.tag, "发布标签");
       await client.query("begin");
       await requireWriteLock(client, repo.repository_id, payload);
+      const targetRelease = await client.query(
+        "select 1 from yancuo.releases where repository_id=$1 and tag=$2 for update",
+        [repo.repository_id, tag],
+      );
+      if (!targetRelease.rowCount) {
+        await client.query("commit");
+        return { deleted: true };
+      }
+      const uploads = await client.query(
+        "select file_id,claimed_at from yancuo.upload_sessions where repository_id=$1 and release_tag=$2 for update",
+        [repo.repository_id, tag],
+      );
+      if (uploads.rows.some((row) => row.claimed_at !== null)) {
+        fail("发布仍有正在执行的附件上传", 409);
+      }
       const files = await client.query(
         "select file_id from yancuo.release_assets where repository_id=$1 and release_tag=$2",
         [repo.repository_id, tag],
       );
-      for (const row of files.rows) {
-        if (row.file_id) {
-          await client.query(
-            "insert into yancuo.object_deletions(file_id,subject_id) values($1,$2) on conflict(file_id) do nothing",
-            [row.file_id, subject],
-          );
-        }
+      const fileIds = new Set(
+        [...files.rows, ...uploads.rows].map((row) => row.file_id).filter(Boolean),
+      );
+      for (const fileId of fileIds) {
+        await client.query(
+          "insert into yancuo.object_deletions(file_id,subject_id) values($1,$2) on conflict(file_id) do nothing",
+          [fileId, subject],
+        );
       }
       await client.query(
         "delete from yancuo.releases where repository_id=$1 and tag=$2",

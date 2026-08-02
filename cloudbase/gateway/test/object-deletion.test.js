@@ -13,7 +13,7 @@ test("release object deletion is durably queued before metadata commit", () => {
   const branch = gateway.slice(gateway.indexOf('name === "releases/delete"'));
   const queueAt = branch.indexOf("insert into yancuo.object_deletions");
   const releaseDeleteAt = branch.indexOf("delete from yancuo.releases");
-  const commitAt = branch.indexOf('client.query("commit")');
+  const commitAt = branch.indexOf('client.query("commit")', releaseDeleteAt);
   assert.ok(queueAt >= 0 && queueAt < releaseDeleteAt);
   assert.ok(releaseDeleteAt < commitAt);
 });
@@ -29,4 +29,22 @@ test("failed object deletion retains its queue record for retry", () => {
     gateway,
     /releases\/delete[\s\S]{0,1200}deleteFile\([^;]+catch\(\(\) => undefined\)/,
   );
+});
+
+test("release deletion locks the release and refuses active uploads", () => {
+  const branch = gateway.slice(gateway.indexOf('name === "releases/delete"'));
+  const releaseLockAt = branch.indexOf("from yancuo.releases where repository_id=$1 and tag=$2 for update");
+  const uploadLockAt = branch.indexOf("from yancuo.upload_sessions where repository_id=$1 and release_tag=$2 for update");
+  const releaseDeleteAt = branch.indexOf("delete from yancuo.releases");
+  assert.ok(releaseLockAt >= 0 && releaseLockAt < uploadLockAt);
+  assert.ok(uploadLockAt < releaseDeleteAt);
+  assert.match(branch, /uploads\.rows\.some\(\(row\) => row\.claimed_at !== null\)/);
+});
+
+test("uncommitted uploaded objects are queued before release deletion", () => {
+  const branch = gateway.slice(gateway.indexOf('name === "releases/delete"'));
+  assert.match(branch, /\[\.\.\.files\.rows, \.\.\.uploads\.rows\]/);
+  const queueAt = branch.indexOf("insert into yancuo.object_deletions");
+  const releaseDeleteAt = branch.indexOf("delete from yancuo.releases");
+  assert.ok(queueAt >= 0 && queueAt < releaseDeleteAt);
 });
