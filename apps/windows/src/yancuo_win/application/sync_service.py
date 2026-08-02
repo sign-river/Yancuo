@@ -321,6 +321,7 @@ class SyncService:
                 "profile_id": profile_id,
                 "device_id": device_id,
                 "asset_name": "operations.jsonl",
+                "operation_count": len(ops),
                 "sha256": sha,
                 "created_at": _utcnow().isoformat(),
             }
@@ -353,14 +354,24 @@ class SyncService:
                 str(batch.get("sha256") or ""),
             )
             batch_id = str(batch.get("batch_id") or "")
+            batch_device_id = str(batch.get("device_id") or "")
+            expected_count = batch.get("operation_count")
             if (
                 not tag
                 or asset_name != "operations.jsonl"
                 or not _SHA256_RE.fullmatch(expected)
                 or not batch_id
+                or not batch_device_id
                 or batch_id in seen_batches
             ):
                 continue
+            if expected_count is not None and (
+                isinstance(expected_count, bool)
+                or not isinstance(expected_count, int)
+                or expected_count < 0
+                or expected_count > MAX_REMOTE_OPERATIONS_PER_BATCH
+            ):
+                raise DomainError("远端 Operation 批次记录数无效")
             seen_batches.add(batch_id)
             with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
                 path = Path(temporary) / "operations.jsonl"
@@ -399,11 +410,20 @@ class SyncService:
                             except json.JSONDecodeError:
                                 continue
                             if isinstance(value, dict):
+                                if (
+                                    value.get("format") == "yancuo-operation"
+                                    and value.get("device_id") != batch_device_id
+                                ):
+                                    raise DomainError(
+                                        "远端 Operation 设备与批次声明不一致"
+                                    )
                                 batch_items.append(value)
                 except UnicodeDecodeError as exc:
                     raise DomainError("远端 Operation 批次不是有效 UTF-8") from exc
                 if digest.hexdigest() != expected:
                     raise DomainError("远端 Operation 批次哈希不一致")
+                if expected_count is not None and physical_lines != expected_count:
+                    raise DomainError("远端 Operation 批次记录数不一致")
                 items.extend(batch_items)
         return items
 

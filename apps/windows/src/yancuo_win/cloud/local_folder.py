@@ -543,6 +543,13 @@ class LocalFolderProvider(CloudProvider):
                 for operation in operations:
                     if not isinstance(operation, dict):
                         raise DomainError("operation append item must be an object")
+                    if (
+                        operation.get("format") == "yancuo-operation"
+                        and operation.get("device_id") != device_id
+                    ):
+                        raise DomainError(
+                            "operation device_id does not match device directory"
+                        )
                     encoded = (json.dumps(operation, ensure_ascii=False) + "\n").encode(
                         "utf-8"
                     )
@@ -630,6 +637,13 @@ class LocalFolderProvider(CloudProvider):
                         except json.JSONDecodeError:
                             continue
                         if isinstance(raw, dict):
+                            if (
+                                raw.get("format") == "yancuo-operation"
+                                and raw.get("device_id") != device_dir.name
+                            ):
+                                raise DomainError(
+                                    "operation device_id does not match device directory"
+                                )
                             items.append(raw)
             except UnicodeDecodeError as exc:
                 raise DomainError("ops.jsonl must be valid UTF-8") from exc

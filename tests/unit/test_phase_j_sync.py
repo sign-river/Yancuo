@@ -212,8 +212,9 @@ def test_pull_deduplicates_identical_operation_ids_and_rejects_conflicting_conte
         "base_fields": {"solution_markdown": ""},
         "tombstone": False,
     }
-    provider.append_operations("local", "duplicate-operation-repo", "dev-a", [operation])
-    provider.append_operations("local", "duplicate-operation-repo", "dev-b", [operation])
+    provider.append_operations(
+        "local", "duplicate-operation-repo", "dev_remote", [operation, operation]
+    )
 
     result = SyncService(runtime, provider).pull_and_merge()
 
@@ -226,7 +227,7 @@ def test_pull_deduplicates_identical_operation_ids_and_rejects_conflicting_conte
     conflicting = dict(operation)
     conflicting["changed_fields"] = {"solution_markdown": "冲突载荷"}
     conflicting_provider.append_operations(
-        "local", "duplicate-operation-repo", "dev-c", [conflicting]
+        "local", "duplicate-operation-repo", "dev_remote", [conflicting]
     )
 
     with pytest.raises(DomainError, match="已应用 Operation ID 内容冲突"):
@@ -693,6 +694,13 @@ def test_github_operation_batch_push_pull_and_profile_isolation(
     with pytest.raises(DomainError, match="累计大小"):
         SyncService(second, provider)._github_remote_operations(provider)
     monkeypatch.setattr(sync_module, "MAX_REMOTE_OPERATION_TOTAL_BYTES", total_budget)
+
+    spoofed = json.loads(asset.read_text(encoding="utf-8"))
+    spoofed["device_id"] = "dev_spoofed"
+    asset.write_text(json.dumps(spoofed, ensure_ascii=False) + "\n", encoding="utf-8")
+    batch["sha256"] = hashlib.sha256(asset.read_bytes()).hexdigest()
+    with pytest.raises(DomainError, match="设备与批次声明不一致"):
+        SyncService(second, provider)._github_remote_operations(provider)
 
     assets[(batch["tag"], batch["asset_name"])].write_text(
         "tampered\n", encoding="utf-8"

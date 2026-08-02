@@ -421,6 +421,23 @@ def test_local_folder_rolls_back_streamed_operation_batch_on_late_oversized_line
     assert ops_file.read_bytes() == before
 
 
+def test_local_folder_rejects_operation_with_spoofed_device_directory(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+
+    with pytest.raises(DomainError, match="device_id"):
+        provider.append_operations(
+            "local",
+            "repo",
+            "dev-a",
+            [{"format": "yancuo-operation", "device_id": "dev-b"}],
+        )
+
+    assert not (root / "local" / "repo" / "changes" / "dev-a" / "ops.jsonl").exists()
+
+
 def test_local_folder_rejects_non_utf8_operation_logs(tmp_path: Path) -> None:
     root = tmp_path / "cloud"
     provider = LocalFolderProvider(root)
