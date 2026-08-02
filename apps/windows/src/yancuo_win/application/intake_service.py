@@ -20,7 +20,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QImage
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -47,7 +47,6 @@ from yancuo_win.data.models import (
     IntakeSession,
     Problem,
     ProblemSet,
-    ProblemSetAsset,
     ReviewItem,
     ReviewSession,
     Subject,
@@ -79,6 +78,8 @@ _INTAKE_AI_FIELDS = frozenset(
 
 _USER_ANSWER_TIMEOUT_SECONDS = 45
 _USER_ANSWER_RETRY_ATTEMPTS = 1
+_MAX_DERIVED_FIGURE_EDGE = 4096
+_MAX_DERIVED_FIGURE_BYTES = 8 * 1024 * 1024
 
 _COMMIT_FIELDS = frozenset(
     {
@@ -343,96 +344,106 @@ class ProblemIntakeService:
         *,
         tag_names: list[str] | None = None,
         image_paths: list[Path] | None = None,
+        content_blocks: list[dict[str, Any]] | None = None,
         source: str = "manual",
     ) -> Problem:
         """Atomically create a confirmed problem from the inline form."""
 
         payload = self._normalize_fields(fields)
         images = [Path(path) for path in (image_paths or [])]
-        if not (str(payload.get("title") or "").strip() or payload["question_markdown"].strip() or images):
-            raise DomainError("请至少填写标题、题干或添加一张原图")
+        blocks = normalize_content_blocks(content_blocks or [])
+        if not (
+            str(payload.get("title") or "").strip()
+            or payload["question_markdown"].strip()
+            or blocks
+        ):
+            if images:
+                raise DomainError("原图不能直接入库，请先使用 AI 识别并确认题目内容")
+            raise DomainError("请至少填写标题或题干")
         tags = _normalized_tags(tag_names)
+        stored_paths: set[str] = set()
 
-        with self.runtime.session_factory() as session:
-            self._validate_catalog(
-                session,
-                payload.get("subject_id"),
-                payload.get("chapter_id"),
-            )
-            problem = Problem(
-                id=new_id("problem"),
-                status="active",
-                human_confirmed=True,
-                revision=1,
-                **payload,
-            )
-            session.add(problem)
-            session.flush()
+        try:
+            with self.runtime.session_factory() as session:
+                self._validate_catalog(
+                    session,
+                    payload.get("subject_id"),
+                    payload.get("chapter_id"),
+                )
+                problem = Problem(
+                    id=new_id("problem"),
+                    status="active",
+                    human_confirmed=True,
+                    revision=1,
+                    **payload,
+                )
+                session.add(problem)
+                session.flush()
 
-            for name in tags:
-                tag = session.scalar(select(Tag).where(Tag.name == name))
-                if tag is None:
-                    tag = Tag(id=new_id("tag"), name=name, is_system=False)
-                    session.add(tag)
-                    session.flush()
-                problem.tags.append(tag)
+                for name in tags:
+                    tag = session.scalar(select(Tag).where(Tag.name == name))
+                    if tag is None:
+                        tag = Tag(id=new_id("tag"), name=name, is_system=False)
+                        session.add(tag)
+                        session.flush()
+                    problem.tags.append(tag)
 
-            seen_hashes: set[str] = set()
-            for image_path in images:
-                stored = self.store.store_copy(image_path, role="original")
-                if stored.sha256 in seen_hashes:
-                    continue
-                seen_hashes.add(stored.sha256)
-                problem.assets.append(
-                    Asset(
-                        id=new_id("asset"),
-                        role="original",
-                        sha256=stored.sha256,
-                        relative_path=stored.relative_path,
-                        mime_type=stored.mime_type,
-                        size_bytes=stored.size_bytes,
-                        is_immutable=True,
+                if blocks:
+                    formal_blocks, stored_paths = self._materialize_figure_assets(
+                        session,
+                        problem,
+                        blocks,
+                        images,
+                    )
+                    problem.question_content_json = json.dumps(
+                        formal_blocks, ensure_ascii=False
+                    )
+
+                after = sync_snapshot(problem, tags)
+                session.add(
+                    Version(
+                        id=new_id("ver"),
+                        problem_id=problem.id,
+                        revision=1,
+                        source=source,
+                        summary=(
+                            "AI 候选确认入库"
+                            if source == "ai_intake"
+                            else "手动录题并确认入库"
+                        ),
+                        snapshot_json=json.dumps(after, ensure_ascii=False),
+                        created_by=self.runtime.identity.user_id,
                     )
                 )
-
-            after = sync_snapshot(problem, tags)
-            session.add(
-                Version(
-                    id=new_id("ver"),
-                    problem_id=problem.id,
-                    revision=1,
-                    source=source,
-                    summary=(
-                        "AI 候选确认入库"
-                        if source == "ai_intake"
-                        else "手动录题并确认入库"
-                    ),
-                    snapshot_json=json.dumps(after, ensure_ascii=False),
-                    created_by=self.runtime.identity.user_id,
+                session.add(
+                    AuditLog(
+                        id=new_id("audit"),
+                        action="problem_intake_committed",
+                        entity_type="problem",
+                        entity_id=problem.id,
+                        detail_json=json.dumps(
+                            {
+                                "mode": source,
+                                "source_images_retained": 0,
+                                "derived_figure_count": len(stored_paths),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        actor=self.runtime.identity.user_id,
+                    )
                 )
-            )
-            session.add(
-                AuditLog(
-                    id=new_id("audit"),
-                    action="problem_intake_committed",
-                    entity_type="problem",
-                    entity_id=problem.id,
-                    detail_json=json.dumps(
-                        {"mode": source, "image_count": len(seen_hashes)},
-                        ensure_ascii=False,
-                    ),
-                    actor=self.runtime.identity.user_id,
-                )
-            )
-            problem_id = problem.id
-            session.commit()
+                problem_id = problem.id
+                session.commit()
 
-            created = session.scalars(
-                select(Problem)
-                .where(Problem.id == problem_id)
-                .options(selectinload(Problem.tags), selectinload(Problem.assets))
-            ).one()
-            session.expunge_all()
+                created = session.scalars(
+                    select(Problem)
+                    .where(Problem.id == problem_id)
+                    .options(selectinload(Problem.tags), selectinload(Problem.assets))
+                ).one()
+                session.expunge_all()
+        except Exception:
+            self.app._remove_unreferenced_asset_files(stored_paths)
+            raise
 
         SyncService(self.runtime).record_problem_update(
             problem_id,
@@ -449,6 +460,7 @@ class ProblemIntakeService:
         material_markdown: str,
         children: list[tuple[dict[str, Any], list[str] | None]],
         image_paths: list[Path],
+        child_image_paths: list[list[Path]] | None = None,
         source_book: str | None = None,
         source_year: str | None = None,
     ) -> list[Problem]:
@@ -456,95 +468,110 @@ class ProblemIntakeService:
 
         if not children:
             raise DomainError("题组至少需要一个子题")
-        sources = [self.store.store_copy(Path(path), role="original") for path in image_paths]
-        unique_sources = {
-            stored.sha256: stored for stored in sources
-        }
-        if not material_markdown.strip() and not unique_sources:
-            raise DomainError("题组需要共享材料或至少一张来源图片")
+        shared_sources = [Path(path) for path in image_paths]
+        if not material_markdown.strip() and not any(
+            str(fields.get("question_markdown") or "").strip()
+            or normalize_content_blocks(fields.get("content_blocks"))
+            for fields, _tag_names in children
+        ):
+            raise DomainError("题组需要共享材料或结构化子题内容")
+        if child_image_paths is not None and len(child_image_paths) != len(children):
+            raise DomainError("题组子题来源图片数量无效")
 
         created_ids: list[str] = []
         snapshots: list[tuple[str, dict[str, Any]]] = []
-        with self.runtime.session_factory() as session:
-            problem_set = ProblemSet(
-                id=new_id("pset"),
-                title=title.strip(),
-                material_markdown=material_markdown,
-                source_book=source_book,
-                source_year=source_year,
-            )
-            session.add(problem_set)
-            for order, stored in enumerate(unique_sources.values()):
-                problem_set.assets.append(
-                    ProblemSetAsset(
-                        id=new_id("psasset"),
-                        sort_order=order,
-                        sha256=stored.sha256,
-                        relative_path=stored.relative_path,
-                        mime_type=stored.mime_type,
-                        size_bytes=stored.size_bytes,
-                    )
+        stored_paths: set[str] = set()
+        try:
+            with self.runtime.session_factory() as session:
+                problem_set = ProblemSet(
+                    id=new_id("pset"),
+                    title=title.strip(),
+                    material_markdown=material_markdown,
+                    source_book=source_book,
+                    source_year=source_year,
                 )
+                session.add(problem_set)
 
-            for order, (fields, tag_names) in enumerate(children):
-                payload = self._normalize_fields(fields)
-                self._validate_catalog(
-                    session, payload.get("subject_id"), payload.get("chapter_id")
-                )
-                problem = Problem(
-                    id=new_id("problem"),
-                    status="active",
-                    human_confirmed=True,
-                    revision=1,
-                    problem_set=problem_set,
-                    item_order=order,
-                    **payload,
-                )
-                session.add(problem)
-                tags = _normalized_tags(tag_names)
-                for name in tags:
-                    tag = session.scalar(select(Tag).where(Tag.name == name))
-                    if tag is None:
-                        tag = Tag(id=new_id("tag"), name=name, is_system=False)
-                        session.add(tag)
-                        session.flush()
-                    problem.tags.append(tag)
-                session.flush()
-                snapshot = sync_snapshot(problem, tags)
-                session.add(
-                    Version(
-                        id=new_id("ver"),
-                        problem_id=problem.id,
+                for order, (fields, tag_names) in enumerate(children):
+                    payload = self._normalize_fields(fields)
+                    blocks = normalize_content_blocks(fields.get("content_blocks"))
+                    self._validate_catalog(
+                        session, payload.get("subject_id"), payload.get("chapter_id")
+                    )
+                    problem = Problem(
+                        id=new_id("problem"),
+                        status="active",
+                        human_confirmed=True,
                         revision=1,
-                        source="problem_set",
-                        summary="题组子题确认入库",
-                        snapshot_json=json.dumps(snapshot, ensure_ascii=False),
-                        created_by=self.runtime.identity.user_id,
+                        problem_set=problem_set,
+                        item_order=order,
+                        **payload,
+                    )
+                    session.add(problem)
+                    tags = _normalized_tags(tag_names)
+                    for name in tags:
+                        tag = session.scalar(select(Tag).where(Tag.name == name))
+                        if tag is None:
+                            tag = Tag(id=new_id("tag"), name=name, is_system=False)
+                            session.add(tag)
+                            session.flush()
+                        problem.tags.append(tag)
+                    session.flush()
+                    if blocks:
+                        sources = (
+                            [Path(path) for path in child_image_paths[order]]
+                            if child_image_paths is not None
+                            else shared_sources
+                        )
+                        formal_blocks, paths = self._materialize_figure_assets(
+                            session, problem, blocks, sources
+                        )
+                        stored_paths.update(paths)
+                        problem.question_content_json = json.dumps(
+                            formal_blocks, ensure_ascii=False
+                        )
+                    snapshot = sync_snapshot(problem, tags)
+                    session.add(
+                        Version(
+                            id=new_id("ver"),
+                            problem_id=problem.id,
+                            revision=1,
+                            source="problem_set",
+                            summary="题组子题确认入库",
+                            snapshot_json=json.dumps(snapshot, ensure_ascii=False),
+                            created_by=self.runtime.identity.user_id,
+                        )
+                    )
+                    created_ids.append(problem.id)
+                    snapshots.append((problem.id, snapshot))
+                session.add(
+                    AuditLog(
+                        id=new_id("audit"),
+                        action="problem_set_created",
+                        entity_type="problem_set",
+                        entity_id=problem_set.id,
+                        detail_json=json.dumps(
+                            {
+                                "problem_count": len(created_ids),
+                                "source_images_retained": 0,
+                                "derived_figure_count": len(stored_paths),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        actor=self.runtime.identity.user_id,
                     )
                 )
-                created_ids.append(problem.id)
-                snapshots.append((problem.id, snapshot))
-            session.add(
-                AuditLog(
-                    id=new_id("audit"),
-                    action="problem_set_created",
-                    entity_type="problem_set",
-                    entity_id=problem_set.id,
-                    detail_json=json.dumps(
-                        {"problem_count": len(created_ids), "asset_count": len(unique_sources)},
-                        ensure_ascii=False,
-                    ),
-                    actor=self.runtime.identity.user_id,
-                )
-            )
-            session.commit()
-            created = session.scalars(
-                select(Problem)
-                .where(Problem.id.in_(created_ids))
-                .options(selectinload(Problem.tags), selectinload(Problem.assets))
-                .order_by(Problem.item_order)
-            ).all()
-            session.expunge_all()
+                session.commit()
+                created = session.scalars(
+                    select(Problem)
+                    .where(Problem.id.in_(created_ids))
+                    .options(selectinload(Problem.tags), selectinload(Problem.assets))
+                    .order_by(Problem.item_order)
+                ).all()
+                session.expunge_all()
+        except Exception:
+            self.app._remove_unreferenced_asset_files(stored_paths)
+            raise
 
         for problem_id, snapshot in snapshots:
             SyncService(self.runtime).record_problem_update(
@@ -1169,7 +1196,7 @@ class ProblemIntakeService:
                             ),
                             original_image=(
                                 self.store.resolve(asset.relative_path)
-                                if asset
+                                if asset and asset.relative_path
                                 else None
                             ),
                             region=normalize_region(region),
@@ -1235,14 +1262,59 @@ class ProblemIntakeService:
                         IntakeRecognitionUnitAsset.sort_order,
                     )
                 ).scalars().all()
-                return [self.store.resolve(asset.relative_path) for asset in assets]
+                return [
+                    self.store.resolve(asset.relative_path)
+                    for asset in assets
+                    if asset.relative_path
+                ]
             candidate = session.get(IntakeCandidateRecord, candidate_id)
             asset = (
                 session.get(IntakeAsset, candidate.intake_asset_id)
                 if candidate is not None
                 else None
             )
-            return [self.store.resolve(asset.relative_path)] if asset else []
+            return (
+                [self.store.resolve(asset.relative_path)]
+                if asset and asset.relative_path
+                else []
+            )
+
+    def _retire_completed_intake_sources(self, session_id: str) -> None:
+        """Erase source payloads after every candidate in a session is terminal."""
+
+        relative_paths: set[str] = set()
+        with self.runtime.session_factory() as session:
+            intake_session = session.get(IntakeSession, session_id)
+            if intake_session is None or intake_session.status != "completed":
+                return
+            assets = session.scalars(
+                select(IntakeAsset).where(IntakeAsset.session_id == session_id)
+            ).all()
+            for asset in assets:
+                if asset.relative_path:
+                    relative_paths.add(asset.relative_path)
+                asset.role = "retired"
+                asset.original_name = ""
+                asset.sha256 = ""
+                asset.relative_path = ""
+                asset.mime_type = None
+                asset.size_bytes = None
+                asset.width = None
+                asset.height = None
+            session.add(
+                AuditLog(
+                    id=new_id("audit"),
+                    action="intake_sources_retired",
+                    entity_type="intake_session",
+                    entity_id=session_id,
+                    detail_json=json.dumps(
+                        {"source_count": len(relative_paths)}, ensure_ascii=False
+                    ),
+                    actor=self.runtime.identity.user_id,
+                )
+            )
+            session.commit()
+        self.app._remove_unreferenced_asset_files(relative_paths)
 
     def reorder_candidate_source_images(
         self, candidate_id: str, image_paths: list[Path]
@@ -1293,7 +1365,7 @@ class ProblemIntakeService:
                 raise DomainError("候选题已经处理或不存在")
             by_id = {candidate.id: candidate for candidate in candidates}
             children = []
-            source_paths: list[Path] = []
+            child_source_paths: list[list[Path]] = []
             for candidate_id in unique_ids:
                 candidate = by_id[candidate_id]
                 try:
@@ -1301,10 +1373,10 @@ class ProblemIntakeService:
                 except json.JSONDecodeError as exc:
                     raise DomainError("候选题字段无效") from exc
                 children.append((fields if isinstance(fields, dict) else {}, fields.get("tags", []) if isinstance(fields, dict) else []))
-                source_paths.extend(self.candidate_source_images(candidate_id))
+                child_source_paths.append(self.candidate_source_images(candidate_id))
         created = self.create_problem_set(
             title=title, material_markdown=material_markdown,
-            children=children, image_paths=source_paths,
+            children=children, image_paths=[], child_image_paths=child_source_paths,
         )
         with self.runtime.session_factory() as session:
             session_ids: set[str] = set()
@@ -1328,6 +1400,8 @@ class ProblemIntakeService:
                         intake_session.status = "completed"
                         intake_session.completed_at = utcnow()
             session.commit()
+        for session_id in session_ids:
+            self._retire_completed_intake_sources(session_id)
         return created
 
     def structure_suggestions(self, job_id: str) -> list[IntakeStructureSuggestion]:
@@ -1799,32 +1873,9 @@ class ProblemIntakeService:
                 payload,
                 tag_names=tags,
                 image_paths=source_images,
+                content_blocks=content_blocks,
                 source="ai_intake",
             )
-            if content_blocks:
-                from yancuo_win.application.sync_service import (
-                    SyncService,
-                    sync_snapshot,
-                )
-
-                before_content = sync_snapshot(problem, tags)
-                with self.runtime.session_factory() as session:
-                    stored = session.get(Problem, problem.id)
-                    if stored is not None:
-                        stored.question_content_json = json.dumps(
-                            self._materialize_figure_assets(session, stored, content_blocks),
-                            ensure_ascii=False,
-                        )
-                        session.commit()
-                updated_problem = self.app.get_problem(problem.id)
-                if updated_problem is None:
-                    raise DomainError("结构化题目写入后不存在")
-                SyncService(self.runtime).record_problem_update(
-                    updated_problem,
-                    before=before_content,
-                    after=sync_snapshot(updated_problem, tags),
-                )
-                problem = updated_problem
             with self.runtime.session_factory() as session:
                 current = session.get(
                     IntakeCandidateRecord, review_item_id
@@ -1860,7 +1911,15 @@ class ProblemIntakeService:
                     else:
                         intake_session.status = "completed"
                         intake_session.completed_at = utcnow()
+                completed_session_id = (
+                    current.session_id
+                    if intake_session is not None
+                    and intake_session.status == "completed"
+                    else None
+                )
                 session.commit()
+            if completed_session_id:
+                self._retire_completed_intake_sources(completed_session_id)
             return problem
 
         with self.runtime.session_factory() as session:
@@ -1894,37 +1953,63 @@ class ProblemIntakeService:
             raise DomainError("题目入库失败")
         return committed
 
-    def _materialize_figure_assets(self, session, problem: Problem, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Create immutable derived crops; never replace the original source asset."""
-        originals = sorted((asset for asset in problem.assets if asset.role == "original"), key=lambda asset: (asset.created_at, asset.id))
+    def _materialize_figure_assets(
+        self,
+        session,
+        problem: Problem,
+        blocks: list[dict[str, Any]],
+        source_images: list[Path],
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        """Create formal crops from review-only sources without retaining originals."""
         result: list[dict[str, Any]] = []
+        stored_paths: set[str] = set()
         for block in blocks:
-            copied, region = dict(block), normalize_region(block.get("source_region"))
-            index = int(copied.get("source_image_index", 0))
+            copied = {
+                key: value
+                for key, value in block.items()
+                if key
+                not in {
+                    "source_region",
+                    "source_image_index",
+                    "source_asset_id",
+                    "derived_asset_id",
+                }
+            }
+            region = normalize_region(block.get("source_region"))
             if copied.get("type") != "figure":
                 result.append(copied)
                 continue
-            if not region or not 0 <= index < len(originals):
+            index = int(block.get("source_image_index", 0))
+            if not region or not 0 <= index < len(source_images):
                 raise DomainError("题图来源图片或裁剪区域无效，请在确认页重新核对")
-            source = originals[index]
-            image = QImage(str(self.store.resolve(source.relative_path)))
+            image = QImage(str(source_images[index]))
             if image.isNull():
                 raise DomainError("题图来源图片无法读取，未保存结构化题目")
             rect = QRect(round(image.width() * region["x"]), round(image.height() * region["y"]), max(1, round(image.width() * region["width"])), max(1, round(image.height() * region["height"]))).intersected(image.rect())
             crop = image.copy(rect)
+            if max(crop.width(), crop.height()) > _MAX_DERIVED_FIGURE_EDGE:
+                crop = crop.scaled(
+                    _MAX_DERIVED_FIGURE_EDGE,
+                    _MAX_DERIVED_FIGURE_EDGE,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
                 temp_path = Path(handle.name)
             try:
                 if not crop.save(str(temp_path), "PNG"):
                     raise DomainError("题图派生裁剪保存失败，未保存结构化题目")
+                if temp_path.stat().st_size > _MAX_DERIVED_FIGURE_BYTES:
+                    raise DomainError("题图派生裁剪超过 8 MiB，请缩小裁剪范围")
                 derived = self.store.store_copy(temp_path, role="derived_figure")
             finally:
                 temp_path.unlink(missing_ok=True)
             asset = Asset(id=new_id("asset"), role="derived_figure", sha256=derived.sha256, relative_path=derived.relative_path, mime_type=derived.mime_type, size_bytes=derived.size_bytes, width=crop.width(), height=crop.height(), is_immutable=True)
             problem.assets.append(asset)
-            copied.update(derived_asset_id=asset.id, source_asset_id=source.id)
+            stored_paths.add(derived.relative_path)
+            copied["derived_asset_id"] = asset.id
             result.append(copied)
-        return result
+        return result, stored_paths
 
     def reject_ai_candidate(self, review_item_id: str) -> None:
         with self.runtime.session_factory() as session:
@@ -1961,7 +2046,15 @@ class ProblemIntakeService:
                     else:
                         intake_session.status = "completed"
                         intake_session.completed_at = utcnow()
+                completed_session_id = (
+                    candidate.session_id
+                    if intake_session is not None
+                    and intake_session.status == "completed"
+                    else None
+                )
                 session.commit()
+                if completed_session_id:
+                    self._retire_completed_intake_sources(completed_session_id)
                 return
         item = self.ai.get_review_item(review_item_id)
         if item is None:

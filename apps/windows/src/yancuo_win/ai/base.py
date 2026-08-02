@@ -68,7 +68,11 @@ def normalize_content_blocks(value: Any) -> list[dict[str, Any]]:
                         row.append(str(raw_cell or ""))
                 rows.append(row)
             block["rows"] = rows
-        if block["type"] == "figure" and not block["source_region"]:
+        if (
+            block["type"] == "figure"
+            and not block["source_region"]
+            and not block.get("derived_asset_id")
+        ):
             continue
         result.append(block)
     return result

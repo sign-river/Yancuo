@@ -44,6 +44,7 @@ from yancuo_win.data.models import (
     NoteStudyRecord,
     Problem,
     ProblemOrigin,
+    ProblemSetAsset,
     Prompt,
     ReviewItem,
     ReviewPlan,
@@ -1314,6 +1315,11 @@ class AppServices:
                 or s.scalar(
                     select(func.count(NoteIntakeAsset.id)).where(
                         NoteIntakeAsset.relative_path == path
+                    )
+                )
+                or s.scalar(
+                    select(func.count(ProblemSetAsset.id)).where(
+                        ProblemSetAsset.relative_path == path
                     )
                 )
             }

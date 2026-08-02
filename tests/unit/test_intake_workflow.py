@@ -76,8 +76,7 @@ def test_manual_intake_commits_one_complete_problem(
     assert problem.subject_id == subject.id
     assert problem.chapter_id == chapter.id
     assert {tag.name for tag in problem.tags} == {"高频", "极限"}
-    assert len(problem.assets) == 1
-    assert problem.assets[0].is_immutable is True
+    assert problem.assets == []
 
     with intake.runtime.session_factory() as session:
         version = session.scalar(
@@ -792,14 +791,17 @@ def test_many_image_candidate_materializes_traced_figure_from_second_source(
 
     loaded = intake.app.get_problem(committed.id)
     assert loaded is not None
-    assert len([asset for asset in loaded.assets if asset.role == "original"]) == 2
+    assert [asset for asset in loaded.assets if asset.role == "original"] == []
     derived = [asset for asset in loaded.assets if asset.role == "derived_figure"]
     assert len(derived) == 1
     assert derived[0].width == 60
     assert derived[0].height == 54
     blocks = json.loads(loaded.question_content_json)
-    assert blocks[1]["source_image_index"] == 1
     assert blocks[1]["derived_asset_id"] == derived[0].id
+    assert "source_image_index" not in blocks[1]
+    assert "source_region" not in blocks[1]
+    assert "source_asset_id" not in blocks[1]
+    assert intake.candidate_source_images(candidate.review_item_id) == []
 
 
 def test_candidate_sources_can_be_reordered(
@@ -896,7 +898,7 @@ def test_problem_set_keeps_shared_material_once_and_children_independent(
                 ProblemSetAsset.problem_set_id == problem_set.id
             )
         ).all()
-    assert len(assets) == 1
+    assert assets == []
     assert intake.app.count_problems() == 2
 
 
