@@ -18,7 +18,7 @@ data class ProblemSummary(
     val priority: Int,
     val notes: String,
     val nextReviewAt: Instant?,
-    val reviewCount: Int,
+    val reviewCount: Long,
     val mastery: Int?,
 )
 
@@ -34,7 +34,7 @@ data class ProblemDetail(
     val notes: String,
     val tags: List<String>,
     val nextReviewAt: Instant?,
-    val reviewCount: Int,
+    val reviewCount: Long,
     val mastery: Int?,
 )
 
@@ -43,7 +43,7 @@ data class ReviewResult(
     val grade: Int,
     val label: String,
     val nextReviewAt: Instant,
-    val reviewCount: Int,
+    val reviewCount: Long,
 )
 
 class ProblemRepository(
@@ -108,7 +108,7 @@ class ProblemRepository(
                 notes = c.getString(8) ?: "",
                 tags = emptyList(),
                 nextReviewAt = c.getString(9)?.let { parseInstant(it) },
-                reviewCount = c.getInt(10),
+                reviewCount = c.getLong(10),
                 mastery = if (c.isNull(11)) null else c.getInt(11),
             )
         }
@@ -140,6 +140,21 @@ class ProblemRepository(
         status: String? = null,
         tagNames: List<String>? = null,
     ) {
+        require(priority == null || priority in 1..5) { "优先级必须在 1 到 5 之间" }
+        require(status == null || status in setOf("inbox", "active", "archived", "trashed")) {
+            "非法状态"
+        }
+        validateProblemTexts(
+            title,
+            mapOf(
+                "题干" to questionMarkdown,
+                "正确答案" to correctAnswer,
+                "解析" to solutionMarkdown,
+                "错因" to errorAnalysis,
+                "备注" to notes,
+            ),
+        )
+        val normalizedTags = tagNames?.let(::normalizeTagNames)
         val db = dbHelper.writable()
         val now = Instant.now().toString()
         db.beginTransaction()
@@ -152,18 +167,13 @@ class ProblemRepository(
                 solutionMarkdown?.let { put("solution_markdown", it) }
                 errorAnalysis?.let { put("error_analysis", it) }
                 notes?.let { put("notes", it) }
-                priority?.let { put("priority", it.coerceIn(1, 5)) }
-                status?.let {
-                    require(it in setOf("inbox", "active", "archived", "trashed")) {
-                        "非法状态"
-                    }
-                    put("status", it)
-                }
+                priority?.let { put("priority", it) }
+                status?.let { put("status", it) }
             }
             val n = db.update("problems", cv, "id = ?", arrayOf(id))
             require(n == 1) { "题目不存在" }
-            if (tagNames != null) {
-                replaceTags(db, id, tagNames)
+            if (normalizedTags != null) {
+                replaceTags(db, id, normalizedTags)
             }
             db.setTransactionSuccessful()
         } finally {
@@ -185,9 +195,10 @@ class ProblemRepository(
             )
             val (count, status) = cur.use {
                 require(it.moveToFirst()) { "题目不存在" }
-                it.getInt(0) to it.getString(1)
+                it.getLong(0) to it.getString(1)
             }
             require(status != "trashed") { "回收站题目不可复习" }
+            require(count >= 0 && count < Long.MAX_VALUE) { "复习次数无效或已达到上限" }
             val newCount = count + 1
             val newStatus = if (status == "inbox") "active" else status
             db.update(
@@ -260,7 +271,7 @@ class ProblemRepository(
         priority = getInt(3),
         notes = getString(4) ?: "",
         nextReviewAt = getString(5)?.let { parseInstant(it) },
-        reviewCount = getInt(6),
+        reviewCount = getLong(6),
         mastery = if (isNull(7)) null else getInt(7),
     )
 }

@@ -14,6 +14,7 @@ import cn.yancuo.android.data.io.copyToFileLimited
 import cn.yancuo.android.data.repo.ProblemDetail
 import cn.yancuo.android.data.repo.ProblemSummary
 import cn.yancuo.android.data.repo.ReviewResult
+import cn.yancuo.android.data.repo.parseTagCsv
 import cn.yancuo.android.domain.DATA_FORMAT_VERSION
 import cn.yancuo.android.domain.SCHEMA_VERSION
 import kotlinx.coroutines.Dispatchers
@@ -87,7 +88,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setQuery(query: String) {
-        _home.update { it.copy(query = query) }
+        _home.update { it.copy(query = query.take(512)) }
         refreshHome()
     }
 
@@ -115,22 +116,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         tagsCsv: String,
     ) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                app.problems.updateProblem(
-                    id = id,
-                    title = title,
-                    questionMarkdown = questionMarkdown,
-                    correctAnswer = correctAnswer,
-                    solutionMarkdown = solutionMarkdown,
-                    notes = notes,
-                    priority = priority,
-                    status = status,
-                    tagNames = tagsCsv.split(',', '，', ';', '；', ' ').map { it.trim() },
-                )
+            val outcome = runCatching {
+                val tags = parseTagCsv(tagsCsv)
+                withContext(Dispatchers.IO) {
+                    app.problems.updateProblem(
+                        id = id,
+                        title = title,
+                        questionMarkdown = questionMarkdown,
+                        correctAnswer = correctAnswer,
+                        solutionMarkdown = solutionMarkdown,
+                        notes = notes,
+                        priority = priority,
+                        status = status,
+                        tagNames = tags,
+                    )
+                }
             }
-            loadDetail(id)
-            refreshHome()
-            _home.update { it.copy(message = "已保存") }
+            if (outcome.isSuccess) {
+                loadDetail(id)
+                refreshHome()
+                _home.update { it.copy(message = "已保存") }
+            } else {
+                _home.update { it.copy(message = "保存失败：${outcome.exceptionOrNull()?.message}") }
+            }
         }
     }
 
