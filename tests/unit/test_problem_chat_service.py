@@ -323,3 +323,63 @@ def test_visual_reference_snapshot_is_ordered_and_immutable(
             "伪造引用",
             [ProblemReference("asset_reference", 1, 0.0, 0.0, 1.0, 1.0)],
         )
+
+
+def test_visual_references_reject_excessive_count_before_persisting(
+    chat: tuple[AppServices, ProblemChatService],
+) -> None:
+    services, problem_chat = chat
+    problem = services.create_problem(title="引用数量题", status="active")
+    conversation = problem_chat.create_conversation(problem.id)
+    reference = ProblemReference("missing", 0, 0.0, 0.0, 1.0, 1.0)
+
+    with pytest.raises(DomainError, match="20"):
+        problem_chat.send_message(
+            conversation.id,
+            "过多引用",
+            [reference] * (chat_module._MAX_CHAT_REFERENCE_COUNT + 1),
+        )
+
+    loaded = problem_chat.get_conversation(conversation.id)
+    assert loaded is not None
+    assert loaded.messages == []
+
+
+def test_visual_reference_rejects_decompression_bomb_before_ai(
+    chat: tuple[AppServices, ProblemChatService],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services, problem_chat = chat
+    problem = services.create_problem(title="超大像素引用", status="active")
+    image_path = tmp_path / "large-pixels.png"
+    image = QImage(40, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor("#FF0000"))
+    assert image.save(str(image_path), "PNG")
+    stored = services.store.store_copy(image_path, role="original")
+    with problem_chat._session() as session:
+        session.add(
+            Asset(
+                id="asset_large_pixels",
+                problem_id=problem.id,
+                role="original",
+                sha256=stored.sha256,
+                relative_path=stored.relative_path,
+                mime_type="image/png",
+            )
+        )
+        session.commit()
+    monkeypatch.setattr(chat_module, "_MAX_CHAT_REFERENCE_SOURCE_PIXELS", 100)
+    provider = _CapturingChatProvider()
+    monkeypatch.setattr(chat_module, "get_provider", lambda *_args: provider)
+    conversation = problem_chat.create_conversation(problem.id)
+
+    failed = problem_chat.send_message(
+        conversation.id,
+        "解释选区",
+        [ProblemReference("asset_large_pixels", 0, 0.0, 0.0, 1.0, 1.0)],
+    )
+
+    assert failed.status == "failed"
+    assert "像素" in failed.error_message
+    assert provider.requests == []

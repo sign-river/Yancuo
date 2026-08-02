@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImageReader
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -25,6 +25,9 @@ from yancuo_win.domain.rules import DomainError
 _MAX_CHAT_IMAGE_COUNT = 20
 _MAX_CHAT_IMAGE_BYTES = 32 * 1024 * 1024
 _MAX_CHAT_IMAGE_TOTAL_BYTES = 64 * 1024 * 1024
+_MAX_CHAT_REFERENCE_COUNT = 20
+_MAX_CHAT_REFERENCE_SOURCE_PIXELS = 25_000_000
+_MAX_CHAT_REFERENCE_TOTAL_BYTES = 32 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -200,6 +203,8 @@ class ProblemChatService:
         content = content.strip()
         if not content:
             raise DomainError("请输入要讨论的问题")
+        if len(references) > _MAX_CHAT_REFERENCE_COUNT:
+            raise DomainError(f"单条消息最多包含 {_MAX_CHAT_REFERENCE_COUNT} 个视觉引用")
         parsed_references = [ProblemReference.from_value(value) for value in references]
         with self._session() as session:
             conversation = session.get(ProblemConversation, conversation_id)
@@ -375,6 +380,9 @@ class ProblemChatService:
     ) -> list[dict[str, Any]]:
         """Rebuild ordered crops from immutable originals without sending full images."""
 
+        if len(references) > _MAX_CHAT_REFERENCE_COUNT:
+            raise DomainError(f"单条消息最多包含 {_MAX_CHAT_REFERENCE_COUNT} 个视觉引用")
+
         with self._session() as session:
             sources = {
                 asset.id: asset.relative_path
@@ -384,12 +392,19 @@ class ProblemChatService:
             }
         store = ObjectStore(self.runtime.paths.asset_objects_dir)
         content: list[dict[str, Any]] = []
+        total_bytes = 0
         for index, value in enumerate(references, start=1):
             reference = ProblemReference.from_value(value)
             source = sources.get(reference.asset_id)
             if source is None:
                 continue
-            image = QImage(str(store.resolve(source)))
+            reader = QImageReader(str(store.resolve(source)))
+            image_size = reader.size()
+            if not image_size.isValid():
+                continue
+            if image_size.width() * image_size.height() > _MAX_CHAT_REFERENCE_SOURCE_PIXELS:
+                raise DomainError("视觉引用原图解码像素超过安全上限")
+            image = reader.read()
             if image.isNull():
                 continue
             x, y = round(image.width() * reference.x), round(image.height() * reference.y)
@@ -401,8 +416,13 @@ class ProblemChatService:
             encoded = QByteArray()
             buffer = QBuffer(encoded)
             buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-            crop.save(buffer, "PNG")
+            saved = crop.save(buffer, "PNG")
             buffer.close()
+            if not saved:
+                continue
+            total_bytes += encoded.size()
+            if total_bytes > _MAX_CHAT_REFERENCE_TOTAL_BYTES:
+                raise DomainError("单条消息的视觉引用总大小不能超过 32 MiB")
             content.extend(
                 [
                     {
