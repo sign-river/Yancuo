@@ -32,6 +32,10 @@ function newUploadToken() {
   return crypto.randomBytes(32).toString("base64url");
 }
 
+function subjectStorageKey(subject) {
+  return crypto.createHash("sha256").update(String(subject), "utf8").digest("hex");
+}
+
 function safeTokenEqual(token, expectedHash) {
   const actual = Buffer.from(tokenHash(token), "hex");
   const expected = Buffer.from(String(expectedHash || ""), "hex");
@@ -43,5 +47,6 @@ module.exports = {
   boundedText,
   newUploadToken,
   safeTokenEqual,
+  subjectStorageKey,
   tokenHash,
 };

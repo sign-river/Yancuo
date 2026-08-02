@@ -7,6 +7,7 @@ const {
   boundedText,
   newUploadToken,
   safeTokenEqual,
+  subjectStorageKey,
   tokenHash,
 } = require("../security");
 
@@ -25,4 +26,13 @@ test("opaque upload tokens compare by hash", () => {
 test("text budgets are byte based", () => {
   assert.equal(boundedText("题目", "body", 6), "题目");
   assert.throws(() => boundedText("题目", "body", 5));
+});
+
+test("storage namespaces never expose raw identity subjects", () => {
+  const subject = "user/name@example.com";
+  const key = subjectStorageKey(subject);
+  assert.match(key, /^[a-f0-9]{64}$/);
+  assert.equal(key.includes(subject), false);
+  assert.equal(subjectStorageKey(subject), key);
+  assert.notEqual(subjectStorageKey("other-user"), key);
 });

@@ -59,7 +59,7 @@ Content-Type: application/json
 | `assets/download-url` | 返回一次性私有下载地址。 |
 | `locks/acquire/release` | 对同一逻辑仓库执行原子主写入锁；`acquire` 返回 `acquired: true/false`。 |
 
-对象路径必须由函数生成，例如 `yancuo/{subject}/{repository}/releases/{tag}/{asset_name}`，不能接受客户端传入的任意路径。`assets/commit` 是上传提交点；在它成功前，`manifest/write` 不得指向该快照。
+对象路径必须由函数生成，例如 `yancuo/{sha256(subject)}/{repository}/uploads/{upload_id}/{asset_name}`，不能接受客户端传入的任意路径，也不能暴露原始用户标识。每次上传使用独立对象路径；`assets/commit` 是唯一提交点，同一发布标签下的同名附件一经提交不得覆盖。在它成功前，`manifest/write` 不得指向该快照。
 
 ## 安全与边界
 

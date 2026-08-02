@@ -9,6 +9,7 @@ const {
   boundedText,
   newUploadToken,
   safeTokenEqual,
+  subjectStorageKey,
   tokenHash,
 } = require("./security");
 
@@ -251,6 +252,11 @@ async function action(name, payload, identity, req) {
         [repo.repository_id, tag],
       );
       if (!release.rowCount) fail("发布不存在", 404);
+      const existingAsset = await client.query(
+        "select 1 from yancuo.release_assets where repository_id=$1 and release_tag=$2 and asset_name=$3",
+        [repo.repository_id, tag, assetName],
+      );
+      if (existingAsset.rowCount) fail("发布附件已经存在且不可替换", 409);
       const usage = await client.query(
         "select coalesce(sum(byte_size),0)::bigint as bytes from yancuo.release_assets where repository_id in (select repository_id from yancuo.repositories where subject_id=$1)",
         [subject],
@@ -258,7 +264,7 @@ async function action(name, payload, identity, req) {
       if (Number(usage.rows[0].bytes) + size > USER_STORAGE_BYTES) fail("已达到个人云存储额度", 409);
       const uploadId = cryptoRandomId();
       const uploadToken = newUploadToken();
-      const storagePath = `yancuo/${subject}/${repo.repository_id}/releases/${tag}/${assetName}`;
+      const storagePath = `yancuo/${subjectStorageKey(subject)}/${repo.repository_id}/uploads/${uploadId}/${assetName}`;
       await client.query(
         "insert into yancuo.upload_sessions(upload_id,subject_id,repository_id,release_tag,asset_name,storage_path,expected_size,token_hash,expires_at) values($1,$2,$3,$4,$5,$6,$7,$8,now()+interval '10 minutes')",
         [uploadId, subject, repo.repository_id, tag, assetName, storagePath, size, tokenHash(uploadToken)],
@@ -271,19 +277,22 @@ async function action(name, payload, identity, req) {
     }
     if (name === "assets/commit") {
       const uploadId = String(payload.upload_id || "");
-      const result = await client.query(
-        "select * from yancuo.upload_sessions where upload_id=$1 and subject_id=$2 and repository_id=$3 and uploaded_at is not null and expires_at>=now()",
+      await client.query("begin");
+      const claimed = await client.query(
+        "delete from yancuo.upload_sessions where upload_id=$1 and subject_id=$2 and repository_id=$3 and uploaded_at is not null and expires_at>=now() returning *",
         [uploadId, subject, repo.repository_id],
       );
-      const upload = result.rows[0];
-      if (!upload || Number(upload.actual_size) !== Number(upload.expected_size)) fail("上传尚未完成或大小不匹配", 409);
-      if (upload.release_tag !== payload.tag || upload.asset_name !== payload.asset_name) fail("上传提交参数不匹配", 409);
-      await client.query("begin");
+      const upload = claimed.rows[0];
+      if (!upload || Number(upload.actual_size) !== Number(upload.expected_size)) {
+        fail("上传尚未完成、已提交或大小不匹配", 409);
+      }
+      if (upload.release_tag !== payload.tag || upload.asset_name !== payload.asset_name) {
+        fail("上传提交参数不匹配", 409);
+      }
       await client.query(
-        "insert into yancuo.release_assets(repository_id,release_tag,asset_name,storage_path,file_id,byte_size) values($1,$2,$3,$4,$5,$6) on conflict(repository_id,release_tag,asset_name) do update set storage_path=excluded.storage_path,file_id=excluded.file_id,byte_size=excluded.byte_size,committed_at=now()",
+        "insert into yancuo.release_assets(repository_id,release_tag,asset_name,storage_path,file_id,byte_size) values($1,$2,$3,$4,$5,$6)",
         [repo.repository_id, upload.release_tag, upload.asset_name, upload.storage_path, upload.file_id, upload.actual_size],
       );
-      await client.query("delete from yancuo.upload_sessions where upload_id=$1", [uploadId]);
       await client.query("commit");
       return { name: upload.asset_name, size: Number(upload.actual_size) };
     }
