@@ -45,6 +45,8 @@ MAX_REMOTE_OPERATION_BATCHES = 10_000
 MAX_REMOTE_OPERATION_BATCH_BYTES = 64 * 1024 * 1024
 MAX_REMOTE_OPERATION_LINE_BYTES = 48 * 1024 * 1024
 MAX_REMOTE_OPERATIONS_PER_BATCH = 100_000
+MAX_REMOTE_OPERATION_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_REMOTE_OPERATIONS_TOTAL = 250_000
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -335,6 +337,8 @@ class SyncService:
             raise DomainError("云端 Operation 批次索引过大")
         items: list[dict[str, Any]] = []
         seen_batches: set[str] = set()
+        total_remote_bytes = 0
+        total_remote_lines = 0
         for batch in batches:
             if (
                 not isinstance(batch, dict)
@@ -362,8 +366,14 @@ class SyncService:
                 provider.download_release_asset(
                     self.owner, self.repo, tag=tag, asset_name=asset_name, dest=path
                 )
-                if not path.is_file() or path.stat().st_size > MAX_REMOTE_OPERATION_BATCH_BYTES:
+                if not path.is_file():
                     raise DomainError("远端 Operation 批次文件过大或不存在")
+                batch_size = path.stat().st_size
+                if batch_size > MAX_REMOTE_OPERATION_BATCH_BYTES:
+                    raise DomainError("远端 Operation 批次文件过大或不存在")
+                total_remote_bytes += batch_size
+                if total_remote_bytes > MAX_REMOTE_OPERATION_TOTAL_BYTES:
+                    raise DomainError("远端 Operation 批次累计大小过大")
                 digest = hashlib.sha256()
                 batch_items: list[dict[str, Any]] = []
                 physical_lines = 0
@@ -374,6 +384,9 @@ class SyncService:
                             physical_lines += 1
                             if physical_lines > MAX_REMOTE_OPERATIONS_PER_BATCH:
                                 raise DomainError("远端 Operation 批次物理行数过多")
+                            total_remote_lines += 1
+                            if total_remote_lines > MAX_REMOTE_OPERATIONS_TOTAL:
+                                raise DomainError("远端 Operation 批次累计物理行数过多")
                             if len(line_bytes) > MAX_REMOTE_OPERATION_LINE_BYTES:
                                 raise DomainError("远端 Operation 批次单行过大")
                             total_bytes += len(line_bytes)

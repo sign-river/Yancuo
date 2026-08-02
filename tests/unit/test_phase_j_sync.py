@@ -638,6 +638,15 @@ def test_github_operation_batch_push_pull_and_profile_isolation(
     assert repeated["applied"] == 0
 
     batch = manifest["operation_batches"][0]
+    asset = assets[(batch["tag"], batch["asset_name"])]
+    total_budget = sync_module.MAX_REMOTE_OPERATION_TOTAL_BYTES
+    monkeypatch.setattr(
+        sync_module, "MAX_REMOTE_OPERATION_TOTAL_BYTES", asset.stat().st_size - 1
+    )
+    with pytest.raises(DomainError, match="累计大小"):
+        SyncService(second, provider)._github_remote_operations(provider)
+    monkeypatch.setattr(sync_module, "MAX_REMOTE_OPERATION_TOTAL_BYTES", total_budget)
+
     assets[(batch["tag"], batch["asset_name"])].write_text(
         "tampered\n", encoding="utf-8"
     )
