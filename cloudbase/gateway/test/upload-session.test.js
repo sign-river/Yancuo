@@ -54,3 +54,11 @@ test("expired rows remain retryable when object deletion fails", () => {
     /delete from yancuo\.upload_sessions[^\n]+returning file_id/i,
   );
 });
+
+test("expired upload cleanup is bounded per request", () => {
+  const cleanup = gateway.slice(
+    gateway.indexOf("async function cleanupExpiredUploads"),
+    gateway.indexOf("async function cleanupPendingDeletions"),
+  );
+  assert.match(cleanup, /order by expires_at limit 100/i);
+});

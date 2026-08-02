@@ -231,7 +231,7 @@ async function requireWriteLock(client, repositoryId, payload) {
 
 async function cleanupExpiredUploads(subject) {
   const expired = await pool.query(
-    "select upload_id,file_id from yancuo.upload_sessions where subject_id=$1 and expires_at < now() and (claimed_at is null or claimed_at < now()-interval '1 hour')",
+    "select upload_id,file_id from yancuo.upload_sessions where subject_id=$1 and expires_at < now() and (claimed_at is null or claimed_at < now()-interval '1 hour') order by expires_at limit 100",
     [subject],
   );
   for (const row of expired.rows) {
