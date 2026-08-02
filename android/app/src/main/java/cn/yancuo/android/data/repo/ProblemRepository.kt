@@ -2,7 +2,6 @@ package cn.yancuo.android.data.repo
 
 import android.content.ContentValues
 import android.database.Cursor
-import cn.yancuo.android.data.assets.ObjectStore
 import cn.yancuo.android.data.db.YancuoDb
 import cn.yancuo.android.domain.REVIEW_GRADES
 import cn.yancuo.android.domain.isDue
@@ -10,7 +9,6 @@ import cn.yancuo.android.domain.masteryFromGrade
 import cn.yancuo.android.domain.newId
 import cn.yancuo.android.domain.nextReviewAt
 import cn.yancuo.android.domain.validateGrade
-import java.io.File
 import java.time.Instant
 
 data class ProblemSummary(
@@ -50,7 +48,6 @@ data class ReviewResult(
 
 class ProblemRepository(
     private val dbHelper: YancuoDb,
-    private val objectStore: ObjectStore,
 ) {
 
     fun listProblems(status: String? = null, query: String? = null): List<ProblemSummary> {
@@ -129,63 +126,6 @@ class ProblemRepository(
             }
         }
         return problem.copy(tags = tags)
-    }
-
-    /** 将图片写入对象库并创建收件箱题目。 */
-    fun createFromImages(imageFiles: List<File>): List<String> {
-        if (imageFiles.isEmpty()) return emptyList()
-        val db = dbHelper.writable()
-        val created = mutableListOf<String>()
-        val now = Instant.now().toString()
-        db.beginTransaction()
-        try {
-            for (file in imageFiles) {
-                val stored = objectStore.storeCopy(file, role = "original")
-                val problemId = newId("problem")
-                val title = file.nameWithoutExtension.ifBlank { "未命名" }
-                db.insertOrThrow(
-                    "problems",
-                    null,
-                    ContentValues().apply {
-                        put("id", problemId)
-                        put("status", "inbox")
-                        put("title", title)
-                        put("question_markdown", "")
-                        put("question_latex", "")
-                        put("user_answer", "")
-                        put("correct_answer", "")
-                        put("solution_markdown", "")
-                        put("error_analysis", "")
-                        put("notes", "")
-                        put("priority", 3)
-                        put("revision", 1)
-                        put("review_count", 0)
-                        put("created_at", now)
-                        put("updated_at", now)
-                    },
-                )
-                db.insertOrThrow(
-                    "assets",
-                    null,
-                    ContentValues().apply {
-                        put("id", newId("asset"))
-                        put("problem_id", problemId)
-                        put("role", "original")
-                        put("sha256", stored.sha256)
-                        put("relative_path", stored.relativePath)
-                        put("mime_type", stored.mimeType)
-                        put("size_bytes", stored.sizeBytes)
-                        put("is_immutable", 1)
-                        put("created_at", now)
-                    },
-                )
-                created += problemId
-            }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-        return created
     }
 
     fun updateProblem(

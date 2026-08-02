@@ -10,7 +10,6 @@ import cn.yancuo.android.YancuoApp
 import cn.yancuo.android.data.ebpack.EbpackException
 import cn.yancuo.android.data.ebpack.EbpackImportResult
 import cn.yancuo.android.data.io.MAX_EBPACK_BYTES
-import cn.yancuo.android.data.io.MAX_IMPORT_IMAGE_BYTES
 import cn.yancuo.android.data.io.copyToFileLimited
 import cn.yancuo.android.data.repo.ProblemDetail
 import cn.yancuo.android.data.repo.ProblemSummary
@@ -131,34 +130,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             loadDetail(id)
             refreshHome()
             _home.update { it.copy(message = "已保存") }
-        }
-    }
-
-    fun importImages(files: List<File>) {
-        viewModelScope.launch {
-            _busy.value = true
-            try {
-                val created = withContext(Dispatchers.IO) {
-                    app.problems.createFromImages(files)
-                }
-                _home.update { it.copy(tab = HomeTab.INBOX, message = "已导入 ${created.size} 题到收件箱") }
-                refreshHome()
-            } finally {
-                _busy.value = false
-            }
-        }
-    }
-
-    fun copyUriToCache(uri: Uri, nameHint: String): File? {
-        return try {
-            val dir = File(app.cacheDir, "imports").also { it.mkdirs() }
-            val dest = File(dir, "${System.currentTimeMillis()}_$nameHint")
-            app.contentResolver.openInputStream(uri)?.use { input ->
-                copyToFileLimited(input, dest, MAX_IMPORT_IMAGE_BYTES)
-            } ?: return null
-            dest
-        } catch (_: Exception) {
-            null
         }
     }
 

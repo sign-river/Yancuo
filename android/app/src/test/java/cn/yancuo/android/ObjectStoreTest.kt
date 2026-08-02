@@ -33,7 +33,7 @@ class ObjectStoreTest {
         val store = ObjectStore(objects)
         val src = File(tmp.root, "vector.bin")
         src.writeBytes(vectorBytes)
-        val stored = store.storeCopy(src, role = "original")
+        val stored = store.storeCopy(src)
         assertEquals(expectedSha, stored.sha256)
         assertEquals("objects/bb/$expectedSha.bin", stored.relativePath)
         assertTrue(stored.absolutePath.isFile)
@@ -42,7 +42,7 @@ class ObjectStoreTest {
             stored.absolutePath.canonicalFile,
         )
 
-        val again = store.storeCopy(src, role = "original")
+        val again = store.storeCopy(src)
         assertTrue(again.alreadyExisted)
         assertEquals(stored.sha256, again.sha256)
     }

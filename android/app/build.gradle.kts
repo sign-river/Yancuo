@@ -73,8 +73,6 @@ dependencies {
 
     implementation("androidx.security:security-crypto:1.1.0")
 
-    implementation("io.coil-kt:coil-compose:2.5.0")
-
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

@@ -7,7 +7,6 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 
-const val MAX_IMPORT_IMAGE_BYTES: Long = 32L * 1024 * 1024
 const val MAX_EBPACK_BYTES: Long = 512L * 1024 * 1024
 const val MAX_EBPACK_METADATA_BYTES: Long = 8L * 1024 * 1024
 

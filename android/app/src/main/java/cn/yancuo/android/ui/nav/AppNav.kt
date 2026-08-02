@@ -7,7 +7,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import cn.yancuo.android.ui.AppViewModel
-import cn.yancuo.android.ui.screens.CaptureScreen
 import cn.yancuo.android.ui.screens.HomeScreen
 import cn.yancuo.android.ui.screens.ProblemDetailScreen
 import cn.yancuo.android.ui.screens.SettingsScreen
@@ -22,19 +21,9 @@ fun AppNav(
         composable(Routes.HOME) {
             HomeScreen(
                 viewModel = viewModel,
-                onCapture = { navController.navigate(Routes.CAPTURE) },
                 onTodayReview = { navController.navigate(Routes.TODAY_REVIEW) },
                 onSettings = { navController.navigate(Routes.SETTINGS) },
                 onOpenProblem = { id -> navController.navigate(Routes.problemDetail(id)) },
-            )
-        }
-        composable(Routes.CAPTURE) {
-            CaptureScreen(
-                viewModel = viewModel,
-                onBack = { navController.popBackStack() },
-                onDone = {
-                    navController.popBackStack(Routes.HOME, inclusive = false)
-                },
             )
         }
         composable(Routes.TODAY_REVIEW) {
