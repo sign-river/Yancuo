@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 
 from yancuo_win import __version__
 from yancuo_win.application.bootstrap import RuntimeContext
+from yancuo_win.application.sqlite_snapshot import create_sqlite_snapshot
 from yancuo_win.data.models import Problem
 from yancuo_win.domain.identity import DATA_FORMAT_VERSION, SCHEMA_VERSION
 from yancuo_win.domain.rules import DomainError
@@ -80,26 +81,6 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _backup_sqlite(source: Path, destination: Path) -> None:
-    if source.is_symlink() or not source.is_file():
-        raise DomainError("数据库不存在或不是普通文件，无法导出")
-    try:
-        with (
-            closing(sqlite3.connect(source)) as source_connection,
-            closing(sqlite3.connect(destination)) as destination_connection,
-        ):
-            source_connection.backup(destination_connection)
-            # FTS5 trigram is a Windows-side disposable index. Older Android
-            # SQLite builds may not provide that tokenizer, so portable
-            # snapshots carry the canonical projection but omit the virtual
-            # table. Windows recreates it on the next bootstrap.
-            destination_connection.execute("DROP TABLE IF EXISTS search_documents_fts")
-            destination_connection.commit()
-    except (OSError, sqlite3.DatabaseError) as exc:
-        destination.unlink(missing_ok=True)
-        raise DomainError("数据库快照创建失败") from exc
-
-
 class EbpackService:
     def __init__(self, runtime: RuntimeContext) -> None:
         self.runtime = runtime
@@ -121,7 +102,8 @@ class EbpackService:
 
             (staging / "database").mkdir()
             snapshot = staging / "database" / "snapshot.sqlite"
-            _backup_sqlite(db_src, snapshot)
+            # FTS5 trigram is platform-local and rebuilt after restore.
+            create_sqlite_snapshot(db_src, snapshot, drop_tables=("search_documents_fts",))
 
             migrations = {
                 "schema_version_at_export": self.runtime.schema_version,

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import zipfile
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -116,12 +119,16 @@ def test_purge_trashed_removes_ai_dependencies_and_orphan_file(
     with services.session() as session:
         assert session.get(Asset, asset_id) is None
         assert session.get(AiJob, job.id) is None
-        assert session.scalar(
-            select(AiJobItem).where(AiJobItem.problem_id == problem_id)
-        ) is None
-        assert session.scalar(
-            select(ReviewItem).where(ReviewItem.problem_id == problem_id)
-        ) is None
+        assert (
+            session.scalar(select(AiJobItem).where(AiJobItem.problem_id == problem_id))
+            is None
+        )
+        assert (
+            session.scalar(
+                select(ReviewItem).where(ReviewItem.problem_id == problem_id)
+            )
+            is None
+        )
 
 
 def test_search_filter_and_tags(services: AppServices) -> None:
@@ -135,14 +142,14 @@ def test_search_filter_and_tags(services: AppServices) -> None:
     assert len(tagged) == 1
 
 
-def test_backup_restore_and_word_export(
-    services: AppServices, tmp_path: Path
-) -> None:
+def test_backup_restore_and_word_export(services: AppServices, tmp_path: Path) -> None:
     img = tmp_path / "b.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"payload-xyz")
     created = services.import_images([img])["created"]
     pid = created[0]
-    services.update_problem(pid, {"question_markdown": "原题内容A", "correct_answer": "42"})
+    services.update_problem(
+        pid, {"question_markdown": "原题内容A", "correct_answer": "42"}
+    )
 
     backup = services.create_backup(tmp_path / "bak.zip")
     assert backup.is_file()
@@ -159,6 +166,57 @@ def test_backup_restore_and_word_export(
     text = "\n".join(p.text for p in doc.paragraphs)
     assert "原题内容A" in text
     assert "42" in text
+
+
+def test_local_backup_includes_committed_wal_changes(
+    services: AppServices, tmp_path: Path
+) -> None:
+    problem = services.create_problem(title="before WAL")
+    writer = sqlite3.connect(services.runtime.paths.database)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "UPDATE problems SET title = ? WHERE id = ?",
+            ("committed in WAL", problem.id),
+        )
+        writer.commit()
+
+        backup = services.create_backup(tmp_path / "wal-backup.zip")
+        snapshot = tmp_path / "local-snapshot.sqlite"
+        with zipfile.ZipFile(backup, "r") as archive:
+            snapshot.write_bytes(archive.read("database/error_book.db"))
+        with closing(sqlite3.connect(snapshot)) as connection:
+            title = connection.execute(
+                "SELECT title FROM problems WHERE id = ?", (problem.id,)
+            ).fetchone()[0]
+    finally:
+        writer.close()
+
+    assert title == "committed in WAL"
+
+
+def test_local_backup_failure_preserves_existing_destination(
+    services: AppServices, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services.create_problem(title="atomic local backup")
+    destination = tmp_path / "existing.zip"
+    destination.write_bytes(b"previous-backup")
+
+    def fail_write(
+        self, filename, arcname=None, compress_type=None, compresslevel=None
+    ):
+        del self, filename, arcname, compress_type, compresslevel
+        raise OSError("simulated local backup failure")
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", fail_write)
+
+    with pytest.raises(OSError, match="simulated"):
+        services.create_backup(destination)
+
+    assert destination.read_bytes() == b"previous-backup"
+    assert list(tmp_path.glob(".existing.zip.*.tmp")) == []
+    assert list(services.runtime.paths.cache_dir.glob("backup-export-*")) == []
 
 
 def test_word_export_preserves_structured_table_order(
@@ -368,9 +426,11 @@ def test_catalog_choices_reordering_and_problem_category_move(
         math.id,
     ]
     services.reorder_chapter(derivative.id, -1)
-    assert [chapter.id for chapter in services.list_chapters(math.id) if chapter.parent_id is None][
-        :2
-    ] == [derivative.id, integral.id]
+    assert [
+        chapter.id
+        for chapter in services.list_chapters(math.id)
+        if chapter.parent_id is None
+    ][:2] == [derivative.id, integral.id]
 
     assert (
         services.move_problems_to_category(
@@ -403,6 +463,4 @@ def test_catalog_choices_reordering_and_problem_category_move(
     scopes = services.list_knowledge_scopes()
     assert any(scope.label == "高等数学 / 积分 / 二重积分" for scope in scopes)
     with pytest.raises(DomainError, match="天数"):
-        services.list_problems(
-            ProblemFilter(status="active", created_within_days=0)
-        )
+        services.list_problems(ProblemFilter(status="active", created_within_days=0))

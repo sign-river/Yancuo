@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import random
 import shutil
 import stat
+import tempfile
 import zipfile
 from email.utils import parsedate_to_datetime
 from time import monotonic
@@ -22,6 +24,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from yancuo_win.application.bootstrap import RuntimeContext
+from yancuo_win.application.sqlite_snapshot import create_sqlite_snapshot
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.infrastructure.safe_http import safe_urlopen
 from yancuo_win.data.ids import new_id
@@ -165,9 +168,7 @@ class AppServices:
 
     def list_subjects(self) -> list[Subject]:
         with self.session() as s:
-            rows = s.scalars(
-                select(Subject).order_by(Subject.sort_order, Subject.name)
-            ).all()
+            rows = s.scalars(select(Subject).order_by(Subject.sort_order, Subject.name)).all()
             s.expunge_all()
             return list(rows)
 
@@ -322,9 +323,14 @@ class AppServices:
         if not normalized:
             return
         for chapter in session.scalars(select(Chapter).where(Chapter.parent_id == parent_id)):
-            if chapter.id != chapter_id and self._normalized_taxonomy_name(chapter.name) == normalized:
+            if (
+                chapter.id != chapter_id
+                and self._normalized_taxonomy_name(chapter.name) == normalized
+            ):
                 raise DomainError(f"分类名称与既有章节近义重复：{chapter.name}")
-        alias = session.scalar(select(ChapterAlias).where(ChapterAlias.normalized_name == normalized))
+        alias = session.scalar(
+            select(ChapterAlias).where(ChapterAlias.normalized_name == normalized)
+        )
         if alias is not None and alias.chapter_id != chapter_id:
             raise DomainError("分类名称与既有章节别名近义重复")
 
@@ -336,7 +342,12 @@ class AppServices:
             if s.get(Chapter, chapter_id) is None:
                 raise DomainError("章节不存在")
             self._ensure_no_chapter_alias_conflict(s, chapter_id=chapter_id, name=name)
-            alias = ChapterAlias(id=new_id("chalias"), chapter_id=chapter_id, name=name, normalized_name=self._normalized_taxonomy_name(name))
+            alias = ChapterAlias(
+                id=new_id("chalias"),
+                chapter_id=chapter_id,
+                name=name,
+                normalized_name=self._normalized_taxonomy_name(name),
+            )
             s.add(alias)
             s.commit()
             s.refresh(alias)
@@ -363,7 +374,9 @@ class AppServices:
                 parent_id=parent_id,
                 name=name,
             )
-            self._ensure_no_chapter_alias_conflict(s, chapter_id=None, name=name, parent_id=parent_id)
+            self._ensure_no_chapter_alias_conflict(
+                s, chapter_id=None, name=name, parent_id=parent_id
+            )
             ch = Chapter(
                 id=new_id("ch"),
                 subject_id=subject_id,
@@ -441,14 +454,10 @@ class AppServices:
             if chapter is None:
                 return
             has_children = s.scalar(
-                select(func.count())
-                .select_from(Chapter)
-                .where(Chapter.parent_id == chapter_id)
+                select(func.count()).select_from(Chapter).where(Chapter.parent_id == chapter_id)
             )
             has_problems = s.scalar(
-                select(func.count())
-                .select_from(Problem)
-                .where(Problem.chapter_id == chapter_id)
+                select(func.count()).select_from(Problem).where(Problem.chapter_id == chapter_id)
             )
             if has_children:
                 raise DomainError("章节下仍有子章节，无法删除")
@@ -567,9 +576,7 @@ class AppServices:
         if chapter is None:
             raise DomainError("章节不存在")
         chapters = list(
-            session.scalars(
-                select(Chapter).where(Chapter.subject_id == chapter.subject_id)
-            ).all()
+            session.scalars(select(Chapter).where(Chapter.subject_id == chapter.subject_id)).all()
         )
         children_by_parent: dict[str | None, list[Chapter]] = {}
         for item in chapters:
@@ -605,9 +612,7 @@ class AppServices:
             if s.get(Subject, subject_id) is None:
                 raise DomainError("科目不存在")
             chapters = list(
-                s.scalars(
-                    select(Chapter).where(Chapter.subject_id == subject_id)
-                ).all()
+                s.scalars(select(Chapter).where(Chapter.subject_id == subject_id)).all()
             )
             chapter_by_id = {chapter.id: chapter for chapter in chapters}
             children_by_parent: dict[str | None, list[Chapter]] = {}
@@ -628,9 +633,7 @@ class AppServices:
                 .group_by(Problem.chapter_id)
             )
             if problem_status is not None:
-                count_stmt = count_stmt.where(
-                    Problem.status == validate_status(problem_status)
-                )
+                count_stmt = count_stmt.where(Problem.status == validate_status(problem_status))
             direct_counts = {
                 str(chapter_id): int(count)
                 for chapter_id, count in s.execute(count_stmt)
@@ -674,10 +677,7 @@ class AppServices:
                     children=children,
                 )
 
-            roots = tuple(
-                build(root, (), ())
-                for root in children_by_parent.get(None, [])
-            )
+            roots = tuple(build(root, (), ()) for root in children_by_parent.get(None, []))
             if len(visited) != len(chapters):
                 raise DomainError("章节目录包含无法从根节点访问的循环引用")
             return roots
@@ -727,9 +727,7 @@ class AppServices:
                 sub = Subject(id=new_id("sub"), name=subject_name)
                 s.add(sub)
                 s.flush()
-            existing = list(
-                s.scalars(select(Chapter).where(Chapter.subject_id == sub.id)).all()
-            )
+            existing = list(s.scalars(select(Chapter).where(Chapter.subject_id == sub.id)).all())
             if version == 1:
                 name_to_id = {chapter.name: chapter.id for chapter in existing}
                 for item in raw.get("chapters", []):
@@ -797,9 +795,7 @@ class AppServices:
                         continue
                     parent_id = path_to_id.get(parent_path) if parent_path else None
                     if parent_path and parent_id is None:
-                        raise DomainError(
-                            f"章节模板缺少上级路径：{' / '.join(parent_path)}"
-                        )
+                        raise DomainError(f"章节模板缺少上级路径：{' / '.join(parent_path)}")
                     self._ensure_unique_chapter_name(
                         s,
                         subject_id=sub.id,
@@ -857,9 +853,7 @@ class AppServices:
 
         with self.session() as s:
             problem = s.scalars(
-                select(Problem)
-                .where(Problem.id == problem_id)
-                .options(selectinload(Problem.tags))
+                select(Problem).where(Problem.id == problem_id).options(selectinload(Problem.tags))
             ).first()
             if not problem:
                 raise DomainError("题目不存在")
@@ -929,8 +923,7 @@ class AppServices:
                 raise DomainError("最近入库天数必须大于 0")
             stmt = stmt.where(
                 Problem.created_at
-                >= datetime.now(timezone.utc)
-                - timedelta(days=filt.created_within_days)
+                >= datetime.now(timezone.utc) - timedelta(days=filt.created_within_days)
             )
         return stmt.order_by(Problem.updated_at.desc())
 
@@ -940,11 +933,7 @@ class AppServices:
             chapter_ids = None
             if filt.chapter_id and filt.include_descendant_chapters:
                 chapter_ids = self._chapter_subtree_ids(s, filt.chapter_id)
-            rows = list(
-                s.scalars(
-                    self._problem_query(filt, chapter_ids=chapter_ids)
-                ).all()
-            )
+            rows = list(s.scalars(self._problem_query(filt, chapter_ids=chapter_ids)).all())
             if filt.due_for_review:
                 rows = [p for p in rows if p.review_enabled and is_due(p.next_review_at)]
             s.expunge_all()
@@ -968,11 +957,7 @@ class AppServices:
                 ).all()
             )
             by_id = {problem.id: problem for problem in rows}
-            ordered = [
-                by_id[problem_id]
-                for problem_id in ordered_ids
-                if problem_id in by_id
-            ]
+            ordered = [by_id[problem_id] for problem_id in ordered_ids if problem_id in by_id]
             session.expunge_all()
             return ordered
 
@@ -1030,14 +1015,14 @@ class AppServices:
         self._record_sync_change(problem, before={}, after=after, operation="create")
         return problem
 
-    def update_problem(self, problem_id: str, fields: dict[str, Any], *, summary: str = "编辑题目") -> Problem:
+    def update_problem(
+        self, problem_id: str, fields: dict[str, Any], *, summary: str = "编辑题目"
+    ) -> Problem:
         from yancuo_win.application.sync_service import sync_snapshot
 
         with self.session() as s:
             problem = s.scalar(
-                select(Problem)
-                .where(Problem.id == problem_id)
-                .options(selectinload(Problem.tags))
+                select(Problem).where(Problem.id == problem_id).options(selectinload(Problem.tags))
             )
             if not problem:
                 raise DomainError("题目不存在")
@@ -1092,9 +1077,7 @@ class AppServices:
 
         with self.session() as s:
             problem = s.scalars(
-                select(Problem)
-                .where(Problem.id == problem_id)
-                .options(selectinload(Problem.tags))
+                select(Problem).where(Problem.id == problem_id).options(selectinload(Problem.tags))
             ).first()
             if not problem:
                 raise DomainError("题目不存在")
@@ -1117,9 +1100,7 @@ class AppServices:
             operation = "delete"
         elif before_status == "trashed":
             operation = "undelete"
-        self._record_sync_change(
-            problem, before=before, after=after, operation=operation
-        )
+        self._record_sync_change(problem, before=before, after=after, operation=operation)
         if status == "trashed":
             self.remove_review_references("problem", [problem_id])
 
@@ -1165,26 +1146,16 @@ class AppServices:
                 item_scope = AiJobItem.problem_id.in_(problem_ids)
                 if asset_ids:
                     item_scope = or_(item_scope, AiJobItem.asset_id.in_(asset_ids))
-                affected_job_ids = set(
-                    s.scalars(select(AiJobItem.job_id).where(item_scope)).all()
-                )
+                affected_job_ids = set(s.scalars(select(AiJobItem.job_id).where(item_scope)).all())
                 affected_session_ids = set(
                     s.scalars(
-                        select(ReviewItem.session_id).where(
-                            ReviewItem.problem_id.in_(problem_ids)
-                        )
+                        select(ReviewItem.session_id).where(ReviewItem.problem_id.in_(problem_ids))
                     ).all()
                 )
 
-                s.execute(
-                    delete(ReviewItem).where(ReviewItem.problem_id.in_(problem_ids))
-                )
+                s.execute(delete(ReviewItem).where(ReviewItem.problem_id.in_(problem_ids)))
                 s.execute(delete(AiJobItem).where(item_scope))
-                s.execute(
-                    delete(ProblemOrigin).where(
-                        ProblemOrigin.problem_id.in_(problem_ids)
-                    )
-                )
+                s.execute(delete(ProblemOrigin).where(ProblemOrigin.problem_id.in_(problem_ids)))
                 for candidate in s.scalars(
                     select(IntakeCandidateRecord).where(
                         IntakeCandidateRecord.problem_id.in_(problem_ids)
@@ -1203,9 +1174,7 @@ class AppServices:
                     if review_session is None:
                         continue
                     has_items = s.scalar(
-                        select(func.count(ReviewItem.id)).where(
-                            ReviewItem.session_id == session_id
-                        )
+                        select(func.count(ReviewItem.id)).where(ReviewItem.session_id == session_id)
                     )
                     if not has_items:
                         s.delete(review_session)
@@ -1215,16 +1184,12 @@ class AppServices:
                     if job is None:
                         continue
                     remaining = list(
-                        s.scalars(
-                            select(AiJobItem).where(AiJobItem.job_id == job_id)
-                        ).all()
+                        s.scalars(select(AiJobItem).where(AiJobItem.job_id == job_id)).all()
                     )
                     if remaining:
                         job.total_items = len(remaining)
                         job.done_items = sum(item.status == "done" for item in remaining)
-                        job.failed_items = sum(
-                            item.status == "failed" for item in remaining
-                        )
+                        job.failed_items = sum(item.status == "failed" for item in remaining)
                         continue
 
                     surviving_review_items = False
@@ -1259,14 +1224,10 @@ class AppServices:
                     s.flush()
                     if prompt_key == f"intake_{job_id}":
                         prompt_in_use = s.scalar(
-                            select(func.count(AiJob.id)).where(
-                                AiJob.prompt_key == prompt_key
-                            )
+                            select(func.count(AiJob.id)).where(AiJob.prompt_key == prompt_key)
                         )
                         if not prompt_in_use:
-                            prompt = s.scalar(
-                                select(Prompt).where(Prompt.key == prompt_key)
-                            )
+                            prompt = s.scalar(select(Prompt).where(Prompt.key == prompt_key))
                             if prompt is not None:
                                 s.delete(prompt)
 
@@ -1286,19 +1247,11 @@ class AppServices:
             referenced = {
                 path
                 for path in relative_paths
-                if s.scalar(
-                    select(func.count(Asset.id)).where(Asset.relative_path == path)
-                )
+                if s.scalar(select(func.count(Asset.id)).where(Asset.relative_path == path))
                 or s.scalar(
-                    select(func.count(IntakeAsset.id)).where(
-                        IntakeAsset.relative_path == path
-                    )
+                    select(func.count(IntakeAsset.id)).where(IntakeAsset.relative_path == path)
                 )
-                or s.scalar(
-                    select(func.count(NoteAsset.id)).where(
-                        NoteAsset.relative_path == path
-                    )
-                )
+                or s.scalar(select(func.count(NoteAsset.id)).where(NoteAsset.relative_path == path))
                 or s.scalar(
                     select(func.count(NoteIntakeAsset.id)).where(
                         NoteIntakeAsset.relative_path == path
@@ -1311,9 +1264,7 @@ class AppServices:
             try:
                 path.relative_to(objects_root)
             except ValueError:
-                self.runtime.logger.warning(
-                    "skip unsafe asset cleanup path: %s", relative_path
-                )
+                self.runtime.logger.warning("skip unsafe asset cleanup path: %s", relative_path)
                 continue
             try:
                 if path.is_file():
@@ -1322,9 +1273,7 @@ class AppServices:
                 if path.parent != objects_root:
                     path.parent.rmdir()
             except OSError as exc:
-                self.runtime.logger.warning(
-                    "orphan asset cleanup failed for %s: %s", path, exc
-                )
+                self.runtime.logger.warning("orphan asset cleanup failed for %s: %s", path, exc)
 
     def promote_to_active(self, problem_id: str) -> None:
         self.set_problem_status(problem_id, "active")
@@ -1371,17 +1320,27 @@ class AppServices:
         content_type = self._validate_review_content_type(content_type)
         ids = list(dict.fromkeys(source_ids))
         with self.session() as session:
-            existing = set(session.scalars(
-                select(ReviewWaitingItem.source_id).where(
-                    ReviewWaitingItem.content_type == content_type,
-                    ReviewWaitingItem.source_id.in_(ids),
+            existing = (
+                set(
+                    session.scalars(
+                        select(ReviewWaitingItem.source_id).where(
+                            ReviewWaitingItem.content_type == content_type,
+                            ReviewWaitingItem.source_id.in_(ids),
+                        )
+                    ).all()
                 )
-            ).all()) if ids else set()
+                if ids
+                else set()
+            )
             for source_id in ids:
                 if source_id not in existing:
-                    session.add(ReviewWaitingItem(
-                        id=new_id("review_waiting"), content_type=content_type, source_id=source_id
-                    ))
+                    session.add(
+                        ReviewWaitingItem(
+                            id=new_id("review_waiting"),
+                            content_type=content_type,
+                            source_id=source_id,
+                        )
+                    )
             session.commit()
         return len(ids) - len(existing)
 
@@ -1389,28 +1348,34 @@ class AppServices:
         content_type = self._validate_review_content_type(content_type)
         ids = list(dict.fromkeys(source_ids))
         with self.session() as session:
-            result = session.execute(delete(ReviewWaitingItem).where(
-                ReviewWaitingItem.content_type == content_type,
-                ReviewWaitingItem.source_id.in_(ids),
-            ))
+            result = session.execute(
+                delete(ReviewWaitingItem).where(
+                    ReviewWaitingItem.content_type == content_type,
+                    ReviewWaitingItem.source_id.in_(ids),
+                )
+            )
             session.commit()
             return int(result.rowcount or 0)
 
     def clear_review_waiting_queue(self, content_type: str) -> int:
         content_type = self._validate_review_content_type(content_type)
         with self.session() as session:
-            result = session.execute(delete(ReviewWaitingItem).where(
-                ReviewWaitingItem.content_type == content_type
-            ))
+            result = session.execute(
+                delete(ReviewWaitingItem).where(ReviewWaitingItem.content_type == content_type)
+            )
             session.commit()
             return int(result.rowcount or 0)
 
     def list_review_waiting_ids(self, content_type: str) -> list[str]:
         content_type = self._validate_review_content_type(content_type)
         with self.session() as session:
-            return list(session.scalars(select(ReviewWaitingItem.source_id).where(
-                ReviewWaitingItem.content_type == content_type
-            ).order_by(ReviewWaitingItem.created_at)).all())
+            return list(
+                session.scalars(
+                    select(ReviewWaitingItem.source_id)
+                    .where(ReviewWaitingItem.content_type == content_type)
+                    .order_by(ReviewWaitingItem.created_at)
+                ).all()
+            )
 
     def create_review_plan_from_waiting_queue(
         self,
@@ -1423,9 +1388,13 @@ class AppServices:
         if not name:
             raise DomainError("请为复习计划命名")
         with self.session() as session:
-            waiting = list(session.scalars(select(ReviewWaitingItem).where(
-                ReviewWaitingItem.content_type == content_type
-            ).order_by(ReviewWaitingItem.created_at)).all())
+            waiting = list(
+                session.scalars(
+                    select(ReviewWaitingItem)
+                    .where(ReviewWaitingItem.content_type == content_type)
+                    .order_by(ReviewWaitingItem.created_at)
+                ).all()
+            )
             if not waiting:
                 raise DomainError("等待队列为空")
             if source_ids is not None:
@@ -1434,12 +1403,23 @@ class AppServices:
                 if set(requested_order) != set(waiting_by_source):
                     raise DomainError("计划草稿已变化，请刷新后再创建")
                 waiting = [waiting_by_source[source_id] for source_id in requested_order]
-            plan = ReviewPlan(id=new_id("review_plan"), name=name, content_type=content_type, kind="explicit")
+            plan = ReviewPlan(
+                id=new_id("review_plan"), name=name, content_type=content_type, kind="explicit"
+            )
             session.add(plan)
             session.flush()
             for order, item in enumerate(waiting):
-                session.add(ReviewPlanItem(id=new_id("review_plan_item"), plan_id=plan.id, source_id=item.source_id, sort_order=order))
-            session.execute(delete(ReviewWaitingItem).where(ReviewWaitingItem.content_type == content_type))
+                session.add(
+                    ReviewPlanItem(
+                        id=new_id("review_plan_item"),
+                        plan_id=plan.id,
+                        source_id=item.source_id,
+                        sort_order=order,
+                    )
+                )
+            session.execute(
+                delete(ReviewWaitingItem).where(ReviewWaitingItem.content_type == content_type)
+            )
             session.commit()
             session.refresh(plan)
             session.expunge(plan)
@@ -1447,9 +1427,15 @@ class AppServices:
 
     def list_review_plans(self, content_type: str | None = None) -> list[ReviewPlan]:
         with self.session() as session:
-            statement = select(ReviewPlan).options(selectinload(ReviewPlan.items)).order_by(ReviewPlan.updated_at.desc())
+            statement = (
+                select(ReviewPlan)
+                .options(selectinload(ReviewPlan.items))
+                .order_by(ReviewPlan.updated_at.desc())
+            )
             if content_type:
-                statement = statement.where(ReviewPlan.content_type == self._validate_review_content_type(content_type))
+                statement = statement.where(
+                    ReviewPlan.content_type == self._validate_review_content_type(content_type)
+                )
             rows = list(session.scalars(statement).all())
             session.expunge_all()
             return rows
@@ -1465,34 +1451,51 @@ class AppServices:
                 session.expunge(plan)
             return plan
 
-    def add_to_daily_review_plan(self, content_type: str, source_id: str, plan_date: str) -> ReviewPlan:
+    def add_to_daily_review_plan(
+        self, content_type: str, source_id: str, plan_date: str
+    ) -> ReviewPlan:
         content_type = self._validate_review_content_type(content_type)
         with self.session() as session:
-            plan = session.scalar(select(ReviewPlan).where(
-                ReviewPlan.content_type == content_type,
-                ReviewPlan.kind == "daily",
-                ReviewPlan.plan_date == plan_date,
-            ))
+            plan = session.scalar(
+                select(ReviewPlan).where(
+                    ReviewPlan.content_type == content_type,
+                    ReviewPlan.kind == "daily",
+                    ReviewPlan.plan_date == plan_date,
+                )
+            )
             if plan is None:
                 display_date = date.fromisoformat(plan_date)
                 plan = ReviewPlan(
                     id=new_id("review_plan"),
                     name=f"{display_date.year}年{display_date.month}月{display_date.day}日 复习计划",
-                    content_type=content_type, kind="daily", plan_date=plan_date,
+                    content_type=content_type,
+                    kind="daily",
+                    plan_date=plan_date,
                 )
                 session.add(plan)
                 session.flush()
-            exists = session.scalar(select(ReviewPlanItem.id).where(
-                ReviewPlanItem.plan_id == plan.id, ReviewPlanItem.source_id == source_id
-            ))
+            exists = session.scalar(
+                select(ReviewPlanItem.id).where(
+                    ReviewPlanItem.plan_id == plan.id, ReviewPlanItem.source_id == source_id
+                )
+            )
             if not exists:
-                next_order = int(session.scalar(select(func.count(ReviewPlanItem.id)).where(
-                    ReviewPlanItem.plan_id == plan.id
-                )) or 0)
-                session.add(ReviewPlanItem(
-                    id=new_id("review_plan_item"), plan_id=plan.id,
-                    source_id=source_id, sort_order=next_order,
-                ))
+                next_order = int(
+                    session.scalar(
+                        select(func.count(ReviewPlanItem.id)).where(
+                            ReviewPlanItem.plan_id == plan.id
+                        )
+                    )
+                    or 0
+                )
+                session.add(
+                    ReviewPlanItem(
+                        id=new_id("review_plan_item"),
+                        plan_id=plan.id,
+                        source_id=source_id,
+                        sort_order=next_order,
+                    )
+                )
             session.commit()
             session.refresh(plan)
             session.expunge(plan)
@@ -1505,13 +1508,17 @@ class AppServices:
             return
         with self.session() as session:
             plan_ids = select(ReviewPlan.id).where(ReviewPlan.content_type == content_type)
-            session.execute(delete(ReviewWaitingItem).where(
-                ReviewWaitingItem.content_type == content_type,
-                ReviewWaitingItem.source_id.in_(ids),
-            ))
-            session.execute(delete(ReviewPlanItem).where(
-                ReviewPlanItem.plan_id.in_(plan_ids), ReviewPlanItem.source_id.in_(ids)
-            ))
+            session.execute(
+                delete(ReviewWaitingItem).where(
+                    ReviewWaitingItem.content_type == content_type,
+                    ReviewWaitingItem.source_id.in_(ids),
+                )
+            )
+            session.execute(
+                delete(ReviewPlanItem).where(
+                    ReviewPlanItem.plan_id.in_(plan_ids), ReviewPlanItem.source_id.in_(ids)
+                )
+            )
             session.commit()
 
     def prepare_study_queue(
@@ -1605,9 +1612,7 @@ class AppServices:
         interval_days = (next_at - graded_at).days + 1
         with self.session() as s:
             problem = s.scalars(
-                select(Problem)
-                .where(Problem.id == problem_id)
-                .options(selectinload(Problem.tags))
+                select(Problem).where(Problem.id == problem_id).options(selectinload(Problem.tags))
             ).first()
             if not problem:
                 raise DomainError("题目不存在")
@@ -1660,7 +1665,9 @@ class AppServices:
             "review_count": problem.review_count,
         }
 
-    def finish_study_session(self, study_session_id: str, *, cancelled: bool = False) -> dict[str, Any]:
+    def finish_study_session(
+        self, study_session_id: str, *, cancelled: bool = False
+    ) -> dict[str, Any]:
         with self.session() as s:
             study_session = s.get(StudySession, study_session_id)
             if study_session is None:
@@ -1669,14 +1676,21 @@ class AppServices:
                 study_session.status = "cancelled" if cancelled else "completed"
                 study_session.ended_at = utcnow()
                 s.commit()
-            records = list(s.scalars(select(StudyRecord).where(StudyRecord.study_session_id == study_session.id)).all())
+            records = list(
+                s.scalars(
+                    select(StudyRecord).where(StudyRecord.study_session_id == study_session.id)
+                ).all()
+            )
             result = {
                 "session_id": study_session.id,
                 "status": study_session.status,
                 "problem_count": study_session.problem_count,
                 "completed_count": len(records),
                 "remaining_count": max(0, study_session.problem_count - len(records)),
-                "grades": {grade: sum(record.grade == grade for record in records) for grade in REVIEW_GRADES},
+                "grades": {
+                    grade: sum(record.grade == grade for record in records)
+                    for grade in REVIEW_GRADES
+                },
             }
             s.expunge_all()
             return result
@@ -1698,7 +1712,13 @@ class AppServices:
 
     def study_session_records(self, study_session_id: str) -> list[StudyRecord]:
         with self.session() as s:
-            records = list(s.scalars(select(StudyRecord).where(StudyRecord.study_session_id == study_session_id).order_by(StudyRecord.graded_at)).all())
+            records = list(
+                s.scalars(
+                    select(StudyRecord)
+                    .where(StudyRecord.study_session_id == study_session_id)
+                    .order_by(StudyRecord.graded_at)
+                ).all()
+            )
             s.expunge_all()
             return records
 
@@ -1707,9 +1727,7 @@ class AppServices:
 
         with self.session() as session:
             sessions = list(
-                session.scalars(
-                    select(StudySession).order_by(StudySession.started_at.desc())
-                ).all()
+                session.scalars(select(StudySession).order_by(StudySession.started_at.desc())).all()
             )
             matching = []
             for study_session in sessions:
@@ -1772,16 +1790,33 @@ class AppServices:
 
     def export_study_session_csv(self, study_session_id: str, dest: Path) -> Path:
         with dest.open("w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["problem_id", "grade", "answer_viewed_at", "answered_at", "graded_at", "interval_days", "next_review_at"])
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "problem_id",
+                    "grade",
+                    "answer_viewed_at",
+                    "answered_at",
+                    "graded_at",
+                    "interval_days",
+                    "next_review_at",
+                ],
+            )
             writer.writeheader()
             for record in self.study_session_records(study_session_id):
-                writer.writerow({
-                    "problem_id": record.problem_id, "grade": record.grade,
-                    "answer_viewed_at": record.answer_viewed_at.isoformat() if record.answer_viewed_at else "",
-                    "answered_at": record.answered_at.isoformat() if record.answered_at else "",
-                    "graded_at": record.graded_at.isoformat(), "interval_days": record.interval_days,
-                    "next_review_at": record.next_review_at.isoformat(),
-                })
+                writer.writerow(
+                    {
+                        "problem_id": record.problem_id,
+                        "grade": record.grade,
+                        "answer_viewed_at": record.answer_viewed_at.isoformat()
+                        if record.answer_viewed_at
+                        else "",
+                        "answered_at": record.answered_at.isoformat() if record.answered_at else "",
+                        "graded_at": record.graded_at.isoformat(),
+                        "interval_days": record.interval_days,
+                        "next_review_at": record.next_review_at.isoformat(),
+                    }
+                )
         return dest
 
     def export_study_session_share(self, study_session_id: str, dest: Path) -> Path:
@@ -1797,9 +1832,7 @@ class AppServices:
 
         with self.session() as s:
             problem = s.scalars(
-                select(Problem)
-                .where(Problem.id == problem_id)
-                .options(selectinload(Problem.tags))
+                select(Problem).where(Problem.id == problem_id).options(selectinload(Problem.tags))
             ).first()
             if not problem:
                 raise DomainError("题目不存在")
@@ -1863,9 +1896,7 @@ class AppServices:
             ).all()
             scored = []
             for p in others:
-                score = text_similarity(
-                    target.question_markdown or "", p.question_markdown or ""
-                )
+                score = text_similarity(target.question_markdown or "", p.question_markdown or "")
                 if score >= threshold:
                     scored.append(
                         {
@@ -1898,9 +1929,7 @@ class AppServices:
             tag = s.get(Tag, add_tag_id) if add_tag_id else None
             for pid in problem_ids:
                 problem = s.scalars(
-                    select(Problem)
-                    .where(Problem.id == pid)
-                    .options(selectinload(Problem.tags))
+                    select(Problem).where(Problem.id == pid).options(selectinload(Problem.tags))
                 ).first()
                 if not problem or problem.status == "trashed":
                     continue
@@ -1960,10 +1989,7 @@ class AppServices:
             ):
                 if problem.status == "trashed":
                     continue
-                if (
-                    problem.subject_id == subject_id
-                    and problem.chapter_id == chapter_id
-                ):
+                if problem.subject_id == subject_id and problem.chapter_id == chapter_id:
                     continue
                 before = sync_snapshot(problem)
                 problem.subject_id = subject_id
@@ -2080,17 +2106,13 @@ class AppServices:
                 created.append(problem.id)
             s.commit()
         for problem_id, before, after in sync_changes:
-            self._record_sync_change(
-                problem_id, before=before, after=after, operation="create"
-            )
+            self._record_sync_change(problem_id, before=before, after=after, operation="create")
         return {
             "created": created,
             "skipped": skipped,
             "skipped_existing": skipped_existing,
             "duplicate_tip": (
-                f"检测到 {len(skipped)} 张重复原图，已跳过且未删除旧题"
-                if skipped
-                else ""
+                f"检测到 {len(skipped)} 张重复原图，已跳过且未删除旧题" if skipped else ""
             ),
         }
 
@@ -2098,11 +2120,7 @@ class AppServices:
         folder = Path(folder)
         if not folder.is_dir():
             raise DomainError(f"不是文件夹：{folder}")
-        scan = (
-            self.runtime.settings.import_cfg.scan_subfolders
-            if recursive is None
-            else recursive
-        )
+        scan = self.runtime.settings.import_cfg.scan_subfolders if recursive is None else recursive
         exts = {e.lower() for e in self.runtime.settings.import_cfg.supported_extensions}
         files: list[Path] = []
         if scan:
@@ -2158,7 +2176,7 @@ class AppServices:
         asset_dir = self.runtime.paths.asset_dir
         identity = self.runtime.paths.identity_file
 
-        # 释放连接以便复制 SQLite 文件
+        # 释放长连接，再通过 SQLite API 合并已提交的 WAL 页。
         self.runtime.engine.dispose()
 
         manifest = {
@@ -2168,19 +2186,43 @@ class AppServices:
             "database_id": self.runtime.identity.database_id,
             "schema_version": self.runtime.schema_version,
         }
-        with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-            zf.write(db_path, arcname="database/error_book.db")
-            if identity.is_file():
-                zf.write(identity, arcname="identity.json")
-            if asset_dir.is_dir():
-                try:
-                    files = iter_regular_files(asset_dir)
-                    for file in files:
-                        zf.write(file, arcname=f"assets/{file.relative_to(asset_dir).as_posix()}")
-                except ArchiveSecurityError as exc:
-                    raise DomainError(f"备份失败，资源目录不安全：{exc}") from exc
-        return dest
+        self.runtime.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="backup-export-", dir=self.runtime.paths.cache_dir))
+        archive_temp: Path | None = None
+        try:
+            snapshot = staging / "error_book.db"
+            create_sqlite_snapshot(db_path, snapshot)
+            if identity.is_symlink():
+                raise DomainError("备份失败，身份文件不能是符号链接")
+            descriptor, archive_temp_name = tempfile.mkstemp(
+                prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent
+            )
+            os.close(descriptor)
+            archive_temp = Path(archive_temp_name)
+            with zipfile.ZipFile(archive_temp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+                zf.write(snapshot, arcname="database/error_book.db")
+                if identity.is_file():
+                    zf.write(identity, arcname="identity.json")
+                if asset_dir.is_dir():
+                    try:
+                        for file in iter_regular_files(asset_dir):
+                            zf.write(
+                                file,
+                                arcname=f"assets/{file.relative_to(asset_dir).as_posix()}",
+                            )
+                    except ArchiveSecurityError as exc:
+                        raise DomainError(f"备份失败，资源目录不安全：{exc}") from exc
+            with archive_temp.open("r+b") as stream:
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(archive_temp, dest)
+            archive_temp = None
+            return dest
+        finally:
+            if archive_temp is not None:
+                archive_temp.unlink(missing_ok=True)
+            shutil.rmtree(staging, ignore_errors=True)
 
     def restore_backup(self, zip_path: Path, target_root: Path) -> Path:
         zip_path = Path(zip_path)
@@ -2208,7 +2250,10 @@ class AppServices:
                     manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise DomainError("备份 manifest.json 无效") from exc
-                if not isinstance(manifest, dict) or manifest.get("format") != "yancuo-local-backup":
+                if (
+                    not isinstance(manifest, dict)
+                    or manifest.get("format") != "yancuo-local-backup"
+                ):
                     raise DomainError("备份格式不匹配")
                 try:
                     backup_version = int(manifest.get("version") or 0)
@@ -2361,9 +2406,7 @@ class AppServices:
                             ),
                             default=1,
                         )
-                        table = doc.add_table(
-                            rows=max(1, len(rows)), cols=max(1, column_count)
-                        )
+                        table = doc.add_table(rows=max(1, len(rows)), cols=max(1, column_count))
                         occupied: set[tuple[int, int]] = set()
                         for row_index, row in enumerate(rows):
                             column_index = 0
