@@ -146,6 +146,30 @@ def test_stream_response_size_budget_is_enforced(
         )
 
 
+def test_image_request_rejects_oversized_input_before_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    monkeypatch.setattr("yancuo_win.ai.openai_compatible._MAX_AI_IMAGE_BYTES", 4)
+    image = tmp_path / "oversized.png"
+    image.write_bytes(b"12345")
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.safe_urlopen",
+        lambda *_args, **_kwargs: pytest.fail("oversized image reached network"),
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1", api_key_env="FARO_API_KEY"
+    )
+
+    with pytest.raises(DomainError, match="32 MiB"):
+        provider.structure_from_image(
+            image_path=str(image),
+            prompt="extract",
+            model="vision",
+            timeout_seconds=10,
+        )
+
+
 def test_list_models_uses_faro_compatible_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

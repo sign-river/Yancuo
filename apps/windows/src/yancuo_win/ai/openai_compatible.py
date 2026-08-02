@@ -32,6 +32,9 @@ from yancuo_win.infrastructure.safe_http import safe_urlopen
 _MAX_REQUEST_ATTEMPTS = 3
 _MAX_AI_RESPONSE_BYTES = 16 * 1024 * 1024
 _MAX_ERROR_RESPONSE_BYTES = 4 * 1024
+_MAX_AI_IMAGE_COUNT = 20
+_MAX_AI_IMAGE_BYTES = 32 * 1024 * 1024
+_MAX_AI_IMAGE_TOTAL_BYTES = 64 * 1024 * 1024
 _RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 _TRANSIENT_NETWORK_ERRORS = (
     urllib.error.URLError,
@@ -85,6 +88,46 @@ class OpenAICompatibleProvider(AIProvider):
         if not self.base_url.startswith(("https://", "http://")):
             raise DomainError("AI Base URL 无效")
         self._api_key()
+
+    @staticmethod
+    def _encode_image_content(image_paths: list[str]) -> list[dict[str, Any]]:
+        if not image_paths:
+            raise DomainError("未选择图片")
+        if len(image_paths) > _MAX_AI_IMAGE_COUNT:
+            raise DomainError(f"单次 AI 请求最多 {_MAX_AI_IMAGE_COUNT} 张图片")
+        image_content: list[dict[str, Any]] = []
+        total_bytes = 0
+        for image_path in image_paths:
+            path = Path(image_path)
+            if not path.is_file():
+                raise DomainError(f"图片不存在：{path}")
+            try:
+                size = path.stat().st_size
+            except OSError as exc:
+                raise DomainError(f"无法读取图片：{path}") from exc
+            if size <= 0 or size > _MAX_AI_IMAGE_BYTES:
+                raise DomainError("单张 AI 图片必须在 1 字节到 32 MiB 之间")
+            total_bytes += size
+            if total_bytes > _MAX_AI_IMAGE_TOTAL_BYTES:
+                raise DomainError("单次 AI 请求的图片总大小不能超过 64 MiB")
+            try:
+                with path.open("rb") as stream:
+                    payload = stream.read(_MAX_AI_IMAGE_BYTES + 1)
+            except OSError as exc:
+                raise DomainError(f"无法读取图片：{path}") from exc
+            if len(payload) != size or len(payload) > _MAX_AI_IMAGE_BYTES:
+                raise DomainError("图片在读取期间发生变化或超过 32 MiB 上限")
+            mime = {".png": "image/png", ".webp": "image/webp"}.get(
+                path.suffix.lower(), "image/jpeg"
+            )
+            encoded = base64.b64encode(payload).decode("ascii")
+            image_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                }
+            )
+        return image_content
 
     def list_models(self, *, timeout_seconds: int = 20) -> list[str]:
         """Validate Faro/OpenAI-compatible authentication and return model IDs."""
@@ -341,23 +384,7 @@ class OpenAICompatibleProvider(AIProvider):
         retry_attempts: int | None = None,
     ) -> StructuredResult:
         encode_started = time.perf_counter()
-        if not image_paths:
-            raise DomainError("未选择图片")
-        image_content: list[dict[str, Any]] = []
-        for image_path in image_paths:
-            path = Path(image_path)
-            if not path.is_file():
-                raise DomainError(f"图片不存在：{path}")
-            mime = "image/jpeg"
-            suffix = path.suffix.lower()
-            if suffix == ".png":
-                mime = "image/png"
-            elif suffix == ".webp":
-                mime = "image/webp"
-            b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-            image_content.append(
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-            )
+        image_content = self._encode_image_content(image_paths)
         image_encode_ms = (time.perf_counter() - encode_started) * 1000
         payload = {
             "model": model or "gpt-4o-mini",
@@ -397,20 +424,7 @@ class OpenAICompatibleProvider(AIProvider):
         retry_attempts: int | None = None,
     ) -> StructuredResult:
         encode_started = time.perf_counter()
-        if not image_paths:
-            raise DomainError("未选择图片")
-        image_content: list[dict[str, Any]] = []
-        for image_path in image_paths:
-            path = Path(image_path)
-            if not path.is_file():
-                raise DomainError(f"图片不存在：{path}")
-            mime = {".png": "image/png", ".webp": "image/webp"}.get(
-                path.suffix.lower(), "image/jpeg"
-            )
-            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-            image_content.append(
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
-            )
+        image_content = self._encode_image_content(image_paths)
         image_encode_ms = (time.perf_counter() - encode_started) * 1000
         payload = {
             "model": model or "gpt-4o-mini",
