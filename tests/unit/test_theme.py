@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QListWidget, QTreeWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QTreeWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 import yancuo_win.ui.widgets as widgets_module
 from yancuo_win.ui.theme import (
     DARK_THEME,
     LIGHT_THEME,
+    ThemeManager,
     UI_METRICS,
     app_stylesheet,
     normalize_theme_mode,
@@ -232,6 +242,32 @@ def test_dropdown_surfaces_share_spacious_floating_panel_states(mode, tokens) ->
     assert "padding: 0 14px" in rendered
     assert tokens.border_strong in rendered
     assert tokens.list_hover in rendered
+
+
+def test_combo_popup_removes_opaque_native_container_shell() -> None:
+    app = QApplication.instance() or QApplication([])
+    original_stylesheet = app.styleSheet()
+    original_palette = app.palette()
+    manager = ThemeManager(app, "light")
+    combo = QComboBox()
+    combo.addItems(["正式笔记", "待整理", "归档"])
+    combo.show()
+    combo.showPopup()
+    app.processEvents()
+
+    popup = combo.view().window()
+    assert popup.metaObject().className() == "QComboBoxPrivateContainer"
+    assert popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert popup.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert popup.property("yancuoTransparentPopupShell") is True
+
+    combo.hidePopup()
+    combo.close()
+    app.removeEventFilter(manager)
+    manager.deleteLater()
+    app.setStyleSheet(original_stylesheet)
+    app.setPalette(original_palette)
+    app.processEvents()
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])

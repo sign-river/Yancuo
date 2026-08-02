@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 THEME_MODES = {"system", "light", "dark"}
 
@@ -835,6 +835,10 @@ def app_stylesheet(theme: str = "light") -> str:
     QComboBox {{
         padding: 7px 38px 7px 12px;
     }}
+    QComboBoxPrivateContainer {{
+        background: transparent;
+        border: none;
+    }}
     QComboBox:hover {{
         background: {t.surface_subtle};
         border-color: {t.hover_border};
@@ -1332,12 +1336,28 @@ class ThemeManager(QObject):
     def __init__(self, app: QApplication, mode: str = "system") -> None:
         super().__init__(app)
         self.app = app
+        app.installEventFilter(self)
         self.mode = normalize_theme_mode(mode)
         self.resolved = ""
         hints = app.styleHints()
         if hasattr(hints, "colorSchemeChanged"):
             hints.colorSchemeChanged.connect(self._on_system_theme_changed)
         self.apply()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        """Remove Qt's opaque square shell around rounded combo popups."""
+
+        if (
+            event.type() in (QEvent.Type.Polish, QEvent.Type.Show)
+            and isinstance(watched, QWidget)
+            and watched.metaObject().className() == "QComboBoxPrivateContainer"
+            and not watched.property("yancuoTransparentPopupShell")
+        ):
+            watched.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            watched.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+            watched.setAutoFillBackground(False)
+            watched.setProperty("yancuoTransparentPopupShell", True)
+        return super().eventFilter(watched, event)
 
     def set_mode(self, mode: str) -> str:
         self.mode = normalize_theme_mode(mode)
