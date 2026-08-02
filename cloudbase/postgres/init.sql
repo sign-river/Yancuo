@@ -90,6 +90,12 @@ create table if not exists yancuo.write_locks (
     updated_at timestamptz not null default now()
 );
 
+create table if not exists yancuo.rate_limits (
+    subject_id text primary key,
+    window_start timestamptz not null,
+    request_count integer not null check (request_count >= 0)
+);
+
 create index if not exists releases_repository_created_idx
     on yancuo.releases (repository_id, created_at desc);
 create index if not exists write_locks_expiry_idx
@@ -116,6 +122,7 @@ alter table yancuo.releases enable row level security;
 alter table yancuo.release_assets enable row level security;
 alter table yancuo.write_locks enable row level security;
 alter table yancuo.upload_sessions enable row level security;
+alter table yancuo.rate_limits enable row level security;
 
 -- Deliberately no broad RLS policy: only the gateway's server-side role should
 -- access these tables. Add narrowly scoped policies after its DB role is known.

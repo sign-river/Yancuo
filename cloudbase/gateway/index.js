@@ -39,7 +39,6 @@ const pool = new Pool({
   ssl: process.env.PG_SSL === "disable" ? false : { rejectUnauthorized: false },
 });
 const cloud = tcb.init({ env: ENV_ID });
-const rateBuckets = new Map();
 
 function fail(message, statusCode = 400) {
   const error = new Error(message);
@@ -98,7 +97,7 @@ async function authenticate(req) {
   if (!subject || subject === "anon" || profile.is_anonymous === true) {
     fail("请使用正式账号登录", 403);
   }
-  enforceRate(subject);
+  await enforceRate(subject);
   return {
     subject,
     login: String(profile.email || profile.username || subject),
@@ -106,15 +105,14 @@ async function authenticate(req) {
   };
 }
 
-function enforceRate(subject) {
-  const minute = Math.floor(Date.now() / 60_000);
-  const current = rateBuckets.get(subject);
-  if (!current || current.minute !== minute) {
-    rateBuckets.set(subject, { minute, count: 1 });
-    return;
+async function enforceRate(subject) {
+  const result = await pool.query(
+    "insert into yancuo.rate_limits(subject_id,window_start,request_count) values($1,date_trunc('minute',now()),1) on conflict(subject_id) do update set window_start=case when yancuo.rate_limits.window_start<date_trunc('minute',now()) then excluded.window_start else yancuo.rate_limits.window_start end,request_count=case when yancuo.rate_limits.window_start<date_trunc('minute',now()) then 1 else yancuo.rate_limits.request_count+1 end returning request_count",
+    [subject],
+  );
+  if (Number(result.rows[0].request_count) > RATE_PER_MINUTE) {
+    fail("请求过于频繁，请稍后再试", 429);
   }
-  current.count += 1;
-  if (current.count > RATE_PER_MINUTE) fail("请求过于频繁，请稍后再试", 429);
 }
 
 async function repository(client, subject, payload) {

@@ -24,7 +24,7 @@
 | `PG_SSL` | 否 | 默认为 TLS；仅本地开发可设为 `disable`。 |
 | `USER_STORAGE_BYTES` | 否 | 单用户已提交对象与有效上传预留的合计预算，默认 512 MiB。 |
 | `USER_REPOSITORIES` | 否 | 单用户逻辑资料库数量，默认 5。 |
-| `RATE_PER_MINUTE` | 否 | 单实例、单用户分钟请求预算，默认 120。 |
+| `RATE_PER_MINUTE` | 否 | 所有函数实例共享的单用户分钟请求预算，默认 120。 |
 | `MAX_ASSET_BYTES` | 否 | 单对象预算，上限固定 512 MiB。 |
 
 安装依赖和本地安全测试：
@@ -72,3 +72,4 @@ Content-Type: application/json
 - `locks/acquire` 需采用 [`postgres/init.sql`](postgres/init.sql) 中的 `INSERT ... ON CONFLICT ... WHERE` 事务语义；不能用“先读再写”。
 - 完整快照与 Operation 批次共享同一原子 manifest 和仓库锁；LocalFolder 仅保留为离线测试通道。
 - 资料库数量与存储预算在 PostgreSQL 事务内按用户加 advisory lock；所有网关实例共享同一配额串行化边界，有效上传会话在提交前也占用预算。
+- 登录成功后的请求频率由 PostgreSQL 单行 UPSERT 原子计数；函数横向扩容不会把单用户额度按实例倍增，也不在 Node 进程中永久保留用户键。
