@@ -20,6 +20,7 @@ const ENV_ID = environmentId(process.env.CLOUDBASE_ENV_ID || process.env.TCB_ENV
 const PUBLIC_URL = String(process.env.GATEWAY_PUBLIC_URL || "").replace(/\/$/, "");
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_AUTH_RESPONSE_BYTES = 64 * 1024;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_RELEASE_BODY_BYTES = 64 * 1024;
@@ -88,7 +89,14 @@ function fail(message, statusCode = 400) {
 }
 
 function response(res, statusCode, payload) {
-  const body = Buffer.from(JSON.stringify(payload), "utf8");
+  let body = Buffer.from(JSON.stringify(payload), "utf8");
+  if (body.length > MAX_RESPONSE_BYTES) {
+    statusCode = 502;
+    body = Buffer.from(
+      JSON.stringify({ ok: false, error: "网关响应超过大小限制" }),
+      "utf8",
+    );
+  }
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": String(body.length),
@@ -360,6 +368,9 @@ async function action(name, payload, identity, req) {
       const tag = boundedName(payload.tag, "发布标签");
       const releaseName = boundedText(payload.name || tag, "发布名称", 512);
       const body = boundedText(payload.body, "发布说明", MAX_RELEASE_BODY_BYTES);
+      if (Buffer.byteLength(JSON.stringify(body), "utf8") > MAX_RELEASE_BODY_BYTES) {
+        fail("发布说明 JSON 编码后超过大小限制", 413);
+      }
       await client.query("begin");
       await requireWriteLock(client, repo.repository_id, payload);
       const existing = await client.query(
