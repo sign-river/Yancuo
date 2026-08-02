@@ -191,6 +191,13 @@ def test_operation_validation_rejects_oversized_attachment_metadata() -> None:
             )
     with pytest.raises(DomainError, match="attachment id 重复"):
         validate_operation({**operation, "attachments": [attachment, attachment]})
+    with pytest.raises(DomainError, match="sha256 与内容不一致"):
+        validate_operation(
+            {
+                **operation,
+                "attachments": [{**attachment, "sha256": "0" * 64}],
+            }
+        )
 
 
 def test_entity_operation_batch_rejects_conflicting_attachment_id_payloads(
@@ -272,6 +279,57 @@ def test_entity_operation_batch_rejects_cumulative_attachment_budget_before_writ
     with runtime.session_factory() as session:
         stored_problem = session.get(Problem, problem.id)
         with pytest.raises(DomainError, match="题图总大小"):
+            SyncService(runtime, provider)._apply_operation_attachments(
+                session, stored_problem, operations
+            )
+        assert all(session.get(Asset, asset_id) is None for asset_id in asset_ids)
+    assert list(runtime.paths.asset_objects_dir.rglob("*")) == []
+
+
+def test_entity_operation_batch_preflights_all_hashes_before_object_write(
+    runtime, tmp_path: Path
+) -> None:
+    services = AppServices(runtime)
+    problem = services.create_problem(title="附件哈希预检题")
+    provider = LocalFolderProvider(tmp_path / "attachment-hash")
+    payload = b"valid-payload"
+    asset_ids = ["asset_a_hash_valid", "asset_z_hash_invalid"]
+    content_json = json.dumps(
+        [
+            {
+                "type": "figure",
+                "content": asset_id,
+                "source_region": {"x": 0, "y": 0, "width": 1, "height": 1},
+                "derived_asset_id": asset_id,
+            }
+            for asset_id in asset_ids
+        ]
+    )
+
+    def attachment(asset_id: str, expected: str) -> dict[str, Any]:
+        return {
+            "id": asset_id,
+            "role": "derived_figure",
+            "sha256": expected,
+            "mime_type": "image/png",
+            "size_bytes": len(payload),
+            "width": 1,
+            "height": 1,
+            "content_base64": base64.b64encode(payload).decode("ascii"),
+        }
+
+    operations = [
+        {
+            "changed_fields": {"question_content_json": content_json},
+            "attachments": [
+                attachment(asset_ids[0], hashlib.sha256(payload).hexdigest()),
+                attachment(asset_ids[1], "0" * 64),
+            ],
+        }
+    ]
+    with runtime.session_factory() as session:
+        stored_problem = session.get(Problem, problem.id)
+        with pytest.raises(DomainError, match="哈希不一致"):
             SyncService(runtime, provider)._apply_operation_attachments(
                 session, stored_problem, operations
             )

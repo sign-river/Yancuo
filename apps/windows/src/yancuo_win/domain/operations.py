@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from datetime import datetime, timezone
+import hashlib
 import re
 from typing import Any
 
@@ -214,6 +215,8 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
             raise DomainError("attachment size_bytes 与内容不一致")
         if not decoded:
             raise DomainError("attachment 内容不能为空")
+        if hashlib.sha256(decoded).hexdigest() != attachment["sha256"]:
+            raise DomainError("attachment sha256 与内容不一致")
         attachment_bytes += len(decoded)
         if attachment_bytes > MAX_OPERATION_ATTACHMENT_BYTES:
             raise DomainError("Operation 附件总大小不能超过 32 MiB")
