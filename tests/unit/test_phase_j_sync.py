@@ -730,6 +730,8 @@ def test_github_batch_upload_failure_keeps_index_and_operations_unpushed(
     provider.release_lock = lambda *_args: None  # type: ignore[method-assign]
     provider.read_sync_manifest = lambda *_args: manifest  # type: ignore[method-assign]
     provider.create_release = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    deleted: list[str] = []
+    provider.delete_release = lambda *_args, tag: deleted.append(tag)  # type: ignore[method-assign]
     provider.upload_release_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(
         DomainError("模拟上传失败")
     )  # type: ignore[method-assign]
@@ -737,6 +739,43 @@ def test_github_batch_upload_failure_keeps_index_and_operations_unpushed(
     sync = SyncService(runtime, provider)
     with pytest.raises(DomainError, match="上传失败"):
         sync.push_operations()
+    assert "operation_batches" not in manifest
+    assert sync.list_unpushed()
+    assert len(deleted) == 1
+
+
+def test_github_batch_manifest_failure_deletes_unindexed_release(runtime) -> None:
+    provider = GitHubProvider(token="ghp_test")
+    manifest: dict[str, Any] = {"format": "yancuo-profile-snapshots", "profiles": {}}
+    created: list[str] = []
+    deleted: list[str] = []
+    uploaded = b""
+    provider.acquire_lock = lambda *_args: True  # type: ignore[method-assign]
+    provider.release_lock = lambda *_args: None  # type: ignore[method-assign]
+    provider.read_sync_manifest = lambda *_args: manifest  # type: ignore[method-assign]
+    provider.create_release = lambda *_args, tag, **_kwargs: created.append(tag)  # type: ignore[method-assign]
+    provider.delete_release = lambda *_args, tag: deleted.append(tag)  # type: ignore[method-assign]
+
+    def upload(*_args, file_path, **_kwargs):
+        nonlocal uploaded
+        uploaded = Path(file_path).read_bytes()
+
+    def download(*_args, dest, **_kwargs):
+        Path(dest).write_bytes(uploaded)
+        return dest
+
+    provider.upload_release_asset = upload  # type: ignore[method-assign]
+    provider.download_release_asset = download  # type: ignore[method-assign]
+    provider.write_sync_manifest = lambda *_args: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        DomainError("模拟索引失败")
+    )
+    AppServices(runtime).create_problem(title="索引失败批次")
+    sync = SyncService(runtime, provider)
+
+    with pytest.raises(DomainError, match="索引失败"):
+        sync.push_operations()
+
+    assert created == deleted
     assert "operation_batches" not in manifest
     assert sync.list_unpushed()
 

@@ -257,6 +257,16 @@ class SyncService:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    def _cleanup_unindexed_github_batch(
+        self, provider: CloudProvider, tag: str, failure: Exception
+    ) -> None:
+        try:
+            provider.delete_release(self.owner, self.repo, tag=tag)
+        except Exception as cleanup_exc:
+            raise DomainError(
+                f"GitHub Operation 批次发布失败，且清理未入索引的 Release 失败：{cleanup_exc}"
+            ) from failure
+
     def _push_github_batch(self, provider: CloudProvider, ops: list[dict[str, Any]]) -> None:
         if len(ops) > MAX_REMOTE_OPERATIONS_PER_BATCH:
             raise DomainError("待推送 Operation 批次记录过多")
@@ -296,37 +306,56 @@ class SyncService:
             provider.create_release(
                 self.owner, self.repo, tag=tag, name="Yancuo operation batch", body=body
             )
-            provider.upload_release_asset(
-                self.owner, self.repo, tag=tag, file_path=payload, asset_name="operations.jsonl"
-            )
-            verified = Path(temporary) / "verified.jsonl"
-            provider.download_release_asset(
-                self.owner, self.repo, tag=tag, asset_name="operations.jsonl", dest=verified
-            )
-            if self._sha256(verified) != sha:
-                raise DomainError("远端 Operation 批次哈希不一致，未更新索引")
-        index = provider.read_sync_manifest(self.owner, self.repo) or {
-            "format": "yancuo-profile-snapshots",
-            "format_version": 1,
-            "profiles": {},
-            "aliases": {},
-        }
-        batches = index.setdefault("operation_batches", [])
-        if not isinstance(batches, list):
-            raise DomainError("云端 Operation 批次索引无效")
-        batches.append(
-            {
-                "tag": tag,
-                "batch_id": batch_id,
-                "profile_id": profile_id,
-                "device_id": device_id,
-                "asset_name": "operations.jsonl",
-                "operation_count": len(ops),
-                "sha256": sha,
-                "created_at": _utcnow().isoformat(),
+            try:
+                provider.upload_release_asset(
+                    self.owner,
+                    self.repo,
+                    tag=tag,
+                    file_path=payload,
+                    asset_name="operations.jsonl",
+                )
+                verified = Path(temporary) / "verified.jsonl"
+                provider.download_release_asset(
+                    self.owner,
+                    self.repo,
+                    tag=tag,
+                    asset_name="operations.jsonl",
+                    dest=verified,
+                )
+                if self._sha256(verified) != sha:
+                    raise DomainError("远端 Operation 批次哈希不一致，未更新索引")
+            except Exception as exc:
+                self._cleanup_unindexed_github_batch(provider, tag, exc)
+                raise
+        try:
+            index = provider.read_sync_manifest(self.owner, self.repo) or {
+                "format": "yancuo-profile-snapshots",
+                "format_version": 1,
+                "profiles": {},
+                "aliases": {},
             }
-        )
-        provider.write_sync_manifest(self.owner, self.repo, index)
+            index = dict(index)
+            existing_batches = index.get("operation_batches", [])
+            if not isinstance(existing_batches, list):
+                raise DomainError("云端 Operation 批次索引无效")
+            batches = list(existing_batches)
+            batches.append(
+                {
+                    "tag": tag,
+                    "batch_id": batch_id,
+                    "profile_id": profile_id,
+                    "device_id": device_id,
+                    "asset_name": "operations.jsonl",
+                    "operation_count": len(ops),
+                    "sha256": sha,
+                    "created_at": _utcnow().isoformat(),
+                }
+            )
+            index["operation_batches"] = batches
+            provider.write_sync_manifest(self.owner, self.repo, index)
+        except Exception as exc:
+            self._cleanup_unindexed_github_batch(provider, tag, exc)
+            raise
 
     def _github_remote_operations(self, provider: CloudProvider) -> list[dict[str, Any]]:
         index = provider.read_sync_manifest(self.owner, self.repo) or {}
