@@ -18,6 +18,7 @@ from yancuo_win.data.models import (
 
 _REBUILD_KEY = "yancuo_unified_note_search_rebuild"
 _HOOKS_INSTALLED_ATTR = "_yancuo_unified_note_search_hooks_installed"
+_NOTE_REBUILD_BATCH_SIZE = 200
 
 
 class UnifiedSearchIndexService:
@@ -57,19 +58,28 @@ class UnifiedSearchIndexService:
         # Collection membership may be maintained through the association table
         # directly, so reload relationships instead of reusing stale identity-map data.
         session.expire_all()
-        notes = list(session.scalars(select(NoteDocument).options(
-            selectinload(NoteDocument.blocks), selectinload(NoteDocument.tags),
-            selectinload(NoteDocument.collections),
-        )).all())
         session.execute(delete(UnifiedSearchDocument).where(UnifiedSearchDocument.entity_type == "note"))
         session.execute(text("DELETE FROM unified_search_documents_fts WHERE entity_type='note'"))
-        documents = [cls._document(note) for note in notes]
+        statement = select(NoteDocument).options(
+            selectinload(NoteDocument.blocks),
+            selectinload(NoteDocument.tags),
+            selectinload(NoteDocument.collections),
+        )
+        count = 0
+        notes = session.scalars(statement).yield_per(_NOTE_REBUILD_BATCH_SIZE)
+        for partition in notes.partitions(_NOTE_REBUILD_BATCH_SIZE):
+            documents = [cls._document(note) for note in partition]
+            cls._insert_documents(session, documents)
+            count += len(documents)
+        return count
+
+    @staticmethod
+    def _insert_documents(session: Session, documents: list[dict[str, object]]) -> None:
         if documents:
             session.execute(UnifiedSearchDocument.__table__.insert(), documents)
             session.execute(text("""INSERT INTO unified_search_documents_fts
                 (entity_type, entity_id, title, body, tags_text, collections_text, knowledge_path)
                 VALUES (:entity_type, :entity_id, :title, :body, :tags_text, :collections_text, :knowledge_path)"""), documents)
-        return len(documents)
 
     def repair_notes_if_needed(self) -> int:
         """Repair the disposable note projection when its two local copies diverge."""
