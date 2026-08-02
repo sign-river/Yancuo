@@ -13,6 +13,7 @@ from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.models import SyncOperation
+from yancuo_win.domain.rules import DomainError
 from yancuo_win.import_export.gmshare import HARD_DENY_FIELDS, GmshareService
 
 
@@ -21,6 +22,15 @@ def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
     return bootstrap_runtime()
+
+
+def _rewrite_entry(source: Path, destination: Path, name: str, payload: bytes) -> Path:
+    with zipfile.ZipFile(source, "r") as incoming, zipfile.ZipFile(
+        destination, "w", compression=zipfile.ZIP_DEFLATED
+    ) as outgoing:
+        for item in incoming.infolist():
+            outgoing.writestr(item, payload if item.filename == name else incoming.read(item))
+    return destination
 
 
 def test_gmshare_excludes_private_fields(runtime, tmp_path: Path) -> None:
@@ -80,3 +90,43 @@ def test_gmshare_import_dedup(runtime, tmp_path: Path, monkeypatch: pytest.Monke
     second = share.import_share(pack)
     assert second.created == 0
     assert second.skipped_duplicates == 1
+
+
+def test_gmshare_rejects_tampered_problem_payload(runtime, tmp_path: Path) -> None:
+    services = AppServices(runtime)
+    problem_id = services.create_problem(title="完整性题").id
+    share = GmshareService(runtime)
+    source = share.export_share([problem_id], dest=tmp_path / "source.gmshare").path
+    with zipfile.ZipFile(source, "r") as zf:
+        row = json.loads(zf.read("problems.jsonl"))
+    row["title"] = "被篡改"
+    tampered = _rewrite_entry(
+        source,
+        tmp_path / "tampered.gmshare",
+        "problems.jsonl",
+        (json.dumps(row, ensure_ascii=False) + "\n").encode(),
+    )
+
+    with pytest.raises(DomainError, match="校验失败"):
+        share.import_share(tampered)
+
+
+def test_gmshare_rejects_incomplete_checksum_coverage(runtime, tmp_path: Path) -> None:
+    services = AppServices(runtime)
+    problem_id = services.create_problem(title="覆盖题").id
+    share = GmshareService(runtime)
+    source = share.export_share([problem_id], dest=tmp_path / "source.gmshare").path
+    with zipfile.ZipFile(source, "r") as zf:
+        checksums = zf.read("checksums.sha256").decode()
+    incomplete = "\n".join(
+        line for line in checksums.splitlines() if not line.endswith("  problems.jsonl")
+    )
+    pack = _rewrite_entry(
+        source,
+        tmp_path / "incomplete.gmshare",
+        "checksums.sha256",
+        (incomplete + "\n").encode(),
+    )
+
+    with pytest.raises(DomainError, match="未完整覆盖"):
+        share.import_share(pack)

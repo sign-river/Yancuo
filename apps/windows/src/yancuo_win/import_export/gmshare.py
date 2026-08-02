@@ -23,6 +23,7 @@ from yancuo_win.domain.identity import DATA_FORMAT_VERSION
 from yancuo_win.domain.rules import DomainError, validate_priority
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
+    iter_regular_files,
     safe_extract_zip,
     safe_relative_path,
     validate_relative_checksum_path,
@@ -30,6 +31,10 @@ from yancuo_win.infrastructure.archive import (
 
 FORMAT_NAME = "graduate-mistake-book-gmshare"
 FORMAT_VERSION = 1
+MAX_SHARE_PROBLEMS = 10_000
+MAX_SHARE_ASSET_REFERENCES = 10_000
+MAX_SHARE_JSONL_LINE_BYTES = 4 * 1024 * 1024
+MAX_CHECKSUM_LINE_BYTES = 4 * 1024
 
 # 默认拒绝：无论 includes 如何，这些键不得写入 problems.jsonl
 HARD_DENY_FIELDS = frozenset(
@@ -265,9 +270,8 @@ class GmshareService:
                     safe_extract_zip(zf, staging)
                 except ArchiveSecurityError as exc:
                     raise DomainError(f"gmshare ZIP 解压被拒绝：{exc}") from exc
-            manifest = self._validate(staging)
+            manifest, rows = self._validate(staging)
             package_id = str(manifest["package_id"])
-            lines = (staging / "problems.jsonl").read_text(encoding="utf-8").splitlines()
             created = 0
             skipped = 0
             created_ids: list[str] = []
@@ -275,11 +279,7 @@ class GmshareService:
             from yancuo_win.application.sync_service import sync_snapshot
 
             with self.runtime.session_factory() as s:
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    raw = json.loads(line)
+                for raw in rows:
                     origin_pid = str(raw.get("origin_problem_id") or "")
                     if not origin_pid:
                         continue
@@ -395,33 +395,134 @@ class GmshareService:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    def _validate(self, root: Path) -> dict[str, Any]:
+    def _validate(self, root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         for name in ("manifest.json", "checksums.sha256", "problems.jsonl"):
             if not (root / name).is_file():
                 raise DomainError(f"分享包缺少 {name}")
-        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        try:
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainError("分享包 manifest.json 无效") from exc
+        if not isinstance(manifest, dict):
+            raise DomainError("分享包 manifest.json 必须是对象")
         if manifest.get("format") != FORMAT_NAME:
             raise DomainError("不是研错库 .gmshare 包")
-        if int(manifest.get("format_version") or 0) != FORMAT_VERSION:
+        try:
+            format_version = int(manifest.get("format_version") or 0)
+            problem_count = int(manifest.get("problem_count") or 0)
+            asset_count = int(manifest.get("asset_count") or 0)
+        except (TypeError, ValueError) as exc:
+            raise DomainError("gmshare manifest 数量或版本字段无效") from exc
+        if format_version != FORMAT_VERSION:
             raise DomainError("gmshare format_version 不受支持")
+        package_id = manifest.get("package_id")
+        if not isinstance(package_id, str) or not package_id.strip() or len(package_id) > 128:
+            raise DomainError("gmshare package_id 无效")
+        if not 1 <= problem_count <= MAX_SHARE_PROBLEMS:
+            raise DomainError("gmshare 题目数量无效或超限")
+        if not 0 <= asset_count <= MAX_SHARE_ASSET_REFERENCES:
+            raise DomainError("gmshare 资源引用数量无效或超限")
+
         # 校验 checksums
-        for line in (root / "checksums.sha256").read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("  ", 1)
-            if len(parts) != 2:
-                raise DomainError(f"checksum 行格式错误：{line[:80]}")
-            digest, rel = (part.strip() for part in parts)
-            try:
-                path = validate_relative_checksum_path(root, rel)
-            except ArchiveSecurityError as exc:
-                raise DomainError(f"checksum 路径非法：{rel}") from exc
-            if not path.is_file():
-                raise DomainError(f"checksum 指向缺失文件：{rel}")
-            if _sha256_file(path) != digest:
-                raise DomainError(f"校验失败：{rel}")
-        return manifest
+        checksummed_paths: set[str] = set()
+        try:
+            with (root / "checksums.sha256").open("rb") as checksum_stream:
+                while line_bytes := checksum_stream.readline(
+                    MAX_CHECKSUM_LINE_BYTES + 1
+                ):
+                    if len(line_bytes) > MAX_CHECKSUM_LINE_BYTES:
+                        raise DomainError("checksum 行过长")
+                    line = line_bytes.decode("utf-8").strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("  ", 1)
+                    if len(parts) != 2:
+                        raise DomainError(f"checksum 行格式错误：{line[:80]}")
+                    digest, rel = (part.strip() for part in parts)
+                    if len(digest) != 64 or any(
+                        char not in "0123456789abcdefABCDEF" for char in digest
+                    ):
+                        raise DomainError(f"checksum 摘要格式错误：{digest[:80]}")
+                    try:
+                        path = validate_relative_checksum_path(root, rel)
+                    except ArchiveSecurityError as exc:
+                        raise DomainError(f"checksum 路径非法：{rel}") from exc
+                    canonical = path.relative_to(root.resolve()).as_posix()
+                    if rel.replace("\\", "/") != canonical:
+                        raise DomainError(f"checksum 路径不是规范相对路径：{rel}")
+                    if canonical in checksummed_paths:
+                        raise DomainError(f"checksum 路径重复：{rel}")
+                    checksummed_paths.add(canonical)
+                    if len(checksummed_paths) > 10_000:
+                        raise DomainError("checksum 条目数量超限")
+                    if not path.is_file():
+                        raise DomainError(f"checksum 指向缺失文件：{rel}")
+                    if _sha256_file(path) != digest.lower():
+                        raise DomainError(f"校验失败：{rel}")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise DomainError("分享包 checksums.sha256 无效") from exc
+
+        actual_paths = {
+            path.relative_to(root).as_posix()
+            for path in iter_regular_files(root)
+            if path.relative_to(root).as_posix() != "checksums.sha256"
+        }
+        if checksummed_paths != actual_paths:
+            missing = sorted(actual_paths - checksummed_paths)
+            extra = sorted(checksummed_paths - actual_paths)
+            detail = []
+            if missing:
+                detail.append("缺少 " + "、".join(missing[:5]))
+            if extra:
+                detail.append("多余 " + "、".join(extra[:5]))
+            raise DomainError("checksum 未完整覆盖分享包文件：" + "；".join(detail))
+
+        rows: list[dict[str, Any]] = []
+        try:
+            with (root / "problems.jsonl").open("rb") as problem_stream:
+                while line_bytes := problem_stream.readline(
+                    MAX_SHARE_JSONL_LINE_BYTES + 1
+                ):
+                    if len(line_bytes) > MAX_SHARE_JSONL_LINE_BYTES:
+                        raise DomainError("分享包单条题目记录过大")
+                    if not line_bytes.strip():
+                        continue
+                    row = json.loads(line_bytes.decode("utf-8"))
+                    if not isinstance(row, dict):
+                        raise DomainError("分享包题目记录必须是对象")
+                    rows.append(row)
+                    if len(rows) > MAX_SHARE_PROBLEMS:
+                        raise DomainError("分享包题目记录数量超限")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainError("分享包 problems.jsonl 无效") from exc
+        if len(rows) != problem_count:
+            raise DomainError("gmshare manifest 与题目记录数量不一致")
+
+        index_path = root / "assets" / "index.json"
+        try:
+            asset_index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainError("分享包 assets/index.json 无效") from exc
+        indexed_assets = asset_index.get("assets") if isinstance(asset_index, dict) else None
+        if not isinstance(indexed_assets, list) or not all(
+            isinstance(item, dict) for item in indexed_assets
+        ):
+            raise DomainError("分享包资源索引必须包含 assets 对象数组")
+        if len(indexed_assets) != asset_count:
+            raise DomainError("gmshare manifest 与资源索引数量不一致")
+        referenced_assets = 0
+        for row in rows:
+            assets = row.get("assets") or []
+            if not isinstance(assets, list) or not all(
+                isinstance(item, dict) for item in assets
+            ):
+                raise DomainError("分享包题目资源引用必须是对象数组")
+            referenced_assets += len(assets)
+            if referenced_assets > MAX_SHARE_ASSET_REFERENCES:
+                raise DomainError("分享包题目资源引用数量超限")
+        if referenced_assets != asset_count:
+            raise DomainError("gmshare 题目资源引用与资源索引数量不一致")
+        return manifest, rows
 
     def _write_checksums(self, root: Path) -> None:
         lines: list[str] = []
