@@ -97,6 +97,7 @@ def test_operation_validation_rejects_missing_identity_and_bad_revision() -> Non
         {"base_fields": {1: "invalid-key"}},
         {"base_revision": -1},
         {"new_revision": "not-an-int"},
+        {"new_revision": 2**63},
         {"base_fields": []},
     ):
         with pytest.raises(DomainError):
@@ -148,6 +149,46 @@ def test_operation_validation_rejects_cumulative_attachment_budget(
 
     with pytest.raises(DomainError, match="附件总大小"):
         validate_operation(operation)
+
+
+def test_operation_validation_rejects_oversized_attachment_metadata() -> None:
+    payload = b"x"
+    attachment = {
+        "id": "asset_metadata",
+        "role": "derived_figure",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "mime_type": "image/png",
+        "size_bytes": len(payload),
+        "width": 1,
+        "height": 1,
+        "content_base64": base64.b64encode(payload).decode("ascii"),
+    }
+    operation = {
+        "format": "yancuo-operation",
+        "format_version": 1,
+        "operation_id": "op_attachment_metadata",
+        "device_id": "dev_other",
+        "database_id": "db_shared",
+        "timestamp": "2026-07-22T00:00:00+00:00",
+        "entity_type": "problem",
+        "entity_id": "problem_1",
+        "operation": "update",
+        "base_revision": 1,
+        "new_revision": 2,
+        "changed_fields": {"title": "x"},
+        "attachments": [attachment],
+    }
+    for patch in (
+        {"id": "asset_" + "x" * 59},
+        {"mime_type": "image/" + "x" * 123},
+        {"width": 100_001},
+        {"height": 100_001},
+        {"size_bytes": 32 * 1024 * 1024 + 1},
+    ):
+        with pytest.raises(DomainError):
+            validate_operation(
+                {**operation, "attachments": [{**attachment, **patch}]}
+            )
 
 
 def test_local_folder_push_pull_auto_merge(
@@ -322,6 +363,12 @@ def test_pull_skips_invalid_problem_field_value_and_applies_valid_peer(
         "timestamp": "2026-07-22T00:00:00+00:00",
         "changed_fields": {"priority": {"unexpected": True}},
     }
+    oversized = {
+        **base,
+        "operation_id": "op_oversized_title",
+        "timestamp": "2026-07-22T00:00:30+00:00",
+        "changed_fields": {"title": "x" * 257},
+    }
     valid = {
         **base,
         "operation_id": "op_valid_after_invalid",
@@ -329,7 +376,10 @@ def test_pull_skips_invalid_problem_field_value_and_applies_valid_peer(
         "changed_fields": {"solution_markdown": "有效解析"},
     }
     provider.append_operations(
-        "local", "invalid-field-value-repo", "dev_remote", [invalid, valid]
+        "local",
+        "invalid-field-value-repo",
+        "dev_remote",
+        [invalid, oversized, valid],
     )
 
     result = SyncService(runtime, provider).pull_and_merge()
@@ -338,6 +388,7 @@ def test_pull_skips_invalid_problem_field_value_and_applies_valid_peer(
     assert services.get_problem(problem_id).solution_markdown == "有效解析"
     with runtime.session_factory() as session:
         assert session.get(SyncOperation, invalid["operation_id"]) is None
+        assert session.get(SyncOperation, oversized["operation_id"]) is None
 
 
 def test_pull_same_field_creates_review(runtime, tmp_path: Path):

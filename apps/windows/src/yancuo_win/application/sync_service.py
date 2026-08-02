@@ -106,6 +106,17 @@ _SYNC_OPTIONAL_TEXT_FIELDS = frozenset(
         "original_number",
     }
 )
+_SYNC_OPTIONAL_TEXT_LIMITS = {
+    "subject_id": 64,
+    "chapter_id": 64,
+    "problem_type": 64,
+    "title": 256,
+    "source_book": 256,
+    "source_year": 32,
+    "page_number": 32,
+    "original_number": 64,
+}
+_MAX_SYNC_INTEGER = 2**63 - 1
 
 
 def _utcnow() -> datetime:
@@ -180,6 +191,10 @@ def _coerce_sync_value(field: str, value: Any) -> Any:
             raise DomainError(f"同步整数字段无效：{field}={value!r}") from exc
         if field == "review_count" and number < 0:
             raise DomainError("同步 review_count 不得为负数")
+        if field in {"difficulty", "mastery"} and not 1 <= number <= 5:
+            raise DomainError(f"同步 {field} 字段必须在 1 到 5 之间")
+        if number > _MAX_SYNC_INTEGER:
+            raise DomainError(f"同步整数字段过大：{field}")
         return number
     if field in {"is_favorite", "needs_redo", "allow_print", "human_confirmed"}:
         if value is None:
@@ -194,6 +209,8 @@ def _coerce_sync_value(field: str, value: Any) -> Any:
     if field in _SYNC_OPTIONAL_TEXT_FIELDS:
         if value is not None and not isinstance(value, str):
             raise DomainError(f"同步文本字段无效：{field}={value!r}")
+        if isinstance(value, str) and len(value) > _SYNC_OPTIONAL_TEXT_LIMITS[field]:
+            raise DomainError(f"同步文本字段过长：{field}")
         return value
     return value
 
@@ -219,8 +236,8 @@ def _normalize_problem_operation(op: dict[str, Any]) -> dict[str, Any]:
                     revision = int(value)
                 except (TypeError, ValueError) as exc:
                     raise DomainError("同步 revision 字段无效") from exc
-                if revision < 0:
-                    raise DomainError("同步 revision 字段不得为负数")
+                if revision < 0 or revision > _MAX_SYNC_INTEGER:
+                    raise DomainError("同步 revision 字段超出有效范围")
                 fields[field] = revision
                 continue
             if field == "tags":

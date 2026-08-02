@@ -16,9 +16,12 @@ OP_FORMAT_VERSION = 1
 ALLOWED_OPS = frozenset({"create", "update", "delete", "undelete"})
 ALLOWED_ENTITIES = frozenset({"problem", "tag", "asset", "review"})
 MAX_OPERATION_ATTACHMENT_BYTES = 32 * 1024 * 1024
+MAX_OPERATION_ATTACHMENT_ITEM_BYTES = 32 * 1024 * 1024
 MAX_OPERATION_ID_CHARS = 64
 MAX_OPERATION_TIMESTAMP_CHARS = 64
 MAX_OPERATION_FIELDS = 64
+MAX_OPERATION_REVISION = 2**63 - 1
+MAX_ATTACHMENT_DIMENSION = 100_000
 PROBLEM_OPERATION_FIELDS = frozenset(
     {
         "status",
@@ -187,6 +190,15 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
                 isinstance(value, bool) or not isinstance(value, int) or value < 0
             ):
                 raise DomainError(f"attachment {dimension} 无效")
+        if len(attachment["id"]) > MAX_OPERATION_ID_CHARS:
+            raise DomainError("attachment id 过长")
+        if isinstance(mime_type, str) and len(mime_type) > 128:
+            raise DomainError("attachment mime_type 过长")
+        for dimension in ("width", "height"):
+            if (attachment.get(dimension) or 0) > MAX_ATTACHMENT_DIMENSION:
+                raise DomainError(f"attachment {dimension} 过大")
+        if (attachment.get("size_bytes") or 0) > MAX_OPERATION_ATTACHMENT_ITEM_BYTES:
+            raise DomainError("attachment size_bytes 过大")
         payload = attachment.get("content_base64")
         if not isinstance(payload, str) or len(payload) > 48 * 1024 * 1024:
             raise DomainError("attachment 内容无效或过大")
@@ -211,8 +223,8 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
             value = int(value)
         except (TypeError, ValueError) as exc:
             raise DomainError(f"{field} 必须是非负整数") from exc
-        if value < 0:
-            raise DomainError(f"{field} 必须是非负整数")
+        if value < 0 or value > MAX_OPERATION_REVISION:
+            raise DomainError(f"{field} 必须是有效非负整数")
         normalized[field] = value
     normalized["format_version"] = format_version
     normalized["tombstone"] = bool(raw.get("tombstone", False))
