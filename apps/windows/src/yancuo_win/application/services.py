@@ -9,7 +9,9 @@ import shutil
 import stat
 import zipfile
 from email.utils import parsedate_to_datetime
-from urllib.request import Request, urlopen
+from time import monotonic
+from urllib.error import HTTPError, URLError
+from urllib.request import Request
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -21,6 +23,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.assets.object_store import ObjectStore
+from yancuo_win.infrastructure.safe_http import safe_urlopen
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
     AiJob,
@@ -135,6 +138,7 @@ class AppServices:
     def __init__(self, runtime: RuntimeContext) -> None:
         self.runtime = runtime
         self.store = ObjectStore(runtime.paths.asset_objects_dir)
+        self._review_date_cache: tuple[float, str] | None = None
 
     def session(self) -> Session:
         return self.runtime.session_factory()
@@ -1333,15 +1337,29 @@ class AppServices:
     def review_plan_date(self) -> str:
         """Use a network-confirmed UTC date when available, else local Shanghai time."""
 
+        now = monotonic()
+        if self._review_date_cache is not None:
+            expires_at, cached_date = self._review_date_cache
+            if now < expires_at:
+                return cached_date
+        result: str | None = None
         try:
             request = Request("https://www.cloudflare.com", method="HEAD")
-            with urlopen(request, timeout=2) as response:  # nosec B310 - fixed HTTPS endpoint
+            with safe_urlopen(request, timeout=2) as response:
                 header = response.headers.get("Date")
             if header:
-                return parsedate_to_datetime(header).astimezone(timezone(timedelta(hours=8))).date().isoformat()
-        except OSError:
+                result = (
+                    parsedate_to_datetime(header)
+                    .astimezone(timezone(timedelta(hours=8)))
+                    .date()
+                    .isoformat()
+                )
+        except (HTTPError, URLError, OSError, TypeError, ValueError):
             pass
-        return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        if result is None:
+            result = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        self._review_date_cache = (now + 300, result)
+        return result
 
     @staticmethod
     def _validate_review_content_type(content_type: str) -> str:
