@@ -108,6 +108,38 @@ class MockProvider(AIProvider):
                 "semantic_intent": query,
                 "limit": 10,
             }
+        elif response_name == "yancuo_problem_completion":
+            try:
+                request_data = json.loads(user_content)
+            except (json.JSONDecodeError, TypeError):
+                request_data = {}
+            current = request_data.get("current_problem", {})
+            allowed = request_data.get("allowed_fields", [])
+            if not isinstance(current, dict):
+                current = {}
+            if not isinstance(allowed, list):
+                allowed = []
+            defaults = {
+                "title": "Mock 补全题目",
+                "question_markdown": "（Mock）根据现有结构化内容补全的题干",
+                "question_latex": "",
+                "user_answer": "",
+                "correct_answer": "（Mock）待核对答案",
+                "solution_markdown": "（Mock）待核对解析",
+                "error_analysis": "（Mock）待核对错因",
+                "notes": "",
+                "tags": ["Mock"],
+            }
+            payload = {
+                field: (
+                    f"（Mock）{current[field]}"
+                    if field == "question_markdown" and current.get(field)
+                    else current.get(field) or defaults.get(field, "")
+                )
+                for field in allowed
+                if field in defaults
+            }
+            payload["uncertain_fields"] = []
         elif response_name == "yancuo_search_rerank":
             ids: list[str] = []
             for line in user_content.splitlines():

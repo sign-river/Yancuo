@@ -140,9 +140,14 @@ class ReviewDialog(QDialog):
         if len(problem_labels) > 3:
             shown += f" 等 {len(problem_labels)} 道题"
         self.problem_summary.setText(f"当前题目：{shown or '未选择'}")
-        model = self.ai.runtime.settings.ai.default_vision_model or "未配置"
+        model = (
+            getattr(self.ai.runtime.settings.ai, "default_text_model", "")
+            or getattr(self.ai.runtime.settings.ai, "default_vision_model", "")
+            or "未配置"
+        )
         self.model_summary.setText(
-            f"模型：{model} · 将读取所选题目的原图；耗时和费用受 AI 设置中的限额控制。"
+            f"模型：{model} · 只读取题目的结构化文字与题图引用；"
+            "耗时和费用受 AI 设置中的限额控制。"
         )
         self.user_instruction.clear()
         self.new_task_panel.show()
@@ -196,7 +201,7 @@ class ReviewDialog(QDialog):
         self.new_task_panel.setEnabled(False)
         self.background_button.show()
         self.cancel_job_button.show()
-        self.execution_status.setText("正在准备题目原图和补全范围…")
+        self.execution_status.setText("正在准备结构化题目和补全范围…")
         self._continue_review()
 
     def _cancel_current_job(self) -> None:
@@ -250,10 +255,6 @@ class ReviewDialog(QDialog):
             checkbox.setChecked(checked)
             self.field_groups[key] = checkbox
             new_task.addWidget(checkbox)
-        self.original_required = QCheckBox("允许 AI 读取题目原图（此补全方式必需）")
-        self.original_required.setChecked(True)
-        self.original_required.setEnabled(False)
-        new_task.addWidget(self.original_required)
         self.model_summary = QLabel()
         self.model_summary.setObjectName("MutedLabel")
         self.model_summary.setWordWrap(True)

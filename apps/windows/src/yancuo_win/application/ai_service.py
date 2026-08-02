@@ -32,7 +32,6 @@ from yancuo_win.data.models import (
     AiJobEvent,
     AiJobItem,
     AiRecognitionCache,
-    Asset,
     AuditLog,
     IntakeAsset,
     IntakeCandidateRecord,
@@ -160,6 +159,108 @@ def _recognition_cache_payload(
         ],
         "diagnostics": diagnostics,
     }
+
+
+def _problem_completion_request(
+    problem: Problem,
+    *,
+    prompt: str,
+    allowed_fields: set[str],
+) -> dict[str, object]:
+    """Build a text-only completion request from canonical problem fields."""
+
+    current = {
+        "title": problem.title,
+        "question_markdown": problem.question_markdown,
+        "question_latex": problem.question_latex,
+        "question_content_json": problem.question_content_json,
+        "user_answer": problem.user_answer,
+        "correct_answer": problem.correct_answer,
+        "solution_markdown": problem.solution_markdown,
+        "error_analysis": problem.error_analysis,
+        "notes": problem.notes,
+        "tags": [tag.name for tag in problem.tags],
+    }
+    properties: dict[str, object] = {
+        field: (
+            {"type": "array", "items": {"type": "string"}, "maxItems": 20}
+            if field == "tags"
+            else {"type": "string"}
+        )
+        for field in sorted(allowed_fields)
+    }
+    properties["uncertain_fields"] = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "field": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["field", "reason"],
+            "additionalProperties": False,
+        },
+        "maxItems": 20,
+    }
+    return {
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"{prompt.rstrip()}\n\n"
+                    "本任务是对已经入库的结构化题目做文本补全。不得索取、推断或引用原图；"
+                    "不得输出未授权字段。只返回需要建议修改的字段和 uncertain_fields。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "allowed_fields": sorted(allowed_fields),
+                        "current_problem": current,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "yancuo_problem_completion",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": ["uncertain_fields"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    }
+
+
+def _structured_result_from_text(raw_text: str, *, cost: float = 0.0) -> StructuredResult:
+    """Parse the strict object returned by a text completion provider."""
+
+    if len(raw_text.encode("utf-8")) > 2 * 1024 * 1024:
+        raise DomainError("AI 补全响应超过安全大小限制")
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise DomainError("AI 补全响应不是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise DomainError("AI 补全响应必须是 JSON 对象")
+    uncertain = payload.pop("uncertain_fields", [])
+    if not isinstance(uncertain, list):
+        uncertain = []
+    return StructuredResult(
+        fields=payload,
+        uncertain_fields=[value for value in uncertain if isinstance(value, dict)],
+        raw_text=raw_text,
+        cost_estimate=cost,
+    )
 
 
 def _structure_suggestion(value: object) -> dict[str, object] | None:
@@ -728,16 +829,16 @@ class AIService:
                 prompt_key = f"intake_{job_id}"
                 body = (
                     f"{base_prompt.body.rstrip()}\n\n"
-                    "## 本次录题补充要求\n"
+                    "## 本次题目补全要求\n"
                     f"{instruction}\n\n"
-                    "补充要求用于定位和理解图片内容；如其中明确要求 problems 数组，"
-                    "按该根结构输出。不得改变字段权限或原图保护规则。"
+                    "补充要求只用于理解当前结构化题目；不得改变字段权限，"
+                    "也不得要求读取已经销毁的原图。"
                 )
                 s.add(
                     Prompt(
                         id=new_id("prompt"),
                         key=prompt_key,
-                        name="AI 录题临时提示词",
+                        name="AI 题目补全临时提示词",
                         body=body,
                         version=1,
                         is_builtin=False,
@@ -748,11 +849,22 @@ class AIService:
                 job_type="structure_recognize",
                 status="pending",
                 provider=provider_name,
-                model=self.runtime.settings.ai.default_vision_model or "mock-v1",
+                model=(
+                    self.runtime.settings.ai.default_text_model
+                    or self.runtime.settings.ai.default_vision_model
+                    or "mock-v1"
+                ),
                 prompt_key=prompt_key,
                 domain="question_completion",
                 config_json=json.dumps(
-                    {"provider": provider_name, "model": self.runtime.settings.ai.default_vision_model},
+                    {
+                        "provider": provider_name,
+                        "model": (
+                            self.runtime.settings.ai.default_text_model
+                            or self.runtime.settings.ai.default_vision_model
+                        ),
+                        "input": "structured_problem",
+                    },
                     ensure_ascii=False,
                 ),
                 total_items=0,
@@ -762,28 +874,21 @@ class AIService:
             s.flush()
             count = 0
             for pid in problem_ids:
-                problem = s.scalars(
-                    select(Problem)
-                    .where(Problem.id == pid)
-                    .options(selectinload(Problem.assets))
-                ).first()
+                problem = s.get(Problem, pid)
                 if not problem:
-                    continue
-                original = next((a for a in problem.assets if a.role == "original"), None)
-                if not original:
                     continue
                 s.add(
                     AiJobItem(
                         id=new_id("jitem"),
                         job_id=job.id,
                         problem_id=problem.id,
-                        asset_id=original.id,
+                        asset_id=None,
                         status="pending",
                     )
                 )
                 count += 1
             if count == 0:
-                raise DomainError("所选题目没有可识别的原图")
+                raise DomainError("所选题目不存在")
             job.total_items = count
             self._audit(
                 s,
@@ -1296,7 +1401,7 @@ class AIService:
                     if members:
                         intake_assets = members
             else:
-                asset = s.get(Asset, item.asset_id) if item.asset_id else None
+                asset = None
                 problem = (
                     s.scalars(
                         select(Problem)
@@ -1306,20 +1411,29 @@ class AIService:
                     if item.problem_id
                     else None
                 )
-            if not asset or (item.intake_asset_id and not intake_session) or (
+            if (item.intake_asset_id and (not asset or not intake_session)) or (
                 not item.intake_asset_id and not problem
             ):
                 item.status = "failed"
                 item.error_message = "题目或资源缺失"
                 s.commit()
                 return
-            if not intake_assets:
+            if item.intake_asset_id and not intake_assets:
                 intake_assets = [asset]
 
             if on_progress:
-                on_progress({"stage": "preflight", "label": "正在检查原图并准备识别"})
+                on_progress(
+                    {
+                        "stage": "preflight",
+                        "label": (
+                            "正在检查临时原图并准备识别"
+                            if item.intake_asset_id
+                            else "正在准备结构化题目内容"
+                        ),
+                    }
+                )
 
-            # 预处理：存在性 / 大小；不修改原图
+            # 录题预处理：存在性 / 大小；不修改临时原图。正式题目走纯文本补全。
             image_paths = [self.store.resolve(value.relative_path) for value in intake_assets]
             for source, image_path in zip(intake_assets, image_paths, strict=True):
                 if not image_path.is_file():
@@ -1379,33 +1493,37 @@ class AIService:
                     return
                 timings_ms["preflight"] = (perf_counter() - item_started) * 1000
                 allowed = set(json.loads(job.allowed_fields_json) or list(DEFAULT_ALLOWED_FIELDS))
-                source_fingerprint = hashlib.sha256(
-                    "\n".join(value.sha256 for value in intake_assets).encode("ascii")
-                ).hexdigest()
-                cache_started = perf_counter()
-                cache_key = recognition_cache_key(
-                    asset_sha256=source_fingerprint,
-                    prompt_body=prompt_body,
-                    prompt_version=prompt_version,
-                    provider=job.provider,
-                    model=job.model,
-                    allowed_fields=sorted(allowed),
-                )
-                cached = find_recognition_cache(s, cache_key)
-                cached_fields = (
-                    load_cached_structure(cached)
-                    if cached and use_recognition_cache
-                    else None
-                )
-                timings_ms["cache_lookup"] = (
-                    perf_counter() - cache_started
-                ) * 1000
-                if not self.runtime.settings.privacy.send_original_images_to_ai:
-                    raise DomainError("隐私设置禁止向 AI 发送原图")
-                cached_result = _structured_result_from_cache(
-                    cached_fields,
-                    cached.raw_response if cached and use_recognition_cache else "",
-                )
+                source_fingerprint = ""
+                cached = None
+                cached_result = None
+                if item.intake_asset_id:
+                    source_fingerprint = hashlib.sha256(
+                        "\n".join(value.sha256 for value in intake_assets).encode("ascii")
+                    ).hexdigest()
+                    cache_started = perf_counter()
+                    cache_key = recognition_cache_key(
+                        asset_sha256=source_fingerprint,
+                        prompt_body=prompt_body,
+                        prompt_version=prompt_version,
+                        provider=job.provider,
+                        model=job.model,
+                        allowed_fields=sorted(allowed),
+                    )
+                    cached = find_recognition_cache(s, cache_key)
+                    cached_fields = (
+                        load_cached_structure(cached)
+                        if cached and use_recognition_cache
+                        else None
+                    )
+                    timings_ms["cache_lookup"] = (
+                        perf_counter() - cache_started
+                    ) * 1000
+                    if not self.runtime.settings.privacy.send_original_images_to_ai:
+                        raise DomainError("隐私设置禁止向 AI 发送临时录题原图")
+                    cached_result = _structured_result_from_cache(
+                        cached_fields,
+                        cached.raw_response if cached and use_recognition_cache else "",
+                    )
                 if cached_result is not None:
                     active_stage = "cache"
                     result = cached_result
@@ -1425,17 +1543,48 @@ class AIService:
                         on_progress(
                             {
                                 "stage": "request",
-                                "label": "图片已提交，正在等待 AI 回复",
+                                "label": (
+                                    "临时图片已提交，正在等待 AI 回复"
+                                    if item.intake_asset_id
+                                    else "结构化题目已提交，正在等待 AI 回复"
+                                ),
                             }
                         )
                     self.append_job_event(
                         job_id,
                         "status",
-                        text_value="图片已提交，正在等待 AI 回复",
+                        text_value=(
+                            "临时图片已提交，正在等待 AI 回复"
+                            if item.intake_asset_id
+                            else "结构化题目已提交，正在等待 AI 回复"
+                        ),
                         payload={"stage": "request", "item_id": item_id},
                     )
                     enrichment_started = perf_counter()
-                    if hasattr(provider, "stream_structure_from_images"):
+                    if not item.intake_asset_id:
+                        assert problem is not None
+                        try:
+                            completion = provider.complete_json(
+                                request=_problem_completion_request(
+                                    problem,
+                                    prompt=prompt_body,
+                                    allowed_fields=allowed,
+                                ),
+                                model=job.model,
+                                timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+                            )
+                        except NotImplementedError as exc:
+                            raise DomainError(
+                                f"当前 AI 提供商不支持结构化文本补全：{provider.name}"
+                            ) from exc
+                        result = _structured_result_from_text(
+                            completion.raw_text,
+                            cost=completion.cost_estimate,
+                        )
+                        result.model = completion.model
+                        result.diagnostics = dict(completion.diagnostics)
+                        receive_text_delta(completion.raw_text)
+                    elif hasattr(provider, "stream_structure_from_images"):
                         result = provider.stream_structure_from_images(
                             image_paths=[str(path) for path in image_paths],
                             prompt=prompt_body,
@@ -1492,6 +1641,8 @@ class AIService:
                     )
                 if not proposals:
                     raise DomainError("AI 没有返回可确认的候选题")
+                if not item.intake_asset_id and len(proposals) != 1:
+                    raise DomainError("正式题目文本补全只能返回一个候选")
                 if recognition_mode in {"one_to_one", "many_to_one"} and len(proposals) != 1:
                     raise DomainError("当前识别方式要求 AI 只返回一个候选题")
                 if intake_session and recognition_mode == "auto" and item.recognition_unit_id:
@@ -1589,7 +1740,6 @@ class AIService:
                             session_holder.append(intake_session.id)
                     else:
                         assert problem is not None
-                        assert isinstance(asset, Asset)
                         review_session = s.scalar(
                             select(ReviewSession).where(
                                 ReviewSession.job_id == job_id,
@@ -1611,96 +1761,46 @@ class AIService:
 
                         from yancuo_win.application.sync_service import sync_snapshot
 
-                        candidate_problems = [problem]
-                        for _index in range(1, len(proposals)):
-                            clone = Problem(
-                                id=new_id("problem"),
-                                status="inbox",
-                                revision=1,
-                                human_confirmed=False,
+                        filtered, uncertain, region = proposals[0]
+                        before = sync_snapshot(problem)
+                        s.add(
+                            ReviewItem(
+                                id=new_id("ritem"),
+                                session_id=review_session.id,
+                                problem_id=problem.id,
+                                status="pending",
+                                base_revision=problem.revision,
+                                before_json=json.dumps(before, ensure_ascii=False),
+                                proposed_json=json.dumps(filtered, ensure_ascii=False),
+                                uncertain_json=json.dumps(uncertain, ensure_ascii=False),
+                                region_json=json.dumps(region, ensure_ascii=False),
                             )
-                            clone.assets.append(
-                                Asset(
-                                    id=new_id("asset"),
-                                    role=asset.role,
-                                    sha256=asset.sha256,
-                                    relative_path=asset.relative_path,
-                                    mime_type=asset.mime_type,
-                                    size_bytes=asset.size_bytes,
-                                    width=asset.width,
-                                    height=asset.height,
-                                    is_immutable=asset.is_immutable,
-                                )
-                            )
-                            s.add(clone)
-                            s.flush()
-                            clone_snapshot = sync_snapshot(clone, [])
-                            s.add(
-                                Version(
-                                    id=new_id("ver"),
-                                    problem_id=clone.id,
-                                    revision=1,
-                                    source="ai_staging",
-                                    summary="一图多题候选暂存",
-                                    snapshot_json=json.dumps(
-                                        clone_snapshot, ensure_ascii=False
-                                    ),
-                                    created_by=self.runtime.identity.user_id,
-                                )
-                            )
-                            candidate_problems.append(clone)
-
-                        for candidate_problem, (
-                            filtered,
-                            uncertain,
-                            region,
-                        ) in zip(candidate_problems, proposals, strict=True):
-                            before = sync_snapshot(candidate_problem)
-                            s.add(
-                                ReviewItem(
-                                    id=new_id("ritem"),
-                                    session_id=review_session.id,
-                                    problem_id=candidate_problem.id,
-                                    status="pending",
-                                    base_revision=candidate_problem.revision,
-                                    before_json=json.dumps(
-                                        before, ensure_ascii=False
-                                    ),
-                                    proposed_json=json.dumps(
-                                        filtered, ensure_ascii=False
-                                    ),
-                                    uncertain_json=json.dumps(
-                                        uncertain, ensure_ascii=False
-                                    ),
-                                    region_json=json.dumps(
-                                        region, ensure_ascii=False
-                                    ),
-                                )
-                            )
+                        )
 
                 timings_ms["candidate_write"] = (
                     perf_counter() - write_started
                 ) * 1000
                 item.status = "done"
                 item.error_message = ""
-                s.merge(
-                    AiRecognitionCache(
-                        cache_key=recognition_cache_key(
-                            asset_sha256=source_fingerprint,
-                            prompt_body=prompt_body,
-                            prompt_version=prompt_version,
-                            provider=job.provider,
-                            model=job.model,
-                            allowed_fields=sorted(allowed),
-                        ),
-                        structured_json=json.dumps(
-                            _recognition_cache_payload(proposals, result),
-                            ensure_ascii=False,
-                        ),
-                        raw_response=item.raw_response,
-                        source_job_item_id=item.id,
+                if item.intake_asset_id:
+                    s.merge(
+                        AiRecognitionCache(
+                            cache_key=recognition_cache_key(
+                                asset_sha256=source_fingerprint,
+                                prompt_body=prompt_body,
+                                prompt_version=prompt_version,
+                                provider=job.provider,
+                                model=job.model,
+                                allowed_fields=sorted(allowed),
+                            ),
+                            structured_json=json.dumps(
+                                _recognition_cache_payload(proposals, result),
+                                ensure_ascii=False,
+                            ),
+                            raw_response=item.raw_response,
+                            source_job_item_id=item.id,
+                        )
                     )
-                )
                 job.done_items += 1
                 job.updated_at = utcnow()
                 timings_ms["total"] = (perf_counter() - item_started) * 1000

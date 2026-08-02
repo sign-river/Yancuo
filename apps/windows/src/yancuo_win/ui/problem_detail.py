@@ -953,7 +953,6 @@ class ProblemDetailPage(QWidget):
         self.chat_input.setEnabled(not busy)
         self.send_chat_button.setEnabled(not busy)
         self.conversation_combo.setEnabled(not busy)
-        self.include_original_checkbox.setEnabled(not busy)
 
     def _on_chat_completed(self, message: object) -> None:
         status = getattr(message, "status", "failed")
