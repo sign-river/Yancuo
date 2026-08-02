@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtGui import QColor, QFont, QPainterPath, QPalette, QRegion
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QFrame, QWidget
 
 THEME_MODES = {"system", "light", "dark"}
 
@@ -836,7 +836,7 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 7px 38px 7px 12px;
     }}
     QComboBoxPrivateContainer {{
-        background: transparent;
+        background: {t.surface};
         border: none;
     }}
     QComboBox:hover {{
@@ -1345,19 +1345,50 @@ class ThemeManager(QObject):
         self.apply()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
-        """Remove Qt's opaque square shell around rounded combo popups."""
+        """Give every native combo popup one reliable rounded surface."""
 
         if (
-            event.type() in (QEvent.Type.Polish, QEvent.Type.Show)
+            event.type() in (QEvent.Type.Polish, QEvent.Type.Show, QEvent.Type.Resize)
             and isinstance(watched, QWidget)
             and watched.metaObject().className() == "QComboBoxPrivateContainer"
-            and not watched.property("yancuoTransparentPopupShell")
         ):
-            watched.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-            watched.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-            watched.setAutoFillBackground(False)
-            watched.setProperty("yancuoTransparentPopupShell", True)
+            self._style_combo_popup(watched)
         return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _style_combo_popup(popup: QWidget) -> None:
+        """Clip the native shell and replace its platform-dependent item paint."""
+
+        popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        popup.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        popup.setAutoFillBackground(True)
+        if isinstance(popup, QFrame):
+            popup.setFrameShape(QFrame.Shape.NoFrame)
+
+        view = popup.findChild(QAbstractItemView)
+        if view is not None and view.width() > 0 and view.height() > 0:
+            path = QPainterPath()
+            # The private container reserves native top/bottom chrome around
+            # the real list view. Exclude that chrome from the window region
+            # instead of painting or rounding it as a second surface.
+            path.addRoundedRect(view.geometry().toRectF(), 12.0, 12.0)
+            popup.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+        if view is not None and not view.property("yancuoDropdownDelegate"):
+            from yancuo_win.ui.widgets import SoftItemDelegate
+
+            view.setItemDelegate(
+                SoftItemDelegate(
+                    view,
+                    radius=8.0,
+                    horizontal_margin=4,
+                    vertical_margin=2,
+                    minimum_height=38,
+                )
+            )
+            view.setMouseTracking(True)
+            view.setProperty("yancuoDropdownDelegate", True)
+        popup.setProperty("yancuoRoundedPopupShell", True)
 
     def set_mode(self, mode: str) -> str:
         self.mode = normalize_theme_mode(mode)

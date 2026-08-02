@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFrame,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -244,7 +245,7 @@ def test_dropdown_surfaces_share_spacious_floating_panel_states(mode, tokens) ->
     assert tokens.list_hover in rendered
 
 
-def test_combo_popup_removes_opaque_native_container_shell() -> None:
+def test_combo_popup_clips_native_shell_and_uses_shared_item_delegate() -> None:
     app = QApplication.instance() or QApplication([])
     original_stylesheet = app.styleSheet()
     original_palette = app.palette()
@@ -257,9 +258,16 @@ def test_combo_popup_removes_opaque_native_container_shell() -> None:
 
     popup = combo.view().window()
     assert popup.metaObject().className() == "QComboBoxPrivateContainer"
-    assert popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-    assert popup.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-    assert popup.property("yancuoTransparentPopupShell") is True
+    assert not popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert not popup.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert popup.autoFillBackground()
+    assert popup.frameShape() == QFrame.Shape.NoFrame
+    assert not popup.mask().isEmpty()
+    assert popup.mask().boundingRect() == combo.view().geometry()
+    assert popup.mask().boundingRect() != popup.rect()
+    assert isinstance(combo.view().itemDelegate(), widgets_module.SoftItemDelegate)
+    assert combo.view().property("yancuoDropdownDelegate") is True
+    assert popup.property("yancuoRoundedPopupShell") is True
 
     combo.hidePopup()
     combo.close()
