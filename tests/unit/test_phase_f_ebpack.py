@@ -129,6 +129,30 @@ def test_ebpack_roundtrip_consistent(
     )
 
 
+def test_ebpack_export_failure_preserves_existing_destination(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = AppServices(runtime)
+    services.create_problem(title="atomic export")
+    destination = tmp_path / "existing.ebpack"
+    destination.write_bytes(b"previous-backup")
+
+    def fail_write(
+        self, filename, arcname=None, compress_type=None, compresslevel=None
+    ):
+        del self, filename, arcname, compress_type, compresslevel
+        raise OSError("simulated archive write failure")
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", fail_write)
+
+    with pytest.raises(OSError, match="simulated"):
+        EbpackService(runtime).export_ebpack(destination)
+
+    assert destination.read_bytes() == b"previous-backup"
+    assert list(tmp_path.glob(".existing.ebpack.*.tmp")) == []
+    assert list(runtime.paths.cache_dir.glob("ebpack-export-*")) == []
+
+
 def test_corrupt_ebpack_rejected(runtime, tmp_path: Path) -> None:
     services = AppServices(runtime)
     eb = EbpackService(runtime)

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
+import tempfile
 import zipfile
 from contextlib import closing
 from datetime import datetime, timezone
@@ -89,10 +91,9 @@ class EbpackService:
             dest = dest.with_suffix(".ebpack")
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        staging = self.runtime.paths.cache_dir / f"ebpack-export-{stamp}"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True)
+        self.runtime.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="ebpack-export-", dir=self.runtime.paths.cache_dir))
+        archive_temp: Path | None = None
 
         try:
             self.runtime.engine.dispose()
@@ -191,13 +192,23 @@ class EbpackService:
                 "\n".join(checksum_lines) + "\n", encoding="utf-8"
             )
 
-            if dest.exists():
-                dest.unlink()
-            with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            descriptor, archive_temp_name = tempfile.mkstemp(
+                prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent
+            )
+            os.close(descriptor)
+            archive_temp = Path(archive_temp_name)
+            with zipfile.ZipFile(archive_temp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for file in iter_regular_files(staging):
                     zf.write(file, arcname=file.relative_to(staging).as_posix())
+            with archive_temp.open("r+b") as stream:
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(archive_temp, dest)
+            archive_temp = None
             return dest
         finally:
+            if archive_temp is not None:
+                archive_temp.unlink(missing_ok=True)
             shutil.rmtree(staging, ignore_errors=True)
 
     def _problem_count(self) -> int:
