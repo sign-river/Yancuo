@@ -127,6 +127,12 @@ async function repository(client, subject, payload) {
   return result.rows[0];
 }
 
+async function lockSubjectQuota(client, subject) {
+  // Serialize quota reservations for one identity across all gateway instances.
+  // Hash collisions only cause harmless extra serialization.
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [subject]);
+}
+
 async function cleanupExpiredUploads(subject) {
   const expired = await pool.query(
     "delete from yancuo.upload_sessions where subject_id=$1 and expires_at < now() returning file_id",
@@ -162,13 +168,22 @@ async function action(name, payload, identity, req) {
     const client = await pool.connect();
     try {
       await client.query("begin");
+      await lockSubjectQuota(client, subject);
+      const existing = await client.query(
+        "select repository_id,name,created_at,updated_at from yancuo.repositories where subject_id=$1 and name=$2",
+        [subject, repositoryName],
+      );
+      if (existing.rowCount) {
+        await client.query("commit");
+        return { ...existing.rows[0], owner: subject, private: true };
+      }
       const count = await client.query(
         "select count(*)::int as value from yancuo.repositories where subject_id=$1",
         [subject],
       );
       if (count.rows[0].value >= USER_REPOSITORIES) fail("已达到个人资料库数量上限", 409);
       const created = await client.query(
-        "insert into yancuo.repositories(subject_id, owner, name) values($1,$1,$2) on conflict(subject_id,name) do update set updated_at=now() returning repository_id,name,created_at,updated_at",
+        "insert into yancuo.repositories(subject_id, owner, name) values($1,$1,$2) returning repository_id,name,created_at,updated_at",
         [subject, repositoryName],
       );
       await client.query("commit");
@@ -247,6 +262,8 @@ async function action(name, payload, identity, req) {
       const assetName = boundedName(payload.asset_name, "资源名称");
       const size = Number(payload.size);
       if (!Number.isSafeInteger(size) || size < 0 || size > MAX_ASSET_BYTES) fail("资源大小无效", 413);
+      await client.query("begin");
+      await lockSubjectQuota(client, subject);
       const release = await client.query(
         "select 1 from yancuo.releases where repository_id=$1 and tag=$2",
         [repo.repository_id, tag],
@@ -258,7 +275,7 @@ async function action(name, payload, identity, req) {
       );
       if (existingAsset.rowCount) fail("发布附件已经存在且不可替换", 409);
       const usage = await client.query(
-        "select coalesce(sum(byte_size),0)::bigint as bytes from yancuo.release_assets where repository_id in (select repository_id from yancuo.repositories where subject_id=$1)",
+        "select ((select coalesce(sum(a.byte_size),0) from yancuo.release_assets a join yancuo.repositories r on r.repository_id=a.repository_id where r.subject_id=$1) + (select coalesce(sum(u.expected_size),0) from yancuo.upload_sessions u where u.subject_id=$1 and u.expires_at>=now()))::bigint as bytes",
         [subject],
       );
       if (Number(usage.rows[0].bytes) + size > USER_STORAGE_BYTES) fail("已达到个人云存储额度", 409);
@@ -269,6 +286,7 @@ async function action(name, payload, identity, req) {
         "insert into yancuo.upload_sessions(upload_id,subject_id,repository_id,release_tag,asset_name,storage_path,expected_size,token_hash,expires_at) values($1,$2,$3,$4,$5,$6,$7,$8,now()+interval '10 minutes')",
         [uploadId, subject, repo.repository_id, tag, assetName, storagePath, size, tokenHash(uploadToken)],
       );
+      await client.query("commit");
       return {
         url: `${PUBLIC_URL}/uploads/${uploadId}?token=${encodeURIComponent(uploadToken)}`,
         headers: { "Content-Type": "application/octet-stream" },

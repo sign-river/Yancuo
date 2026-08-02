@@ -22,7 +22,7 @@
 | `DATABASE_URL` | 是 | PostgreSQL 服务端连接串，只保存在函数加密环境变量。 |
 | `GATEWAY_PUBLIC_URL` | 是 | 函数最终 HTTPS 地址，用于生成一次性上传 URL。 |
 | `PG_SSL` | 否 | 默认为 TLS；仅本地开发可设为 `disable`。 |
-| `USER_STORAGE_BYTES` | 否 | 单用户已提交对象预算，默认 512 MiB。 |
+| `USER_STORAGE_BYTES` | 否 | 单用户已提交对象与有效上传预留的合计预算，默认 512 MiB。 |
 | `USER_REPOSITORIES` | 否 | 单用户逻辑资料库数量，默认 5。 |
 | `RATE_PER_MINUTE` | 否 | 单实例、单用户分钟请求预算，默认 120。 |
 | `MAX_ASSET_BYTES` | 否 | 单对象预算，上限固定 512 MiB。 |
@@ -69,3 +69,4 @@ Content-Type: application/json
 - 邮箱注册、找回密码和验证码发送依赖邮件服务配置；没有配置前只允许管理员在控制台创建测试用户，不应开放公开注册入口。
 - `locks/acquire` 需采用 [`postgres/init.sql`](postgres/init.sql) 中的 `INSERT ... ON CONFLICT ... WHERE` 事务语义；不能用“先读再写”。
 - 完整快照与 Operation 批次共享同一原子 manifest 和仓库锁；LocalFolder 仅保留为离线测试通道。
+- 资料库数量与存储预算在 PostgreSQL 事务内按用户加 advisory lock；所有网关实例共享同一配额串行化边界，有效上传会话在提交前也占用预算。
