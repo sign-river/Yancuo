@@ -20,7 +20,7 @@ from yancuo_win.application.note_intake_service import (
     NoteDraftBlockInput,
     NoteDraftGroupInput,
 )
-from yancuo_win.application.note_service import NoteService
+from yancuo_win.application.note_service import NoteListRow, NoteService
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.ui.note_page import NotePage
 from yancuo_win.ui.widgets import ReadingCanvas, SoftItemDelegate
@@ -118,6 +118,31 @@ def test_note_library_uses_space_and_expanded_list_hierarchy(note_page: NotePage
     assert note_page.more_button.text() == "更多"
     assert not note_page.more_button.icon().isNull()
     assert note_page.collection_list.uniformItemSizes()
+
+
+def test_note_list_materializes_long_results_in_batches(
+    note_page: NotePage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [
+        NoteListRow(
+            id=f"note-{index}",
+            title=f"笔记 {index}",
+            summary="摘要",
+            status="active",
+            subject_id=None,
+            chapter_id=None,
+        )
+        for index in range(501)
+    ]
+    monkeypatch.setattr(note_page.notes, "list_note_summaries", lambda **_kwargs: rows)
+    monkeypatch.setattr(note_page, "_reload_collections", lambda: None)
+
+    note_page.reload()
+
+    assert note_page.note_list.count() == 500
+    assert note_page.note_count_label.text() == "501 篇"
+    note_page._append_note_batch()
+    assert note_page.note_list.count() == 501
     assert note_page.note_list.uniformItemSizes()
     assert note_page.collection_list.accessibleName() == "笔记合集"
     assert note_page.note_list.accessibleName() == "笔记列表"

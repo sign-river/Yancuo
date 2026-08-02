@@ -25,6 +25,7 @@ import yancuo_win.ui.intake_page as intake_page_module
 import yancuo_win.ui.note_page as note_page_module
 import yancuo_win.ui.problem_detail as problem_detail_module
 import yancuo_win.ui.review_page as review_page_module
+import yancuo_win.ui.review_plan_builder as review_plan_builder_module
 import yancuo_win.ui.settings_dialog as settings_dialog_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
@@ -548,6 +549,37 @@ def test_review_plan_builder_warns_before_creating_an_empty_plan(
     assert builder.toast.label.text() == messages[0]
     assert builder.draft_back_button.text() == ""
     assert builder.draft_back_button.accessibleName() == "返回资料"
+
+
+def test_review_plan_builder_materializes_sources_and_queue_in_batches(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    builder = window.review_page.plan_builder_page
+    monkeypatch.setattr(review_plan_builder_module, "_LIST_BATCH_SIZE", 2)
+    builder.content_type = "note"
+    builder._source_entries = [
+        ("note-1", "第一篇", False),
+        ("note-2", "第二篇", True),
+        ("note-3", "第三篇", False),
+    ]
+    builder._source_visible_count = 0
+    builder.source_list.clear()
+
+    builder._append_source_batch()
+
+    assert builder.source_list.count() == 2
+    assert builder.source_list.item(1).data(Qt.ItemDataRole.UserRole + 1) is True
+    builder._append_source_batch()
+    assert builder.source_list.count() == 3
+
+    builder._queue_ids = ["note-1", "note-2", "note-3"]
+    builder._queue_labels = {source_id: source_id for source_id in builder._queue_ids}
+    builder._queue_visible_count = 0
+    builder.queue_list.clear()
+    builder._append_queue_batch()
+    assert builder.queue_list.count() == 2
+    builder._append_queue_batch()
+    assert builder.queue_list.count() == 3
 
 
 def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.orm import selectinload
 
 from yancuo_win.application.bootstrap import RuntimeContext
@@ -32,6 +33,18 @@ NOTE_BLOCK_TYPES = frozenset(
     {"heading", "text", "concept", "formula", "image", "callout"}
 )
 _EDITABLE_STATUSES = frozenset({"inbox", "active", "archived"})
+
+
+@dataclass(frozen=True, slots=True)
+class NoteListRow:
+    """Detached lightweight projection for long note lists."""
+
+    id: str
+    title: str
+    summary: str
+    status: str
+    subject_id: str | None
+    chapter_id: str | None
 
 
 class NoteService:
@@ -99,6 +112,57 @@ class NoteService:
             rows = list(session.scalars(statement).all())
             session.expunge_all()
             return rows
+
+    def list_note_summaries(
+        self,
+        *,
+        status: str | None = None,
+        subject_id: str | None = None,
+        chapter_id: str | None = None,
+        note_ids: list[str] | None = None,
+    ) -> list[NoteListRow]:
+        """Load only fields required by list and review-plan surfaces."""
+
+        if status is not None:
+            validate_status(status)
+        if note_ids == []:
+            return []
+        block_preview = (
+            select(
+                case(
+                    (NoteBlock.block_type == "formula", NoteBlock.content_latex),
+                    else_=NoteBlock.content_markdown,
+                )
+            )
+            .where(NoteBlock.note_document_id == NoteDocument.id)
+            .order_by(NoteBlock.sort_order, NoteBlock.id)
+            .limit(1)
+            .correlate(NoteDocument)
+            .scalar_subquery()
+        )
+        preview = func.coalesce(
+            func.nullif(NoteDocument.summary, ""),
+            func.nullif(block_preview, ""),
+            "",
+        )
+        statement = select(
+            NoteDocument.id,
+            NoteDocument.title,
+            preview.label("summary"),
+            NoteDocument.status,
+            NoteDocument.subject_id,
+            NoteDocument.chapter_id,
+        ).order_by(NoteDocument.updated_at.desc())
+        if status is not None:
+            statement = statement.where(NoteDocument.status == status)
+        if subject_id is not None:
+            statement = statement.where(NoteDocument.subject_id == subject_id)
+        if chapter_id is not None:
+            statement = statement.where(NoteDocument.chapter_id == chapter_id)
+        if note_ids is not None:
+            statement = statement.where(NoteDocument.id.in_(note_ids))
+        with self.session() as session:
+            return [NoteListRow(*row) for row in session.execute(statement).all()]
 
     def update_note(self, note_id: str, values: dict[str, Any]) -> NoteDocument:
         allowed = {"title", "summary", "subject_id", "chapter_id", "status"}

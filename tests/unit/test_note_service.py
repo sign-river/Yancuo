@@ -60,6 +60,33 @@ def test_note_documents_keep_independent_fields_and_ordered_blocks(note_bundle) 
     assert not hasattr(loaded, "review_count")
 
 
+def test_note_list_projection_uses_summary_or_first_block_without_relationships(
+    note_bundle,
+) -> None:
+    _runtime, _app, notes, subject, chapter = note_bundle
+    summarized = notes.create_note(
+        title="摘要笔记",
+        summary="列表摘要",
+        subject_id=subject.id,
+        chapter_id=chapter.id,
+        status="active",
+    )
+    block_only = notes.create_note(title="公式笔记", status="active")
+    notes.add_block(
+        block_only.id,
+        block_type="formula",
+        content_latex=r"x^2+1",
+    )
+
+    rows = notes.list_note_summaries(status="active")
+    by_id = {row.id: row for row in rows}
+
+    assert by_id[summarized.id].summary == "列表摘要"
+    assert by_id[block_only.id].summary == r"x^2+1"
+    assert by_id[summarized.id].subject_id == subject.id
+    assert not hasattr(by_id[summarized.id], "blocks")
+
+
 def test_note_tags_and_lifecycle_protect_trashed_documents(note_bundle) -> None:
     _runtime, app, notes, _subject, _chapter = note_bundle
     tag = app.create_tag("泰勒展开")

@@ -40,6 +40,8 @@ from yancuo_win.ui.widgets import (
     set_tab_order_chain,
 )
 
+_LIST_BATCH_SIZE = 500
+
 
 class ReviewPlanBuilder(QWidget):
     """Browse, select, and package one content type into a review plan."""
@@ -57,6 +59,11 @@ class ReviewPlanBuilder(QWidget):
         self._selected_chapter_id: str | None = None
         self._narrow_layout = False
         self._showing_draft = False
+        self._source_entries: list[tuple[str, str, bool]] = []
+        self._source_visible_count = 0
+        self._queue_ids: list[str] = []
+        self._queue_labels: dict[str, str] = {}
+        self._queue_visible_count = 0
         self._build()
         self.toast = ToastMessage(self)
         self.reload()
@@ -189,6 +196,9 @@ class ReviewPlanBuilder(QWidget):
             )
         )
         self.source_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.source_list.verticalScrollBar().valueChanged.connect(
+            self._load_more_sources_at_end
+        )
         layout.addWidget(self.source_list, stretch=1)
         self.selection_hint = StatusTag("未选择资料", "muted")
         layout.addWidget(self.selection_hint, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -255,6 +265,9 @@ class ReviewPlanBuilder(QWidget):
             )
         )
         self.queue_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.queue_list.verticalScrollBar().valueChanged.connect(
+            self._load_more_queue_at_end
+        )
         layout.addWidget(self.queue_list, stretch=1)
         remove = ghost_button("移除选中项")
         remove.clicked.connect(self._remove_selected)
@@ -356,47 +369,57 @@ class ReviewPlanBuilder(QWidget):
     def _refresh_sources(self) -> None:
         query = self.content_search.text().strip().lower()
         queued_ids = set(self.services.list_review_waiting_ids(self.content_type))
+        entries: list[tuple[str, str, bool]] = []
+        if self.content_type == "problem":
+            rows = self.services.list_problems()
+            if self._selected_chapter_id:
+                rows = [
+                    row
+                    for row in rows
+                    if row.chapter_id == self._selected_chapter_id
+                ]
+            for problem in rows:
+                label = problem.title or "未命名题目"
+                if query and query not in label.lower():
+                    continue
+                entries.append((problem.id, label, problem.id in queued_ids))
+        elif self.notes:
+            for note in self.notes.list_note_summaries(status="active"):
+                label = note.title or "未命名笔记"
+                if query and query not in label.lower():
+                    continue
+                entries.append((note.id, label, note.id in queued_ids))
+        self._source_entries = entries
+        self._source_visible_count = 0
         with deferred_view_updates(self.source_list):
             self.source_list.clear()
-            if self.content_type == "problem":
-                rows = self.services.list_problems()
-                if self._selected_chapter_id:
-                    rows = [
-                        row for row in rows
-                        if row.chapter_id == self._selected_chapter_id
-                    ]
-                for problem in rows:
-                    label = problem.title or "未命名题目"
-                    if query and query not in label.lower():
-                        continue
-                    state = "\n已加入计划草稿" if problem.id in queued_ids else ""
-                    item = QListWidgetItem(f"题目  ·  {label}{state}")
-                    item.setData(Qt.ItemDataRole.UserRole, problem.id)
-                    item.setData(
-                        Qt.ItemDataRole.UserRole + 1,
-                        problem.id in queued_ids,
-                    )
-                    item.setToolTip(
-                        "已加入计划草稿" if problem.id in queued_ids else label
-                    )
-                    self.source_list.addItem(item)
-            elif self.notes:
-                for note in self.notes.list_notes(status="active"):
-                    label = note.title or "未命名笔记"
-                    if query and query not in label.lower():
-                        continue
-                    state = "\n已加入计划草稿" if note.id in queued_ids else ""
-                    item = QListWidgetItem(f"笔记  ·  {label}{state}")
-                    item.setData(Qt.ItemDataRole.UserRole, note.id)
-                    item.setData(
-                        Qt.ItemDataRole.UserRole + 1,
-                        note.id in queued_ids,
-                    )
-                    item.setToolTip(
-                        "已加入计划草稿" if note.id in queued_ids else label
-                    )
-                    self.source_list.addItem(item)
+            self._append_source_batch()
         self._update_selection()
+
+    def _append_source_batch(self) -> None:
+        end = min(
+            len(self._source_entries),
+            self._source_visible_count + _LIST_BATCH_SIZE,
+        )
+        prefix = "题目" if self.content_type == "problem" else "笔记"
+        for source_id, label, queued in self._source_entries[
+            self._source_visible_count : end
+        ]:
+            state = "\n已加入计划草稿" if queued else ""
+            item = QListWidgetItem(f"{prefix}  ·  {label}{state}")
+            item.setData(Qt.ItemDataRole.UserRole, source_id)
+            item.setData(Qt.ItemDataRole.UserRole + 1, queued)
+            item.setToolTip("已加入计划草稿" if queued else label)
+            self.source_list.addItem(item)
+        self._source_visible_count = end
+
+    def _load_more_sources_at_end(self, value: int) -> None:
+        if self._source_visible_count >= len(self._source_entries):
+            return
+        scroll = self.source_list.verticalScrollBar()
+        if value >= scroll.maximum():
+            with deferred_view_updates(self.source_list):
+                self._append_source_batch()
 
     def _update_selection(self) -> None:
         selected = self.source_list.selectedItems()
@@ -421,17 +444,35 @@ class ReviewPlanBuilder(QWidget):
     def _refresh_queue(self) -> None:
         ids = self.services.list_review_waiting_ids(self.content_type)
         labels, total_questions = self._queue_details(ids)
+        self._queue_ids = ids
+        self._queue_labels = labels
+        self._queue_visible_count = 0
         with deferred_view_updates(self.queue_list):
             self.queue_list.clear()
-            for source_id in ids:
-                item = QListWidgetItem(labels.get(source_id, "已移除的资料"))
-                item.setData(Qt.ItemDataRole.UserRole, source_id)
-                self.queue_list.addItem(item)
+            self._append_queue_batch()
         self.queue_summary.setText(f"已添加 {len(ids)} 项 · 共 {total_questions} 道题目")
         self.queue_list.setVisible(bool(ids))
         if not ids:
             self._show_queue_empty_state()
         self.create_button.setEnabled(bool(ids))
+
+    def _append_queue_batch(self) -> None:
+        end = min(len(self._queue_ids), self._queue_visible_count + _LIST_BATCH_SIZE)
+        for source_id in self._queue_ids[self._queue_visible_count : end]:
+            item = QListWidgetItem(
+                self._queue_labels.get(source_id, "已移除的资料")
+            )
+            item.setData(Qt.ItemDataRole.UserRole, source_id)
+            self.queue_list.addItem(item)
+        self._queue_visible_count = end
+
+    def _load_more_queue_at_end(self, value: int) -> None:
+        if self._queue_visible_count >= len(self._queue_ids):
+            return
+        scroll = self.queue_list.verticalScrollBar()
+        if value >= scroll.maximum():
+            with deferred_view_updates(self.queue_list):
+                self._append_queue_batch()
 
     def _queue_details(self, ids: list[str]) -> tuple[dict[str, str], int]:
         if self.content_type == "problem":
@@ -446,7 +487,11 @@ class ReviewPlanBuilder(QWidget):
             )
         notes = {
             note.id: note
-            for note in (self.notes.list_notes(status="active") if self.notes else [])
+            for note in (
+                self.notes.list_note_summaries(status="active", note_ids=ids)
+                if self.notes
+                else []
+            )
         }
         return (
             {
@@ -476,10 +521,14 @@ class ReviewPlanBuilder(QWidget):
 
     def _confirm_create(self) -> None:
         name = self.plan_name.text().strip()
-        ids = [
+        visible_ids = [
             item.data(Qt.ItemDataRole.UserRole)
             for index in range(self.queue_list.count())
             if (item := self.queue_list.item(index)).data(Qt.ItemDataRole.UserRole)
+        ]
+        visible_set = set(visible_ids)
+        ids = visible_ids + [
+            source_id for source_id in self._queue_ids if source_id not in visible_set
         ]
         if not ids:
             message = "请先从左侧选择题目或笔记，并加入计划草稿。"

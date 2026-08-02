@@ -42,7 +42,7 @@ from yancuo_win.application.note_ai_service import (
 )
 from yancuo_win.application.note_intake_service import NoteIntakeService
 from yancuo_win.application.services import AppServices
-from yancuo_win.application.note_service import NoteService
+from yancuo_win.application.note_service import NoteListRow, NoteService
 from yancuo_win.application.note_ai_search_service import NoteAiSearchService
 from yancuo_win.application.unified_search_service import UnifiedSearchIndexService
 from yancuo_win.data.models import NoteBlock, NoteDocument, NoteIntakeSession
@@ -80,6 +80,7 @@ _BLOCK_LABELS = {
     "callout": "提示",
     "image": "图片",
 }
+_NOTE_LIST_BATCH_SIZE = 500
 
 _NOTE_STATUS_LABELS = {
     "active": "正式",
@@ -683,7 +684,8 @@ class NotePage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.notes = notes
-        self._notes: list[NoteDocument] = []
+        self._notes: list[NoteListRow] = []
+        self._note_visible_count = 0
         self._note: NoteDocument | None = None
         self._block: NoteBlock | None = None
         self._loading = False
@@ -880,6 +882,9 @@ class NotePage(QWidget):
         self.note_list.currentItemChanged.connect(self._select_note)
         self.note_list.itemSelectionChanged.connect(self._update_bulk_actions)
         self.note_list.itemDoubleClicked.connect(self._open_selected_note_detail)
+        self.note_list.verticalScrollBar().valueChanged.connect(
+            self._load_more_notes_at_end
+        )
         middle.body.addWidget(self.note_list, stretch=1)
         self.bulk_actions = QFrame()
         self.bulk_actions.setObjectName("ContextBar")
@@ -1218,7 +1223,7 @@ class NotePage(QWidget):
         current_id = select_note_id or (self._note.id if self._note else None)
         try:
             self._reload_collections()
-            self._notes = self.notes.list_notes(
+            self._notes = self.notes.list_note_summaries(
                 status=self.status_filter.currentData()
             )
             if self._collection_filter_id == "__unfiled__":
@@ -1260,21 +1265,21 @@ class NotePage(QWidget):
         selected_row = -1
         with deferred_view_updates(self.note_list):
             self.note_list.clear()
-            for index, note in enumerate(self._notes):
-                title = note.title or "未命名笔记"
-                preview = note.summary.strip() or self._block_preview(note)
-                status = _NOTE_STATUS_LABELS.get(note.status, note.status)
-                detail = f"{status} · {preview or '尚未添加内容'}"
-                item = QListWidgetItem(f"{title}\n{detail}")
-                item.setData(Qt.ItemDataRole.UserRole, note.id)
-                item.setToolTip(f"{title}\n{detail}")
-                item.setData(
-                    Qt.ItemDataRole.AccessibleDescriptionRole,
-                    f"{status}笔记；双击打开独立详情页",
-                )
-                self.note_list.addItem(item)
-                if note.id == current_id:
-                    selected_row = index
+            self._note_visible_count = 0
+            current_index = next(
+                (
+                    index
+                    for index, note in enumerate(self._notes)
+                    if note.id == current_id
+                ),
+                -1,
+            )
+            target_count = max(
+                _NOTE_LIST_BATCH_SIZE,
+                current_index + 1 if current_index >= 0 else 0,
+            )
+            self._append_note_batch(target_count)
+            selected_row = current_index
         self._loading = False
         if selected_row >= 0:
             self.note_list.setCurrentRow(selected_row)
@@ -1284,6 +1289,38 @@ class NotePage(QWidget):
             self._note = None
             self._block = None
         self._update_bulk_actions()
+
+    def _append_note_batch(self, target_count: int | None = None) -> None:
+        if self._note_visible_count >= len(self._notes):
+            return
+        end = min(
+            len(self._notes),
+            target_count
+            if target_count is not None
+            else self._note_visible_count + _NOTE_LIST_BATCH_SIZE,
+        )
+        for note in self._notes[self._note_visible_count : end]:
+            title = note.title or "未命名笔记"
+            preview = note.summary.strip()
+            status = _NOTE_STATUS_LABELS.get(note.status, note.status)
+            detail = f"{status} · {preview or '尚未添加内容'}"
+            item = QListWidgetItem(f"{title}\n{detail}")
+            item.setData(Qt.ItemDataRole.UserRole, note.id)
+            item.setToolTip(f"{title}\n{detail}")
+            item.setData(
+                Qt.ItemDataRole.AccessibleDescriptionRole,
+                f"{status}笔记；双击打开独立详情页",
+            )
+            self.note_list.addItem(item)
+        self._note_visible_count = end
+
+    def _load_more_notes_at_end(self, value: int) -> None:
+        if self._loading or self._note_visible_count >= len(self._notes):
+            return
+        scroll = self.note_list.verticalScrollBar()
+        if value >= scroll.maximum():
+            with deferred_view_updates(self.note_list):
+                self._append_note_batch()
 
     def _reload_collections(self) -> None:
         collections = self.notes.list_collections()
@@ -1377,14 +1414,6 @@ class NotePage(QWidget):
     def _on_note_ai_search_done(self, matches: object) -> None:
         self._note_ai_search_ids = {item.note_id for item in matches}
         self.reload()
-
-    @staticmethod
-    def _block_preview(note: NoteDocument) -> str:
-        for block in note.blocks:
-            value = block.content_latex if block.block_type == "formula" else block.content_markdown
-            if value.strip():
-                return value.replace("\n", " ")[:60]
-        return ""
 
     def _selected_note_ids(self) -> list[str]:
         return [
