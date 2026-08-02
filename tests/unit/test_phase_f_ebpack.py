@@ -153,6 +153,34 @@ def test_ebpack_export_failure_preserves_existing_destination(
     assert list(runtime.paths.cache_dir.glob("ebpack-export-*")) == []
 
 
+def test_ebpack_export_includes_committed_wal_changes(runtime, tmp_path: Path) -> None:
+    services = AppServices(runtime)
+    problem = services.create_problem(title="before WAL")
+    writer = sqlite3.connect(runtime.paths.database)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "UPDATE problems SET title = ? WHERE id = ?",
+            ("committed in WAL", problem.id),
+        )
+        writer.commit()
+        assert runtime.paths.database.with_name("error_book.db-wal").is_file()
+
+        pack = EbpackService(runtime).export_ebpack(tmp_path / "wal.ebpack")
+        snapshot = tmp_path / "wal-snapshot.sqlite"
+        with zipfile.ZipFile(pack, "r") as archive:
+            snapshot.write_bytes(archive.read("database/snapshot.sqlite"))
+        with closing(sqlite3.connect(snapshot)) as connection:
+            title = connection.execute(
+                "SELECT title FROM problems WHERE id = ?", (problem.id,)
+            ).fetchone()[0]
+    finally:
+        writer.close()
+
+    assert title == "committed in WAL"
+
+
 def test_corrupt_ebpack_rejected(runtime, tmp_path: Path) -> None:
     services = AppServices(runtime)
     eb = EbpackService(runtime)
