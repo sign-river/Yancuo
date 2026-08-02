@@ -12,6 +12,7 @@ from yancuo_win.ui.review_dialog import ReviewDialog
 class _AIStub:
     def __init__(self) -> None:
         self.item = SimpleNamespace(id="internal-review-id")
+        self.presentation_calls = 0
         self.applied: dict[str, str] | None = None
         self.undone: list[str] | None = None
         self.created: dict[str, object] | None = None
@@ -51,6 +52,7 @@ class _AIStub:
 
     def review_presentation(self, item_id: str):
         assert item_id == self.item.id
+        self.presentation_calls += 1
         return {
             "title": "极限练习",
             "source": "AI 补全建议",
@@ -109,6 +111,23 @@ def test_review_dialog_stages_decisions_and_hides_internal_identifiers(monkeypat
 
     dialog._undo()
     assert ai.undone == ["problem-private-id"]
+    dialog.close()
+
+
+def test_bulk_decision_reuses_status_loaded_for_each_review_item() -> None:
+    QApplication.instance() or QApplication([])
+    ai = _AIStub()
+    dialog = ReviewDialog(ai, SimpleNamespace())
+    dialog._job_id = "internal-job-id"
+    dialog._refresh_list([ai.item])
+    ai.presentation_calls = 0
+
+    dialog._decide_all("accept")
+
+    assert ai.presentation_calls == 1
+    assert dialog._decisions == {
+        ("internal-review-id", "title"): "accept",
+    }
     dialog.close()
 
 

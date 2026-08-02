@@ -536,6 +536,7 @@ class ReviewDialog(QDialog):
                 )
                 row.setData(Qt.ItemDataRole.UserRole, item.id)
                 row.setData(Qt.ItemDataRole.UserRole + 1, field)
+                row.setData(Qt.ItemDataRole.UserRole + 2, card["status"])
                 self.list.addItem(row)
         self.review_summary.setText(
             f"AI 建议修改 {modifications} 项、补充 {additions} 项，"
@@ -638,8 +639,7 @@ class ReviewDialog(QDialog):
                 continue
             if (
                 decision == "accept"
-                and self.ai.review_presentation(item_id)["status"]
-                == "存在并发变更"
+                and row.data(Qt.ItemDataRole.UserRole + 2) == "存在并发变更"
             ):
                 skipped += 1
                 continue
