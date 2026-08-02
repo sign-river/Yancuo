@@ -379,6 +379,28 @@ def test_local_folder_rejects_operation_append_before_exceeding_file_budget(
     assert ops_file.read_bytes() == before
 
 
+def test_local_folder_rolls_back_streamed_operation_batch_on_late_oversized_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.append_operations(
+        "local", "repo", "dev-a", [{"operation_id": "op_existing"}]
+    )
+    ops_file = root / "local" / "repo" / "changes" / "dev-a" / "ops.jsonl"
+    before = ops_file.read_bytes()
+    first = {"operation_id": "a"}
+    first_size = len((json.dumps(first) + "\n").encode("utf-8"))
+    monkeypatch.setattr(LocalFolderProvider, "MAX_OPERATION_LINE_BYTES", first_size)
+
+    with pytest.raises(DomainError, match="single operation"):
+        provider.append_operations(
+            "local", "repo", "dev-a", [first, {"operation_id": "oversized"}]
+        )
+
+    assert ops_file.read_bytes() == before
+
+
 def test_local_folder_rejects_non_utf8_operation_logs(tmp_path: Path) -> None:
     root = tmp_path / "cloud"
     provider = LocalFolderProvider(root)

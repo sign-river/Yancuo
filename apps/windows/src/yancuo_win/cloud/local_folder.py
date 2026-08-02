@@ -529,36 +529,50 @@ class LocalFolderProvider(CloudProvider):
         file = d / "ops.jsonl"
         if file.is_symlink():
             raise DomainError("ops.jsonl must not be a symlink")
+        file_existed = file.is_file()
         if len(operations) > self.MAX_REMOTE_OPERATIONS:
             raise DomainError("operation append count exceeds limit")
-        encoded_lines: list[bytes] = []
-        for operation in operations:
-            if not isinstance(operation, dict):
-                raise DomainError("operation append item must be an object")
-            encoded = (json.dumps(operation, ensure_ascii=False) + "\n").encode("utf-8")
-            if len(encoded) > self.MAX_OPERATION_LINE_BYTES:
-                raise DomainError("single operation exceeds line size limit")
-            encoded_lines.append(encoded)
-        batch = b"".join(encoded_lines)
-        current_size = file.stat().st_size if file.is_file() else 0
-        if current_size + len(batch) > self.MAX_OPERATION_FILE_BYTES:
-            raise DomainError("ops.jsonl append would exceed size limit")
+        current_size: int | None = None
         try:
             with file.open("ab", buffering=0) as stream:
-                view = memoryview(batch)
-                while view:
-                    written = stream.write(view)
-                    if not written:
-                        raise OSError("zero-byte operation append")
-                    view = view[written:]
+                current_size = stream.tell()
+                if current_size > self.MAX_OPERATION_FILE_BYTES:
+                    raise DomainError("ops.jsonl exceeds size limit")
+                appended_bytes = 0
+                for operation in operations:
+                    if not isinstance(operation, dict):
+                        raise DomainError("operation append item must be an object")
+                    encoded = (json.dumps(operation, ensure_ascii=False) + "\n").encode(
+                        "utf-8"
+                    )
+                    if len(encoded) > self.MAX_OPERATION_LINE_BYTES:
+                        raise DomainError("single operation exceeds line size limit")
+                    appended_bytes += len(encoded)
+                    if current_size + appended_bytes > self.MAX_OPERATION_FILE_BYTES:
+                        raise DomainError("ops.jsonl append would exceed size limit")
+                    view = memoryview(encoded)
+                    while view:
+                        written = stream.write(view)
+                        if not written:
+                            raise OSError("zero-byte operation append")
+                        view = view[written:]
                 os.fsync(stream.fileno())
-        except OSError as exc:
+        except Exception as exc:
+            if current_size is None:
+                if isinstance(exc, DomainError):
+                    raise
+                raise DomainError("ops.jsonl append failed") from exc
             try:
-                with file.open("r+b", buffering=0) as stream:
-                    stream.truncate(current_size)
-                    os.fsync(stream.fileno())
+                if not file_existed:
+                    file.unlink(missing_ok=True)
+                else:
+                    with file.open("r+b", buffering=0) as stream:
+                        stream.truncate(current_size)
+                        os.fsync(stream.fileno())
             except OSError as rollback_exc:
                 raise DomainError("ops.jsonl append and rollback both failed") from rollback_exc
+            if isinstance(exc, DomainError):
+                raise
             raise DomainError("ops.jsonl append failed") from exc
 
     def list_remote_operations(
