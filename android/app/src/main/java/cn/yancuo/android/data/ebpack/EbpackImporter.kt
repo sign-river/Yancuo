@@ -48,22 +48,7 @@ class EbpackImporter(
             if (!dbSrc.isFile) throw EbpackException("缺少 database/snapshot.sqlite")
             validateSnapshot(dbSrc, manifest)
 
-            staging.mkdirs()
-            dbSrc.copyTo(File(staging, "error_book.db"), overwrite = true)
-            val assetsSrc = File(tmp, "assets")
-            if (assetsSrc.isDirectory) {
-                val copied = assetsSrc.copyRecursively(
-                    File(staging, "assets"),
-                    overwrite = true,
-                )
-                if (!copied) throw EbpackException("资源复制到暂存目录失败")
-            } else {
-                File(staging, "assets/objects").mkdirs()
-            }
-            val identitySrc = File(tmp, "identity.json")
-            if (identitySrc.isFile) {
-                identitySrc.copyTo(File(staging, "identity.json"), overwrite = true)
-            }
+            stageExtractedEbpack(tmp, staging)
 
             YancuoDb.resetInstance()
             previous.mkdirs()
