@@ -7,6 +7,7 @@ const tcb = require("@cloudbase/node-sdk");
 const {
   boundedName,
   boundedText,
+  environmentId,
   integerSetting,
   newUploadToken,
   safeTokenEqual,
@@ -15,10 +16,11 @@ const {
 } = require("./security");
 
 const PORT = integerSetting(process.env.PORT, "PORT", 9000, 1, 65535);
-const ENV_ID = String(process.env.CLOUDBASE_ENV_ID || process.env.TCB_ENV || "").trim();
+const ENV_ID = environmentId(process.env.CLOUDBASE_ENV_ID || process.env.TCB_ENV);
 const PUBLIC_URL = String(process.env.GATEWAY_PUBLIC_URL || "").replace(/\/$/, "");
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_AUTH_RESPONSE_BYTES = 64 * 1024;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_ASSET_BYTES = integerSetting(
   process.env.MAX_ASSET_BYTES,
@@ -50,8 +52,8 @@ const RATE_PER_MINUTE = integerSetting(
 );
 const PG_POOL_SIZE = integerSetting(process.env.PG_POOL_SIZE, "PG_POOL_SIZE", 5, 1, 100);
 
-if (!ENV_ID || !DATABASE_URL) {
-  throw new Error("CLOUDBASE_ENV_ID/TCB_ENV and DATABASE_URL are required");
+if (!DATABASE_URL) {
+  throw new Error("DATABASE_URL is required");
 }
 
 const pool = new Pool({
@@ -99,6 +101,24 @@ async function readJson(req) {
   }
 }
 
+async function readResponseBytes(upstream, maxBytes, label) {
+  if (!upstream.body) fail(`${label}没有响应体`, 502);
+  const reader = upstream.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel();
+      fail(`${label}响应超过大小限制`, 502);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, size);
+}
+
 function bearer(req) {
   const value = String(req.headers.authorization || "");
   if (!value.startsWith("Bearer ") || value.length < 16 || value.length > 16 * 1024) {
@@ -115,11 +135,25 @@ async function authenticate(req) {
     signal: AbortSignal.timeout(10_000),
   });
   if (!authResponse.ok) fail("登录已失效，请重新登录", 401);
-  const profile = await authResponse.json();
+  const authBody = await readResponseBytes(
+    authResponse,
+    MAX_AUTH_RESPONSE_BYTES,
+    "身份服务",
+  );
+  let profile;
+  try {
+    profile = JSON.parse(authBody.toString("utf8"));
+  } catch (_error) {
+    fail("身份服务返回无效响应", 502);
+  }
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
+    fail("身份服务返回无效响应", 502);
+  }
   const subject = String(profile.sub || profile.user_id || "").trim();
   if (!subject || subject === "anon" || profile.is_anonymous === true) {
     fail("请使用正式账号登录", 403);
   }
+  if (Buffer.byteLength(subject, "utf8") > 512) fail("身份标识超过大小限制", 502);
   await enforceRate(subject);
   return {
     subject,

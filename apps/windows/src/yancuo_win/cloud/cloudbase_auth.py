@@ -33,12 +33,15 @@ class CloudBaseSession:
             return None
         if not isinstance(value, dict) or not value.get("access_token"):
             return None
-        return cls(
-            access_token=str(value["access_token"]),
-            refresh_token=str(value.get("refresh_token") or ""),
-            expires_at=int(value.get("expires_at") or 0),
-            subject=str(value.get("subject") or value.get("sub") or ""),
-        )
+        try:
+            return cls(
+                access_token=str(value["access_token"]),
+                refresh_token=str(value.get("refresh_token") or ""),
+                expires_at=int(value.get("expires_at") or 0),
+                subject=str(value.get("subject") or value.get("sub") or ""),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
 
     def to_json(self) -> str:
         return json.dumps(
@@ -56,7 +59,14 @@ class CloudBaseSession:
 
 def _auth_url(environment_id: str, path: str) -> str:
     environment_id = environment_id.strip()
-    if not environment_id or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" for ch in environment_id):
+    if (
+        not 1 <= len(environment_id) <= 64
+        or any(
+            ch
+            not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+            for ch in environment_id
+        )
+    ):
         raise DomainError("CloudBase 环境 ID 格式无效")
     return f"https://{environment_id}.api.tcloudbasegateway.com{path}"
 
@@ -85,7 +95,11 @@ def _request_token(environment_id: str, payload: dict[str, Any]) -> CloudBaseSes
     if not isinstance(result, dict) or not result.get("access_token"):
         message = result.get("error_description") or result.get("error") if isinstance(result, dict) else None
         raise DomainError(str(message or "CloudBase 身份服务未返回访问令牌"))
-    expires_in = max(60, int(result.get("expires_in") or 7200))
+    try:
+        expires_in = int(result.get("expires_in") or 7200)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DomainError("CloudBase 身份服务返回无效有效期") from exc
+    expires_in = min(7 * 24 * 60 * 60, max(60, expires_in))
     return CloudBaseSession(
         access_token=str(result["access_token"]),
         refresh_token=str(result.get("refresh_token") or ""),
@@ -127,6 +141,8 @@ def get_access_token(environment_id: str, credential_key: str) -> str:
     session = CloudBaseSession.from_json(raw)
     if session is None:
         # Compatibility with manually pasted access tokens from older builds.
+        if raw.lstrip().startswith(("{", "[")):
+            raise DomainError("CloudBase 登录凭据已损坏，请重新登录")
         return raw
     if session.expires_at > int(time.time()) + _REFRESH_EARLY_SECONDS:
         return session.access_token

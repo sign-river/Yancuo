@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const {
   boundedName,
   boundedText,
+  environmentId,
   integerSetting,
   newUploadToken,
   safeTokenEqual,
@@ -43,5 +44,12 @@ test("numeric deployment settings fail closed", () => {
   assert.equal(integerSetting("10", "LIMIT", 5, 1, 10), 10);
   for (const value of ["NaN", "1.5", "0", "11", "Infinity"]) {
     assert.throws(() => integerSetting(value, "LIMIT", 5, 1, 10), /LIMIT/);
+  }
+});
+
+test("CloudBase environment IDs cannot escape the official auth hostname", () => {
+  assert.equal(environmentId("env-123"), "env-123");
+  for (const value of ["", "https://evil.test", "env.example", "a".repeat(65)]) {
+    assert.throws(() => environmentId(value), /格式无效/);
   }
 });

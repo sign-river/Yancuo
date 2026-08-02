@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+const ENVIRONMENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 
 function boundedName(value, label) {
   const result = String(value || "").trim();
@@ -20,6 +21,14 @@ function boundedText(value, label, maxBytes) {
     const error = new Error(`${label} 超过大小限制`);
     error.statusCode = 413;
     throw error;
+  }
+  return result;
+}
+
+function environmentId(value) {
+  const result = String(value || "").trim();
+  if (!ENVIRONMENT_ID_RE.test(result)) {
+    throw new Error("CLOUDBASE_ENV_ID/TCB_ENV 格式无效");
   }
   return result;
 }
@@ -54,6 +63,7 @@ function safeTokenEqual(token, expectedHash) {
 module.exports = {
   boundedName,
   boundedText,
+  environmentId,
   integerSetting,
   newUploadToken,
   safeTokenEqual,

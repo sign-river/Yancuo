@@ -83,3 +83,29 @@ def test_access_token_accepts_legacy_raw_token(monkeypatch) -> None:  # type: ig
 def test_auth_rejects_invalid_environment_id() -> None:
     with pytest.raises(DomainError, match="环境 ID"):
         sign_in_with_password("https://bad", "user", "password", "cred")
+
+
+def test_saved_session_with_invalid_expiry_is_rejected() -> None:
+    assert CloudBaseSession.from_json(
+        '{"access_token":"token","expires_at":"not-a-number"}'
+    ) is None
+
+
+def test_corrupted_structured_session_is_not_used_as_legacy_token(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase_auth.get_secret",
+        lambda _key: '{"access_token":"token","expires_at":"bad"}',
+    )
+    with pytest.raises(DomainError, match="凭据已损坏"):
+        get_access_token("env-123", "cred")
+
+
+def test_auth_rejects_invalid_expiry_from_service(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase_auth.safe_urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(
+            b'{"access_token":"token","expires_in":"not-a-number"}'
+        ),
+    )
+    with pytest.raises(DomainError, match="有效期"):
+        sign_in_with_password("env-123", "user", "password", "cred")
