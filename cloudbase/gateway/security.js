@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const ENVIRONMENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+const POSTGRES_SSL_QUERY_KEYS = new Set(["sslcert", "sslkey", "sslrootcert", "sslmode"]);
 
 function boundedName(value, label) {
   const result = String(value || "").trim();
@@ -60,12 +61,54 @@ function safeTokenEqual(token, expectedHash) {
   return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
 }
 
+function postgresConnectionSecurity(databaseUrl, mode, ca) {
+  let parsed;
+  try {
+    parsed = new URL(String(databaseUrl || ""));
+  } catch {
+    throw new Error("DATABASE_URL format is invalid");
+  }
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    throw new Error("DATABASE_URL must use postgres:// or postgresql://");
+  }
+  for (const key of parsed.searchParams.keys()) {
+    if (POSTGRES_SSL_QUERY_KEYS.has(key.toLowerCase())) {
+      throw new Error(`DATABASE_URL must not contain ${key}; configure TLS with PG_SSL instead`);
+    }
+  }
+
+  const sslMode = String(mode || "verify").trim().toLowerCase();
+  const certificateAuthority = String(ca || "").replaceAll("\\n", "\n").trim();
+  if (certificateAuthority && Buffer.byteLength(certificateAuthority, "utf8") > 1024 * 1024) {
+    throw new Error("PG_SSL_CA exceeds the 1 MiB limit");
+  }
+  if (sslMode === "verify") {
+    return {
+      connectionString: String(databaseUrl),
+      ssl: certificateAuthority
+        ? { rejectUnauthorized: true, ca: certificateAuthority }
+        : { rejectUnauthorized: true },
+    };
+  }
+  if (certificateAuthority) {
+    throw new Error("PG_SSL_CA requires PG_SSL=verify");
+  }
+  if (sslMode === "no-verify") {
+    return { connectionString: String(databaseUrl), ssl: { rejectUnauthorized: false } };
+  }
+  if (sslMode === "disable") {
+    return { connectionString: String(databaseUrl), ssl: false };
+  }
+  throw new Error("PG_SSL must be verify, no-verify, or disable");
+}
+
 module.exports = {
   boundedName,
   boundedText,
   environmentId,
   integerSetting,
   newUploadToken,
+  postgresConnectionSecurity,
   safeTokenEqual,
   subjectStorageKey,
   tokenHash,

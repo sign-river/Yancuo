@@ -8,6 +8,7 @@ const {
   environmentId,
   integerSetting,
   newUploadToken,
+  postgresConnectionSecurity,
   safeTokenEqual,
   subjectStorageKey,
   tokenHash,
@@ -52,4 +53,50 @@ test("CloudBase environment IDs cannot escape the official auth hostname", () =>
   for (const value of ["", "https://evil.test", "env.example", "a".repeat(65)]) {
     assert.throws(() => environmentId(value), /格式无效/);
   }
+});
+
+test("PostgreSQL TLS verifies certificates by default", () => {
+  const config = postgresConnectionSecurity("postgresql://user:pass@db.example/yancuo");
+  assert.deepEqual(config.ssl, { rejectUnauthorized: true });
+  assert.equal(config.connectionString, "postgresql://user:pass@db.example/yancuo");
+});
+
+test("PostgreSQL TLS accepts an explicit certificate authority", () => {
+  const config = postgresConnectionSecurity(
+    "postgres://user:pass@db.example/yancuo",
+    "verify",
+    "-----BEGIN CERTIFICATE-----\\nabc\\n-----END CERTIFICATE-----",
+  );
+  assert.equal(config.ssl.rejectUnauthorized, true);
+  assert.match(config.ssl.ca, /CERTIFICATE-----\nabc\n/);
+});
+
+test("PostgreSQL insecure modes require an explicit deployment choice", () => {
+  assert.deepEqual(
+    postgresConnectionSecurity("postgres://user:pass@localhost/yancuo", "disable").ssl,
+    false,
+  );
+  assert.deepEqual(
+    postgresConnectionSecurity("postgres://user:pass@localhost/yancuo", "no-verify").ssl,
+    { rejectUnauthorized: false },
+  );
+  assert.throws(
+    () => postgresConnectionSecurity("postgres://localhost/yancuo", "optional"),
+    /PG_SSL/,
+  );
+  assert.throws(
+    () => postgresConnectionSecurity("postgres://localhost/yancuo", "disable", "ca"),
+    /PG_SSL_CA/,
+  );
+});
+
+test("connection strings cannot override PostgreSQL TLS configuration", () => {
+  for (const option of ["sslmode", "sslcert", "sslkey", "sslrootcert"]) {
+    assert.throws(
+      () => postgresConnectionSecurity(`postgres://localhost/yancuo?${option}=disable`),
+      new RegExp(option),
+    );
+  }
+  assert.throws(() => postgresConnectionSecurity("https://db.example/yancuo"), /postgres/);
+  assert.throws(() => postgresConnectionSecurity("not a URL"), /DATABASE_URL/);
 });

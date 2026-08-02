@@ -10,6 +10,7 @@ const {
   environmentId,
   integerSetting,
   newUploadToken,
+  postgresConnectionSecurity,
   safeTokenEqual,
   subjectStorageKey,
   tokenHash,
@@ -73,12 +74,17 @@ if (!DATABASE_URL) {
   throw new Error("DATABASE_URL is required");
 }
 
+const postgresSecurity = postgresConnectionSecurity(
+  DATABASE_URL,
+  process.env.PG_SSL,
+  process.env.PG_SSL_CA,
+);
+
 const pool = new Pool({
-  connectionString: DATABASE_URL,
+  ...postgresSecurity,
   max: PG_POOL_SIZE,
   idleTimeoutMillis: 20_000,
   statement_timeout: 30_000,
-  ssl: process.env.PG_SSL === "disable" ? false : { rejectUnauthorized: false },
 });
 const cloud = tcb.init({ env: ENV_ID });
 

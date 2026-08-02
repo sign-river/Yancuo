@@ -21,7 +21,8 @@
 | `CLOUDBASE_ENV_ID` | 是 | 部署目标环境 ID；部分运行时也可由 `TCB_ENV` 提供。 |
 | `DATABASE_URL` | 是 | PostgreSQL 服务端连接串，只保存在函数加密环境变量。 |
 | `GATEWAY_PUBLIC_URL` | 是 | 函数最终 HTTPS 地址，用于生成一次性上传 URL。 |
-| `PG_SSL` | 否 | 默认为 TLS；仅本地开发可设为 `disable`。 |
+| `PG_SSL` | 否 | 默认为 `verify`，启用 TLS 并校验证书；仅受控调试可显式设为 `no-verify`，仅本地开发可设为 `disable`。 |
+| `PG_SSL_CA` | 否 | `PG_SSL=verify` 时可提供 PEM CA 证书；支持用 `\\n` 表示环境变量中的换行，最大 1 MiB。 |
 | `USER_STORAGE_BYTES` | 否 | 单用户已提交对象与有效上传预留的合计预算，默认 512 MiB。 |
 | `USER_REPOSITORIES` | 否 | 单用户逻辑资料库数量，默认 5。 |
 | `MAX_RELEASES_PER_REPOSITORY` | 否 | 单资料库 Release 数量，默认 10000，硬上限 100000。 |
@@ -30,6 +31,8 @@
 | `MAX_ASSET_BYTES` | 否 | 单对象预算，上限固定 512 MiB。 |
 
 所有数值环境变量必须是文档范围内的整数；空值使用默认值，`NaN`、小数、负数和越界值会让函数在启动阶段直接失败，不能静默关闭预算或限流。
+
+`DATABASE_URL` 不得携带 `sslmode`、`sslcert`、`sslkey` 或 `sslrootcert` 查询参数，以免覆盖网关的 TLS 校验对象。正式部署应保留默认 `PG_SSL=verify`；只有在已确认 CloudBase 内网链路和证书条件、且暂时无法取得可信 CA 时，才可把 `no-verify` 作为有记录的临时兼容措施。
 
 环境 ID 只允许 1–64 位字母、数字和连字符，确保普通用户令牌只发送到对应的腾讯 CloudBase 身份域名；网关对身份响应应用 64 KiB 上限。
 
