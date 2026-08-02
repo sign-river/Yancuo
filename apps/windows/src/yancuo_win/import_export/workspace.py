@@ -26,7 +26,11 @@ from yancuo_win.data.models import (
     utcnow,
 )
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.infrastructure.archive import ArchiveSecurityError, safe_relative_path
+from yancuo_win.infrastructure.archive import (
+    ArchiveSecurityError,
+    read_regular_file_limited,
+    safe_relative_path,
+)
 from yancuo_win.import_export.markdown_problem import parse_problem_md, render_problem_md
 from yancuo_win.review.changeset import snapshot_problem_fields
 
@@ -57,22 +61,18 @@ class WorkspaceService:
 
     @staticmethod
     def _read_workspace_text(path: Path, label: str, max_bytes: int) -> str:
-        if path.is_symlink():
-            raise DomainError(f"{label} 不能是符号链接")
-        if not path.is_file():
-            raise DomainError(f"缺少 {label}")
         try:
-            size = path.stat().st_size
-        except OSError as exc:
-            raise DomainError(f"无法读取 {label}") from exc
-        if size > max_bytes:
-            raise DomainError(f"{label} 过大（上限 {max_bytes} 字节）")
+            payload = read_regular_file_limited(path, max_bytes=max_bytes)
+        except ArchiveSecurityError as exc:
+            raise DomainError(f"无法读取 {label}：{exc}") from exc
         try:
-            return path.read_text(encoding="utf-8")
+            return payload.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise DomainError(f"{label} 不是有效 UTF-8 文本") from exc
 
-    def _audit(self, session: Session, action: str, entity_type: str, entity_id: str, detail: dict) -> None:
+    def _audit(
+        self, session: Session, action: str, entity_type: str, entity_id: str, detail: dict
+    ) -> None:
         session.add(
             AuditLog(
                 id=new_id("audit"),
@@ -88,9 +88,7 @@ class WorkspaceService:
         if not problem_ids:
             raise DomainError("未选择题目")
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        root = dest_dir or (
-            self.runtime.paths.workspace_dir / f"workspace-{stamp}"
-        )
+        root = dest_dir or (self.runtime.paths.workspace_dir / f"workspace-{stamp}")
         if root.exists():
             raise DomainError(f"目标目录已存在：{root}")
         root.mkdir(parents=True)
@@ -103,9 +101,7 @@ class WorkspaceService:
         # Resolve from the checkout during development and from bundled
         # package resources after a wheel install.  A fixed ``parents[5]``
         # path breaks the latter case.
-        repo_schema = resource_path(
-            "protocol", "schemas", "problem.schema.json"
-        )
+        repo_schema = resource_path("protocol", "schemas", "problem.schema.json")
         if repo_schema is not None and repo_schema.is_file():
             shutil.copy2(repo_schema, schemas_dir / "problem.schema.json")
         else:
@@ -232,9 +228,7 @@ class WorkspaceService:
         manifest_path = workspace_dir / "manifest.json"
         try:
             manifest = json.loads(
-                self._read_workspace_text(
-                    manifest_path, "manifest.json", MAX_MANIFEST_BYTES
-                )
+                self._read_workspace_text(manifest_path, "manifest.json", MAX_MANIFEST_BYTES)
             )
         except json.JSONDecodeError as exc:
             raise DomainError(f"manifest.json 无效：{exc}") from exc
@@ -250,9 +244,7 @@ class WorkspaceService:
             raise DomainError("缺少 problems/ 目录")
         problem_dirs = sorted(p for p in problems_root.iterdir() if p.is_dir())
         if len(problem_dirs) > MAX_WORKSPACE_PROBLEMS:
-            raise DomainError(
-                f"工作区题目目录过多（上限 {MAX_WORKSPACE_PROBLEMS}）"
-            )
+            raise DomainError(f"工作区题目目录过多（上限 {MAX_WORKSPACE_PROBLEMS}）")
 
         created_items: list[str] = []
         conflicts: list[str] = []
@@ -302,18 +294,14 @@ class WorkspaceService:
                 "errors": errors,
             }
 
-    def _import_one_problem(
-        self, s: Session, session_id: str, pdir: Path
-    ) -> tuple[str, bool]:
+    def _import_one_problem(self, s: Session, session_id: str, pdir: Path) -> tuple[str, bool]:
         meta_path = pdir / "metadata.json"
         md_path = pdir / "problem.md"
         if pdir.is_symlink():
             raise DomainError("题目目录不能是符号链接")
         try:
             metadata = json.loads(
-                self._read_workspace_text(
-                    meta_path, "metadata.json", MAX_METADATA_BYTES
-                )
+                self._read_workspace_text(meta_path, "metadata.json", MAX_METADATA_BYTES)
             )
         except json.JSONDecodeError as exc:
             raise DomainError(f"metadata.json 无效：{exc}") from exc
