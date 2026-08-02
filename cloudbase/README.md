@@ -2,28 +2,50 @@
 
 本目录是研错库腾讯云 CloudBase 正式远端通道的部署契约。目标环境为上海区 `yancuo-prod`、CloudBase 免费体验版、PostgreSQL。网关承载完整 `.ebpack` 快照、不可变 Operation 批次、资料索引和原子写锁。
 
-客户端不能直连 CloudBase PostgreSQL 或携带管理员密钥。部署名为 `yancuo-cloud-gateway` 的 HTTPS 云函数，由它以服务端身份访问 Cloud Storage 和 PostgreSQL；Windows 客户端只保存环境 ID、网关 HTTPS 地址，以及保存在 Windows Credential Manager 中的网关用户令牌。
+客户端不能直连 CloudBase PostgreSQL 或携带管理员密钥。部署名为 `yancuo-cloud-gateway` 的 HTTP 云函数，由它以服务端身份访问 Cloud Storage 和 PostgreSQL；Windows 客户端只保存环境 ID、网关 HTTPS 地址，以及保存在 Windows Credential Manager 中的普通用户登录会话。密码只参与当次登录，不保存；访问令牌到期后使用轮换式 refresh token 自动续期。
 
 ## 接入顺序
 
-1. 在 CloudBase 控制台确认环境 ID，并在“云存储”创建私有目录前缀 `yancuo/`。
-2. 在 PostgreSQL 的 SQL 编辑器执行 [`postgres/init.sql`](postgres/init.sql)。该脚本不包含账户、密码或环境 ID。
-3. 部署 `yancuo-cloud-gateway` 云函数，实现下面的 HTTP 契约。函数服务端配置 CloudBase 环境访问权限和令牌校验密钥；不要下发数据库连接串。
-4. 为真实用户签发受限网关令牌，令牌的 `sub` 是资料命名空间。函数须验证它，不能仅相信请求体中的 `owner`。
-5. Windows 设置中选择“腾讯云 CloudBase”，填写环境 ID、网关 HTTPS 地址、逻辑 owner/repository，并粘贴网关令牌。令牌会进入系统凭据，配置文件不保存令牌。
-6. 测试连接，创建逻辑仓库后做一次小型 `.ebpack` 备份和下载恢复验证。
+1. 在 CloudBase 控制台开启用户名密码认证并创建测试用户；邮箱可以作为用户名。正式开放注册前需另行配置邮箱验证码服务和反滥用策略。
+2. 确认环境 ID，并将云存储权限设为私有。`yancuo/` 对象前缀由网关首次上传时自动创建。
+3. 在 PostgreSQL 的 SQL 编辑器执行 [`postgres/init.sql`](postgres/init.sql)。该脚本不包含账户、密码或环境 ID。
+4. 从 [`gateway`](gateway) 部署 Node.js 18+ HTTP 云函数。入口由 `scf_bootstrap` 启动，监听平台提供的 `PORT`。
+5. 只在函数服务端配置下列环境变量；数据库连接串和腾讯云密钥不得下发给客户端。
+6. Windows 设置中选择“腾讯云 CloudBase”，填写环境 ID、网关 HTTPS 地址和逻辑 repository，再用普通 CloudBase 账户登录。
+7. 测试连接，创建逻辑仓库后做一次小型 `.ebpack` 备份和下载恢复验证。
+
+## 函数环境变量
+
+| 名称 | 必需 | 含义 |
+| --- | --- | --- |
+| `CLOUDBASE_ENV_ID` | 是 | 部署目标环境 ID；部分运行时也可由 `TCB_ENV` 提供。 |
+| `DATABASE_URL` | 是 | PostgreSQL 服务端连接串，只保存在函数加密环境变量。 |
+| `GATEWAY_PUBLIC_URL` | 是 | 函数最终 HTTPS 地址，用于生成一次性上传 URL。 |
+| `PG_SSL` | 否 | 默认为 TLS；仅本地开发可设为 `disable`。 |
+| `USER_STORAGE_BYTES` | 否 | 单用户已提交对象预算，默认 512 MiB。 |
+| `USER_REPOSITORIES` | 否 | 单用户逻辑资料库数量，默认 5。 |
+| `RATE_PER_MINUTE` | 否 | 单实例、单用户分钟请求预算，默认 120。 |
+| `MAX_ASSET_BYTES` | 否 | 单对象预算，上限固定 512 MiB。 |
+
+安装依赖和本地安全测试：
+
+```powershell
+cd cloudbase/gateway
+pnpm install --frozen-lockfile
+pnpm test
+```
 
 ## HTTP 契约
 
 所有 JSON 操作使用 `POST {gateway_url}/actions/{action}`，请求头包含：
 
 ```text
-Authorization: Bearer <gateway-token>
+Authorization: Bearer <cloudbase-user-access-token>
 X-CloudBase-Environment-ID: <environment-id>
 Content-Type: application/json
 ```
 
-成功响应为 `{"ok": true, "data": {...}}`，失败响应为 `{"ok": false, "error": "可展示的错误"}`。`owner` 与 `repository` 共同组成逻辑仓库标识，函数必须限制为当前令牌有权操作的命名空间。
+成功响应为 `{"ok": true, "data": {...}}`，失败响应为 `{"ok": false, "error": "可展示的错误"}`。网关调用 CloudBase `/auth/v1/user/me` 验证 Access Token，并以可信 `sub` 作为资料命名空间；客户端传入的 `owner` 仅为旧协议兼容字段，不参与授权。
 
 | 操作 | 请求/响应要点 |
 | --- | --- |
@@ -43,6 +65,7 @@ Content-Type: application/json
 
 - Cloud Storage 设为私有，下载只经函数签发短期 URL。
 - PostgreSQL 表启用 RLS；函数使用受控服务端角色，桌面端没有数据库账号。
-- 网关令牌、CloudBase SecretId/SecretKey、数据库密码均不得写入 TOML、日志或 Git。
+- 普通用户 Access Token/refresh token 只进系统凭据；CloudBase SecretId/SecretKey、数据库密码均不得写入 TOML、日志或 Git。
+- 邮箱注册、找回密码和验证码发送依赖邮件服务配置；没有配置前只允许管理员在控制台创建测试用户，不应开放公开注册入口。
 - `locks/acquire` 需采用 [`postgres/init.sql`](postgres/init.sql) 中的 `INSERT ... ON CONFLICT ... WHERE` 事务语义；不能用“先读再写”。
 - 完整快照与 Operation 批次共享同一原子 manifest 和仓库锁；LocalFolder 仅保留为离线测试通道。

@@ -16,7 +16,7 @@ from urllib.request import Request
 
 from yancuo_win.cloud.base import CloudCapabilities, CloudProvider, CloudUser, RemoteRelease
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.infrastructure.credentials import get_secret
+from yancuo_win.cloud.cloudbase_auth import get_access_token
 from yancuo_win.infrastructure.safe_http import iter_file_chunks, safe_urlopen
 
 
@@ -34,10 +34,7 @@ class CloudBaseGatewayProvider(CloudProvider):
         self.credential_key = credential_key
 
     def _token(self) -> str:
-        token = get_secret(self.credential_key)
-        if not token:
-            raise DomainError("请先在设置中保存 CloudBase 网关令牌")
-        return token
+        return get_access_token(self.environment_id, self.credential_key)
 
     def _validate_configuration(self) -> None:
         if not self.environment_id:

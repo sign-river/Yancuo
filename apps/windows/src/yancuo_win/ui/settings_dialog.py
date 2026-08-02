@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.cloud.factory import get_cloud_provider
+from yancuo_win.cloud.cloudbase_auth import CloudBaseSession, sign_in_with_password
 from yancuo_win.config.settings import (
     ConfigError,
     save_ai_preferences,
@@ -99,6 +100,7 @@ class ServiceSettingsPage(QWidget):
         self.section = section
         self._ai_model_worker: AIModelListWorker | None = None
         self._connection_worker: CallableWorker | None = None
+        self._cloudbase_login_worker: CallableWorker | None = None
         self._dirty = False
         self._last_connection_test = "尚未测试"
         self._field_errors: dict[str, QLabel] = {}
@@ -381,13 +383,33 @@ class ServiceSettingsPage(QWidget):
         cloud_form.addRow("CloudBase 网关地址", self.cloudbase_gateway_edit)
         self._add_field_error(cloud_form, "cloudbase_gateway")
 
+        self.cloudbase_username_edit = QLineEdit()
+        describe_field(self.cloudbase_username_edit, "CloudBase 登录账户")
+        self.cloudbase_username_edit.setPlaceholderText("邮箱或 CloudBase 用户名")
+        cloud_form.addRow("登录账户", self.cloudbase_username_edit)
+        self.cloudbase_password_edit = QLineEdit()
+        describe_field(self.cloudbase_password_edit, "CloudBase 登录密码")
+        self.cloudbase_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cloudbase_password_edit.setPlaceholderText("密码只用于本次登录，不会保存")
+        self.cloudbase_login_button = QPushButton("登录 CloudBase")
+        self.cloudbase_login_button.clicked.connect(self._login_cloudbase)
+        password_control = QWidget()
+        password_row = QHBoxLayout(password_control)
+        password_row.setContentsMargins(0, 0, 0, 0)
+        password_row.setSpacing(6)
+        password_row.addWidget(self.cloudbase_password_edit, stretch=1)
+        password_row.addWidget(self.cloudbase_login_button)
+        self.cloudbase_password_control = password_control
+        cloud_form.addRow("登录密码", password_control)
+        self._add_field_error(cloud_form, "cloudbase_login")
+
         self.token_label = QLabel("令牌")
         self.token_status = QLabel("")
         cloud_form.addRow(self.token_label, self.token_status)
         self.token_edit = QLineEdit()
         describe_field(self.token_edit, "新云端令牌")
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.token_edit.setPlaceholderText("粘贴新令牌后点保存")
+        self.token_edit.setPlaceholderText("兼容旧版：手工粘贴访问令牌")
         self.token_control = QWidget()
         token_row = QHBoxLayout(self.token_control)
         token_row.setContentsMargins(0, 0, 0, 0)
@@ -428,6 +450,9 @@ class ServiceSettingsPage(QWidget):
             self.repo_edit,
             self.local_root,
             self.browse_local_button,
+            self.cloudbase_username_edit,
+            self.cloudbase_password_edit,
+            self.cloudbase_login_button,
             self.token_edit,
             self.clear_cloud_token_button,
             self.test_cloud_button,
@@ -813,10 +838,16 @@ class ServiceSettingsPage(QWidget):
         name = self.provider.currentData()
         key = self._credential_key_for_provider()
         if name == "cloudbase":
-            self.token_label.setText("CloudBase 网关令牌")
-            self.token_status.setText(mask_secret(get_secret(key) if key else None))
+            self.token_label.setText("CloudBase 登录状态")
+            raw_session = get_secret(key) if key else None
+            session = CloudBaseSession.from_json(raw_session) if raw_session else None
+            self.token_status.setText(
+                f"已登录（用户 {session.subject[:12]}…）"
+                if session and session.subject
+                else ("已登录" if session else mask_secret(raw_session))
+            )
             self.token_edit.setEnabled(True)
-            self.token_edit.setToolTip("由 yancuo-cloud-gateway 校验的用户令牌")
+            self.token_edit.setToolTip("仅兼容旧版手工令牌；正常使用上方账户登录")
             self._set_cloud_permission_state(key)
         else:
             self.token_label.setText("令牌（本地文件夹无需）")
@@ -831,7 +862,12 @@ class ServiceSettingsPage(QWidget):
         for field in (self.owner_edit, self.repo_edit, self.token_status, self.token_control, self.cloud_permission_notice):
             self.cloud_form.setRowVisible(field, remote)
         cloudbase = name == "cloudbase"
-        for field in (self.cloudbase_environment_edit, self.cloudbase_gateway_edit):
+        for field in (
+            self.cloudbase_environment_edit,
+            self.cloudbase_gateway_edit,
+            self.cloudbase_username_edit,
+            self.cloudbase_password_control,
+        ):
             self.cloud_form.setRowVisible(field, cloudbase)
         self.clear_cloud_token_button.setVisible(remote)
 
@@ -850,6 +886,54 @@ class ServiceSettingsPage(QWidget):
 
     def _on_provider_changed(self) -> None:
         self._refresh_token_ui()
+
+    def _login_cloudbase(self) -> None:
+        environment_id = self.cloudbase_environment_edit.text().strip()
+        username = self.cloudbase_username_edit.text().strip()
+        password = self.cloudbase_password_edit.text()
+        key = self._credential_key_for_provider()
+        if not environment_id or not username or not password or not key:
+            self._set_field_error(
+                "cloudbase_login", "请填写环境 ID、登录账户和密码。"
+            )
+            return
+        self._set_field_error("cloudbase_login", "")
+        self.cloudbase_login_button.setEnabled(False)
+        self.cloudbase_login_button.setText("正在登录…")
+        self._cloudbase_login_worker = CallableWorker(
+            lambda: sign_in_with_password(
+                environment_id, username, password, key
+            ),
+            self,
+        )
+        self._cloudbase_login_worker.finished_ok.connect(
+            self._on_cloudbase_login_finished
+        )
+        self._cloudbase_login_worker.failed.connect(
+            self._on_cloudbase_login_failed
+        )
+        self._cloudbase_login_worker.finished.connect(
+            self._on_cloudbase_login_worker_finished
+        )
+        self._cloudbase_login_worker.start()
+
+    def _on_cloudbase_login_finished(self, _session: object) -> None:
+        self.cloudbase_password_edit.clear()
+        self._refresh_token_ui()
+        self.status_message.emit("CloudBase 登录成功，会话已保存到系统凭据")
+
+    def _on_cloudbase_login_failed(self, error: str) -> None:
+        self.cloudbase_password_edit.clear()
+        self._set_field_error("cloudbase_login", error)
+        self.cloud_permission_notice.set_state(f"登录失败：{error}", "error")
+
+    def _on_cloudbase_login_worker_finished(self) -> None:
+        worker = self._cloudbase_login_worker
+        self._cloudbase_login_worker = None
+        self.cloudbase_login_button.setEnabled(True)
+        self.cloudbase_login_button.setText("登录 CloudBase")
+        if worker is not None:
+            worker.deleteLater()
 
     def _browse_local(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择本地云同步目录")

@@ -38,7 +38,10 @@ def test_health_uses_gateway_token_and_environment_header(monkeypatch) -> None: 
         seen["timeout"] = timeout
         return _Response({"ok": True, "data": {"healthy": True}})
 
-    monkeypatch.setattr("yancuo_win.cloud.cloudbase.get_secret", lambda _key: "test-token")
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase.get_access_token",
+        lambda _environment, _key: "test-token",
+    )
     monkeypatch.setattr("yancuo_win.cloud.cloudbase.safe_urlopen", fake_urlopen)
     provider = CloudBaseGatewayProvider(
         environment_id="yancuo-prod-xxxxx",
@@ -87,7 +90,10 @@ def test_cloudbase_rejects_insecure_gateway_url() -> None:
 
 
 def test_cloudbase_gateway_response_size_is_bounded(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr("yancuo_win.cloud.cloudbase.get_secret", lambda _key: "token")
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase.get_access_token",
+        lambda _environment, _key: "token",
+    )
     monkeypatch.setattr("yancuo_win.cloud.cloudbase._MAX_GATEWAY_RESPONSE_BYTES", 16)
     monkeypatch.setattr(
         "yancuo_win.cloud.cloudbase.safe_urlopen",
