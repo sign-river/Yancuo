@@ -144,7 +144,7 @@ def test_cloudbase_upload_streams_file_body(monkeypatch, tmp_path) -> None:  # t
         gateway_url="https://gateway.example.test",
         credential_key="test-key",
     )
-    provider._held_locks[("owner", "repo")] = "dev-test"
+    provider._held_locks[("owner", "repo")] = ("dev-test", "lease-test")
     actions: list[str] = []
 
     def fake_action(action, _payload=None):  # type: ignore[no-untyped-def]
@@ -193,7 +193,10 @@ def test_cloudbase_mutations_require_and_forward_held_lock(monkeypatch) -> None:
     assert provider.acquire_lock("owner", "repo", "dev-test") is True
     provider.write_sync_manifest("owner", "repo", {"format": "test"})
     assert seen[-1][1]["device_id"] == "dev-test"
+    lease_id = seen[-1][1]["lease_id"]
+    assert isinstance(lease_id, str) and len(lease_id) >= 24
     provider.release_lock("owner", "repo", "dev-test")
+    assert seen[-1][1]["lease_id"] == lease_id
 
     with pytest.raises(DomainError, match="主写入锁"):
         provider.create_release("owner", "repo", tag="v1", name="v1")

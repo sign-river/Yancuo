@@ -190,9 +190,10 @@ async function lockSubjectQuota(client, subject) {
 
 async function requireWriteLock(client, repositoryId, payload) {
   const deviceId = boundedName(payload.device_id, "设备 ID");
+  const leaseId = boundedName(payload.lease_id, "租约 ID");
   const locked = await client.query(
-    "update yancuo.write_locks set expires_at=now()+interval '15 minutes',updated_at=now() where repository_id=$1 and device_id=$2 and expires_at>now() returning device_id",
-    [repositoryId, deviceId],
+    "update yancuo.write_locks set expires_at=now()+interval '15 minutes',updated_at=now() where repository_id=$1 and device_id=$2 and lease_id=$3 and expires_at>now() returning device_id",
+    [repositoryId, deviceId, leaseId],
   );
   if (!locked.rowCount) fail("主写入锁不存在或已经过期", 409);
   return deviceId;
@@ -435,17 +436,19 @@ async function action(name, payload, identity, req) {
     }
     if (name === "locks/acquire") {
       const deviceId = boundedName(payload.device_id, "设备 ID");
+      const leaseId = boundedName(payload.lease_id, "租约 ID");
       const locked = await client.query(
-        "insert into yancuo.write_locks(repository_id,device_id,expires_at) values($1,$2,now()+interval '15 minutes') on conflict(repository_id) do update set device_id=excluded.device_id,expires_at=excluded.expires_at,updated_at=now() where yancuo.write_locks.expires_at<=now() or yancuo.write_locks.device_id=excluded.device_id returning device_id,expires_at",
-        [repo.repository_id, deviceId],
+        "insert into yancuo.write_locks(repository_id,device_id,lease_id,expires_at) values($1,$2,$3,now()+interval '15 minutes') on conflict(repository_id) do update set device_id=excluded.device_id,lease_id=excluded.lease_id,expires_at=excluded.expires_at,updated_at=now() where yancuo.write_locks.expires_at<=now() or (yancuo.write_locks.device_id=excluded.device_id and yancuo.write_locks.lease_id=excluded.lease_id) returning device_id,expires_at",
+        [repo.repository_id, deviceId, leaseId],
       );
       return { acquired: Boolean(locked.rowCount), expires_at: locked.rows[0]?.expires_at || null };
     }
     if (name === "locks/release") {
       const deviceId = boundedName(payload.device_id, "设备 ID");
+      const leaseId = boundedName(payload.lease_id, "租约 ID");
       await client.query(
-        "delete from yancuo.write_locks where repository_id=$1 and device_id=$2",
-        [repo.repository_id, deviceId],
+        "delete from yancuo.write_locks where repository_id=$1 and device_id=$2 and lease_id=$3",
+        [repo.repository_id, deviceId, leaseId],
       );
       return { released: true };
     }

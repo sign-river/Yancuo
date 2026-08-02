@@ -86,9 +86,12 @@ alter table yancuo.upload_sessions add column if not exists claimed_at timestamp
 create table if not exists yancuo.write_locks (
     repository_id uuid primary key references yancuo.repositories(repository_id) on delete cascade,
     device_id text not null,
+    lease_id text,
     expires_at timestamptz not null,
     updated_at timestamptz not null default now()
 );
+
+alter table yancuo.write_locks add column if not exists lease_id text;
 
 create table if not exists yancuo.rate_limits (
     subject_id text primary key,
@@ -118,12 +121,14 @@ create index if not exists object_deletions_subject_queued_idx
 -- The gateway may acquire a 15 minute lock only when it is expired or already
 -- held by this device. The conditional conflict clause is the atomic decision.
 -- Bind $1 repository_id and $2 device_id in the gateway parameterized query.
--- insert into yancuo.write_locks (repository_id, device_id, expires_at)
--- values ($1, $2, now() + interval '15 minutes')
+-- insert into yancuo.write_locks (repository_id, device_id, lease_id, expires_at)
+-- values ($1, $2, $3, now() + interval '15 minutes')
 -- on conflict (repository_id) do update
--- set device_id = excluded.device_id, expires_at = excluded.expires_at, updated_at = now()
+-- set device_id = excluded.device_id, lease_id = excluded.lease_id,
+--     expires_at = excluded.expires_at, updated_at = now()
 -- where yancuo.write_locks.expires_at <= now()
---    or yancuo.write_locks.device_id = excluded.device_id
+--    or (yancuo.write_locks.device_id = excluded.device_id
+--        and yancuo.write_locks.lease_id = excluded.lease_id)
 -- returning device_id, expires_at;
 
 alter table yancuo.repositories enable row level security;

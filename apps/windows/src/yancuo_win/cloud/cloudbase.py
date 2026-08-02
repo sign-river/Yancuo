@@ -8,6 +8,7 @@ to its documented HTTPS contract and keeps the gateway token in keyring.
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -32,7 +33,7 @@ class CloudBaseGatewayProvider(CloudProvider):
         self.environment_id = environment_id.strip()
         self.gateway_url = gateway_url.rstrip("/")
         self.credential_key = credential_key
-        self._held_locks: dict[tuple[str, str], str] = {}
+        self._held_locks: dict[tuple[str, str], tuple[str, str]] = {}
 
     def _token(self) -> str:
         return get_access_token(self.environment_id, self.credential_key)
@@ -99,10 +100,15 @@ class CloudBaseGatewayProvider(CloudProvider):
         return {"owner": owner, "repository": repo}
 
     def _write_repo(self, owner: str, repo: str) -> dict[str, str]:
-        device_id = self._held_locks.get((owner, repo))
-        if not device_id:
+        lease = self._held_locks.get((owner, repo))
+        if not lease:
             raise DomainError("CloudBase 写入前必须先获取主写入锁")
-        return {**self._repo(owner, repo), "device_id": device_id}
+        device_id, lease_id = lease
+        return {
+            **self._repo(owner, repo),
+            "device_id": device_id,
+            "lease_id": lease_id,
+        }
 
     def authenticate(self) -> None:
         self._action("health")
@@ -201,13 +207,33 @@ class CloudBaseGatewayProvider(CloudProvider):
         self._action("releases/delete", {**self._write_repo(owner, repo), "tag": tag})
 
     def acquire_lock(self, owner: str, repo: str, device_id: str) -> bool:
-        acquired = bool(self._action("locks/acquire", {**self._repo(owner, repo), "device_id": device_id}).get("acquired"))
+        lease_id = secrets.token_urlsafe(24)
+        acquired = bool(
+            self._action(
+                "locks/acquire",
+                {
+                    **self._repo(owner, repo),
+                    "device_id": device_id,
+                    "lease_id": lease_id,
+                },
+            ).get("acquired")
+        )
         if acquired:
-            self._held_locks[(owner, repo)] = device_id
+            self._held_locks[(owner, repo)] = (device_id, lease_id)
         return acquired
 
     def release_lock(self, owner: str, repo: str, device_id: str) -> None:
-        self._action("locks/release", {**self._repo(owner, repo), "device_id": device_id})
+        lease = self._held_locks.get((owner, repo))
+        if not lease or lease[0] != device_id:
+            raise DomainError("CloudBase 主写入锁不属于当前任务")
+        self._action(
+            "locks/release",
+            {
+                **self._repo(owner, repo),
+                "device_id": device_id,
+                "lease_id": lease[1],
+            },
+        )
         self._held_locks.pop((owner, repo), None)
 
     def test_connection(self) -> dict[str, Any]:
