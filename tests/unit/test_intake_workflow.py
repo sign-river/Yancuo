@@ -1152,12 +1152,7 @@ def test_one_image_can_create_multiple_independent_candidates(
 ) -> None:
     image = tmp_path / "two-problems.jpg"
     image.write_bytes(b"\xff\xd8\xffmulti-candidate-image")
-    imported = intake.app.import_images([image], into_status="inbox")
-    staging_id = imported["created"][0]
-    job = intake.ai.create_structure_job(
-        [staging_id],
-        user_instruction=intake._taxonomy_instruction(),
-    )
+    job = intake.start_ai([image])
 
     class MultiProvider:
         def structure_from_image(self, **_kwargs) -> StructuredResult:
@@ -1197,11 +1192,12 @@ def test_one_image_can_create_multiple_independent_candidates(
         "yancuo_win.application.ai_service.get_provider",
         lambda _settings: MultiProvider(),
     )
-    intake.ai.run_job(job.id)
+    intake.ai.run_job(job.job_id)
 
-    candidates = intake.list_candidates(job.id)
+    candidates = intake.list_candidates(job.job_id)
     assert len(candidates) == 2
-    assert len({candidate.problem_id for candidate in candidates}) == 2
+    assert len({candidate.review_item_id for candidate in candidates}) == 2
+    assert {candidate.problem_id for candidate in candidates} == {""}
     assert {candidate.fields["title"] for candidate in candidates} == {
         "同图第一题",
         "同图第二题",
@@ -1210,14 +1206,12 @@ def test_one_image_can_create_multiple_independent_candidates(
     assert candidates[0].region["height"] == pytest.approx(0.3)
     assert candidates[1].region["y"] == pytest.approx(0.5)
 
-    staged = [intake.app.get_problem(candidate.problem_id) for candidate in candidates]
-    assert all(problem is not None for problem in staged)
-    relative_paths = {
-        problem.assets[0].relative_path
-        for problem in staged
-        if problem is not None
+    assert intake.app.count_problems() == 0
+    source_paths = {
+        source for candidate in candidates for source in candidate.source_images
     }
-    assert len(relative_paths) == 1
+    assert len(source_paths) == 1
+    assert all(source.is_file() for source in source_paths)
 
     committed = [
         intake.commit_ai_candidate(
@@ -1229,6 +1223,12 @@ def test_one_image_can_create_multiple_independent_candidates(
     ]
     assert {problem.status for problem in committed} == {"active"}
     assert {problem.title for problem in committed} == {"同图第一题", "同图第二题"}
+    assert all(
+        asset.role != "original"
+        for problem in committed
+        for asset in problem.assets
+    )
+    assert all(not source.exists() for source in source_paths)
 
 
 def test_reject_ai_candidate_does_not_create_or_trash_formal_problem(

@@ -2236,10 +2236,15 @@ class IntakePage(QWidget):
             "",
             "Images (*.png *.jpg *.jpeg *.webp);;All (*.*)",
         )
+        self.add_ai_files([Path(value) for value in files])
+
+    def add_ai_files(self, paths: list[Path]) -> int:
+        """Add user-selected sources to the temporary AI intake surface."""
+
         invalid: list[str] = []
         first_added_row: int | None = None
-        for value in files:
-            path = Path(value)
+        added = 0
+        for path in paths:
             if path in self.ai_files:
                 continue
             pixmap = QPixmap(str(path))
@@ -2256,6 +2261,7 @@ class IntakePage(QWidget):
             item.setToolTip(str(path))
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             self.ai_file_list.addItem(item)
+            added += 1
             if first_added_row is None:
                 first_added_row = self.ai_file_list.count() - 1
         if first_added_row is not None:
@@ -2266,6 +2272,7 @@ class IntakePage(QWidget):
                 "部分图片无法读取",
                 "以下文件不是有效图片或格式不受支持：\n" + "\n".join(invalid),
             )
+        return added
 
     def _remove_ai_files(self) -> None:
         rows = sorted({self.ai_file_list.row(item) for item in self.ai_file_list.selectedItems()}, reverse=True)

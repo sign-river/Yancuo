@@ -35,13 +35,16 @@ from yancuo_win.data.models import (
     AiJob,
     AiJobItem,
     Asset,
+    AuditLog,
     Chapter,
     ChapterAlias,
     IntakeAsset,
     IntakeCandidateRecord,
+    IntakeSession,
     MetaKV,
     NoteAsset,
     NoteIntakeAsset,
+    NoteIntakeSession,
     NoteDocument,
     NoteStudyRecord,
     Problem,
@@ -190,6 +193,7 @@ class AppServices:
         self.store = ObjectStore(runtime.paths.asset_objects_dir)
         self._review_date_cache: tuple[float, str] | None = None
         self._finish_retired_original_cleanup()
+        self._cleanup_stale_temporary_sources()
 
     def _finish_retired_original_cleanup(self) -> None:
         """Delete objects retired by v23 only after their DB transaction committed."""
@@ -208,6 +212,92 @@ class AppServices:
             session.delete(marker)
             session.commit()
         self._remove_unreferenced_asset_files(relative_paths)
+
+    def _cleanup_stale_temporary_sources(self, *, max_age_days: int = 7) -> None:
+        """Expire inactive source-image drafts after the documented retry window."""
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        relative_paths: set[str] = set()
+        with self.session() as session:
+            intake_sessions = session.scalars(
+                select(IntakeSession).where(
+                    IntakeSession.status.in_({"draft", "review", "failed", "cancelled"}),
+                    IntakeSession.updated_at < cutoff,
+                )
+            ).all()
+            for intake in intake_sessions:
+                assets = session.scalars(
+                    select(IntakeAsset).where(IntakeAsset.session_id == intake.id)
+                ).all()
+                for asset in assets:
+                    if asset.relative_path:
+                        relative_paths.add(asset.relative_path)
+                    asset.role = "retired"
+                    asset.original_name = ""
+                    asset.sha256 = ""
+                    asset.relative_path = ""
+                    asset.mime_type = None
+                    asset.size_bytes = None
+                    asset.width = None
+                    asset.height = None
+                intake.status = "cancelled"
+                intake.completed_at = intake.completed_at or utcnow()
+                session.add(
+                    AuditLog(
+                        id=new_id("audit"),
+                        action="stale_intake_sources_expired",
+                        entity_type="intake_session",
+                        entity_id=intake.id,
+                        detail_json=json.dumps(
+                            {"max_age_days": max_age_days, "source_count": len(assets)},
+                            ensure_ascii=False,
+                        ),
+                        actor=self.runtime.identity.user_id,
+                    )
+                )
+
+            note_sessions = session.scalars(
+                select(NoteIntakeSession).where(
+                    NoteIntakeSession.status.in_({"draft", "review", "failed", "cancelled"}),
+                    NoteIntakeSession.updated_at < cutoff,
+                )
+            ).all()
+            for intake in note_sessions:
+                assets = session.scalars(
+                    select(NoteIntakeAsset).where(
+                        NoteIntakeAsset.session_id == intake.id
+                    )
+                ).all()
+                for asset in assets:
+                    if asset.relative_path:
+                        relative_paths.add(asset.relative_path)
+                    asset.role = "retired"
+                    asset.original_name = ""
+                    asset.sha256 = ""
+                    asset.relative_path = ""
+                    asset.mime_type = None
+                    asset.size_bytes = None
+                    asset.width = None
+                    asset.height = None
+                intake.status = "cancelled"
+                intake.completed_at = intake.completed_at or utcnow()
+                session.add(
+                    AuditLog(
+                        id=new_id("audit"),
+                        action="stale_note_sources_expired",
+                        entity_type="note_intake_session",
+                        entity_id=intake.id,
+                        detail_json=json.dumps(
+                            {"max_age_days": max_age_days, "source_count": len(assets)},
+                            ensure_ascii=False,
+                        ),
+                        actor=self.runtime.identity.user_id,
+                    )
+                )
+            if intake_sessions or note_sessions:
+                session.commit()
+        if relative_paths:
+            self._remove_unreferenced_asset_files(relative_paths)
 
     def session(self) -> Session:
         return self.runtime.session_factory()

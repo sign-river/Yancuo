@@ -3271,51 +3271,33 @@ class MainWindow(QMainWindow):
         )
         if not files:
             return
-        try:
-            result = self.services.import_images([Path(f) for f in files])
-            tip = result.get("duplicate_tip") or ""
-            self._show_operation_result(
-                "图片导入完成",
-                f"新建 {len(result['created'])} 道题，跳过重复 {len(result['skipped'])} 个。",
-                details=tip,
-            )
-            self.refresh_nav()
-            for problem_id in result["created"]:
-                self._refresh_problem_item(problem_id, update_summary=False)
-            self._update_status()
-            self._refresh_focus_pages()
-        except DomainError as exc:
-            self._show_operation_result(
-                "图片导入失败",
-                "所选图片未能完成导入。",
-                details=str(exc),
-                retry=self._import_images,
-                is_error=True,
-            )
+        self._show_ai_intake()
+        added = self.intake_page.add_ai_files([Path(value) for value in files])
+        self._show_status_toast(
+            f"已加入 {added} 张临时识别图片；审核入库后只保留必要题图"
+        )
 
     def _import_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
         if not folder:
             return
-        try:
-            result = self.services.import_folder(Path(folder))
-            self._show_operation_result(
-                "文件夹导入完成",
-                f"新建 {len(result['created'])} 道题，跳过重复 {len(result['skipped'])} 个。",
-            )
-            self.refresh_nav()
-            for problem_id in result["created"]:
-                self._refresh_problem_item(problem_id, update_summary=False)
-            self._update_status()
-            self._refresh_focus_pages()
-        except DomainError as exc:
-            self._show_operation_result(
-                "文件夹导入失败",
-                "所选文件夹未能完成导入。",
-                details=str(exc),
-                retry=self._import_folder,
-                is_error=True,
-            )
+        extensions = {".png", ".jpg", ".jpeg", ".webp"}
+        paths = sorted(
+            (
+                path
+                for path in Path(folder).rglob("*")
+                if path.is_file() and path.suffix.lower() in extensions
+            ),
+            key=lambda path: str(path).casefold(),
+        )
+        if not paths:
+            self._show_status_toast("所选文件夹中没有支持的图片")
+            return
+        self._show_ai_intake()
+        added = self.intake_page.add_ai_files(paths)
+        self._show_status_toast(
+            f"已加入 {added} 张临时识别图片；审核入库后只保留必要题图"
+        )
 
     def _export_word(self) -> None:
         ids = self._selected_ids()

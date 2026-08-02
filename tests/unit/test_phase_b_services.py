@@ -6,6 +6,7 @@ import json
 import sqlite3
 import zipfile
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -15,9 +16,17 @@ from sqlalchemy import select
 import yancuo_win.application.services as services_module
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.bootstrap import bootstrap_runtime
+from yancuo_win.application.intake_service import ProblemIntakeService
 from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.config.settings import default_toml_path
-from yancuo_win.data.models import AiJob, AiJobItem, Asset, ReviewItem
+from yancuo_win.data.models import (
+    AiJob,
+    AiJobItem,
+    Asset,
+    IntakeAsset,
+    IntakeSession,
+    ReviewItem,
+)
 from yancuo_win.domain.rules import DomainError
 
 
@@ -50,6 +59,43 @@ def test_problem_lifecycle_and_trash(services: AppServices) -> None:
     services.trash_problem(p.id)
     assert services.purge_trashed() == 1
     assert services.get_problem(p.id) is None
+
+
+def test_stale_failed_intake_sources_expire_after_seven_days(
+    services: AppServices, tmp_path: Path
+) -> None:
+    image = tmp_path / "stale-source.jpg"
+    image.write_bytes(b"\xff\xd8\xffstale-source")
+    intake = ProblemIntakeService(services.runtime)
+    draft = intake.start_ai([image])
+    with services.session() as session:
+        row = session.get(IntakeSession, draft.intake_session_id)
+        assert row is not None
+        row.status = "failed"
+        row.updated_at = datetime.now(timezone.utc) - timedelta(days=8)
+        asset = session.scalar(
+            select(IntakeAsset).where(
+                IntakeAsset.session_id == draft.intake_session_id
+            )
+        )
+        assert asset is not None
+        source_path = services.store.resolve(asset.relative_path)
+        session.commit()
+    assert source_path.is_file()
+
+    AppServices(services.runtime)
+
+    with services.session() as session:
+        row = session.get(IntakeSession, draft.intake_session_id)
+        asset = session.scalar(
+            select(IntakeAsset).where(
+                IntakeAsset.session_id == draft.intake_session_id
+            )
+        )
+        assert row is not None and row.status == "cancelled"
+        assert asset is not None and asset.role == "retired"
+        assert asset.relative_path == ""
+    assert not source_path.exists()
 
 
 def test_import_image_dedup_and_immutable(
