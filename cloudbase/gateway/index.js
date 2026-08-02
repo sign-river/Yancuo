@@ -131,6 +131,16 @@ async function lockSubjectQuota(client, subject) {
   await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [subject]);
 }
 
+async function requireWriteLock(client, repositoryId, payload) {
+  const deviceId = boundedName(payload.device_id, "设备 ID");
+  const locked = await client.query(
+    "update yancuo.write_locks set expires_at=now()+interval '15 minutes',updated_at=now() where repository_id=$1 and device_id=$2 and expires_at>now() returning device_id",
+    [repositoryId, deviceId],
+  );
+  if (!locked.rowCount) fail("主写入锁不存在或已经过期", 409);
+  return deviceId;
+}
+
 async function cleanupExpiredUploads(subject) {
   const expired = await pool.query(
     "select upload_id,file_id from yancuo.upload_sessions where subject_id=$1 and expires_at < now() and (claimed_at is null or claimed_at < now()-interval '1 hour')",
@@ -221,10 +231,13 @@ async function action(name, payload, identity, req) {
       if (Buffer.byteLength(JSON.stringify(payload.manifest), "utf8") > MAX_MANIFEST_BYTES) {
         fail("manifest 超过大小限制", 413);
       }
+      await client.query("begin");
+      await requireWriteLock(client, repo.repository_id, payload);
       await client.query(
         "insert into yancuo.manifests(repository_id,document) values($1,$2::jsonb) on conflict(repository_id) do update set document=excluded.document,updated_at=now()",
         [repo.repository_id, JSON.stringify(payload.manifest)],
       );
+      await client.query("commit");
       return { written: true };
     }
     if (name === "releases/list") {
@@ -247,6 +260,8 @@ async function action(name, payload, identity, req) {
       const tag = boundedName(payload.tag, "发布标签");
       const releaseName = boundedText(payload.name || tag, "发布名称", 512);
       const body = boundedText(payload.body, "发布说明", 1024 * 1024);
+      await client.query("begin");
+      await requireWriteLock(client, repo.repository_id, payload);
       const inserted = await client.query(
         "insert into yancuo.releases(repository_id,tag,name,body) values($1,$2,$3,$4) on conflict(repository_id,tag) do nothing returning tag,name,body,created_at",
         [repo.repository_id, tag, releaseName, body],
@@ -258,8 +273,10 @@ async function action(name, payload, identity, req) {
         );
         const row = existing.rows[0];
         if (!row || row.name !== releaseName || row.body !== body) fail("发布标签已被不同内容占用", 409);
+        await client.query("commit");
         return row;
       }
+      await client.query("commit");
       return inserted.rows[0];
     }
     if (name === "assets/upload-url") {
@@ -271,6 +288,7 @@ async function action(name, payload, identity, req) {
       if (!Number.isSafeInteger(size) || size < 0 || size > MAX_ASSET_BYTES) fail("资源大小无效", 413);
       await client.query("begin");
       await lockSubjectQuota(client, subject);
+      await requireWriteLock(client, repo.repository_id, payload);
       const release = await client.query(
         "select 1 from yancuo.releases where repository_id=$1 and tag=$2",
         [repo.repository_id, tag],
@@ -303,6 +321,7 @@ async function action(name, payload, identity, req) {
     if (name === "assets/commit") {
       const uploadId = String(payload.upload_id || "");
       await client.query("begin");
+      await requireWriteLock(client, repo.repository_id, payload);
       const claimed = await client.query(
         "delete from yancuo.upload_sessions where upload_id=$1 and subject_id=$2 and repository_id=$3 and uploaded_at is not null and expires_at>=now() returning *",
         [uploadId, subject, repo.repository_id],
@@ -352,6 +371,8 @@ async function action(name, payload, identity, req) {
     }
     if (name === "releases/delete") {
       const tag = boundedName(payload.tag, "发布标签");
+      await client.query("begin");
+      await requireWriteLock(client, repo.repository_id, payload);
       const files = await client.query(
         "select file_id from yancuo.release_assets where repository_id=$1 and release_tag=$2",
         [repo.repository_id, tag],
@@ -360,6 +381,7 @@ async function action(name, payload, identity, req) {
         "delete from yancuo.releases where repository_id=$1 and tag=$2",
         [repo.repository_id, tag],
       );
+      await client.query("commit");
       const fileList = files.rows.map((row) => row.file_id).filter(Boolean);
       if (fileList.length) await cloud.deleteFile({ fileList }).catch(() => undefined);
       return { deleted: true };

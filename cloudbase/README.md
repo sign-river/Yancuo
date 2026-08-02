@@ -70,6 +70,7 @@ Content-Type: application/json
 - 普通用户 Access Token/refresh token 只进系统凭据；CloudBase SecretId/SecretKey、数据库密码均不得写入 TOML、日志或 Git。
 - 邮箱注册、找回密码和验证码发送依赖邮件服务配置；没有配置前只允许管理员在控制台创建测试用户，不应开放公开注册入口。
 - `locks/acquire` 需采用 [`postgres/init.sql`](postgres/init.sql) 中的 `INSERT ... ON CONFLICT ... WHERE` 事务语义；不能用“先读再写”。
+- `manifest/write`、发布增删及附件签发/提交必须携带当前设备 ID；网关在同一数据库事务内校验并续期有效主写入租约，不能只依赖客户端自觉加锁。
 - 完整快照与 Operation 批次共享同一原子 manifest 和仓库锁；LocalFolder 仅保留为离线测试通道。
 - 资料库数量与存储预算在 PostgreSQL 事务内按用户加 advisory lock；所有网关实例共享同一配额串行化边界，有效上传会话在提交前也占用预算。
 - 登录成功后的请求频率由 PostgreSQL 单行 UPSERT 原子计数；函数横向扩容不会把单用户额度按实例倍增，也不在 Node 进程中永久保留用户键。

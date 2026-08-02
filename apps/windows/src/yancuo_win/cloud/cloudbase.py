@@ -32,6 +32,7 @@ class CloudBaseGatewayProvider(CloudProvider):
         self.environment_id = environment_id.strip()
         self.gateway_url = gateway_url.rstrip("/")
         self.credential_key = credential_key
+        self._held_locks: dict[tuple[str, str], str] = {}
 
     def _token(self) -> str:
         return get_access_token(self.environment_id, self.credential_key)
@@ -97,6 +98,12 @@ class CloudBaseGatewayProvider(CloudProvider):
     def _repo(owner: str, repo: str) -> dict[str, str]:
         return {"owner": owner, "repository": repo}
 
+    def _write_repo(self, owner: str, repo: str) -> dict[str, str]:
+        device_id = self._held_locks.get((owner, repo))
+        if not device_id:
+            raise DomainError("CloudBase 写入前必须先获取主写入锁")
+        return {**self._repo(owner, repo), "device_id": device_id}
+
     def authenticate(self) -> None:
         self._action("health")
 
@@ -121,7 +128,7 @@ class CloudBaseGatewayProvider(CloudProvider):
         return manifest if isinstance(manifest, dict) else None
 
     def write_sync_manifest(self, owner: str, repo: str, manifest: dict[str, Any]) -> None:
-        self._action("manifest/write", {**self._repo(owner, repo), "manifest": manifest})
+        self._action("manifest/write", {**self._write_repo(owner, repo), "manifest": manifest})
 
     def list_releases(self, owner: str, repo: str) -> list[RemoteRelease]:
         data = self._action("releases/list", self._repo(owner, repo))
@@ -140,14 +147,15 @@ class CloudBaseGatewayProvider(CloudProvider):
         ]
 
     def create_release(self, owner: str, repo: str, *, tag: str, name: str, body: str = "") -> RemoteRelease:
-        data = self._action("releases/create", {**self._repo(owner, repo), "tag": tag, "name": name, "body": body})
+        data = self._action("releases/create", {**self._write_repo(owner, repo), "tag": tag, "name": name, "body": body})
         return RemoteRelease(tag=tag, name=name, assets=[], raw=data)
 
     def upload_release_asset(self, owner: str, repo: str, *, tag: str, file_path: Path, asset_name: str) -> dict[str, Any]:
         size = file_path.stat().st_size
         if size < 0 or size > _MAX_ASSET_BYTES:
             raise DomainError("CloudBase 上传文件超过 512 MiB 上限")
-        data = self._action("assets/upload-url", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name, "size": size})
+        write_repo = self._write_repo(owner, repo)
+        data = self._action("assets/upload-url", {**write_repo, "tag": tag, "asset_name": asset_name, "size": size})
         url = str(data.get("url") or "")
         self._validate_storage_url(url)
         headers = data.get("headers") if isinstance(data.get("headers"), dict) else {}
@@ -164,7 +172,7 @@ class CloudBaseGatewayProvider(CloudProvider):
                 pass
         except (HTTPError, URLError) as exc:
             raise DomainError(f"CloudBase 存储上传失败：{exc}") from exc
-        return self._action("assets/commit", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name, "upload_id": data.get("upload_id")})
+        return self._action("assets/commit", {**write_repo, "tag": tag, "asset_name": asset_name, "upload_id": data.get("upload_id")})
 
     def download_release_asset(self, owner: str, repo: str, *, tag: str, asset_name: str, dest: Path) -> Path:
         data = self._action("assets/download-url", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name})
@@ -190,13 +198,17 @@ class CloudBaseGatewayProvider(CloudProvider):
         return dest
 
     def delete_release(self, owner: str, repo: str, *, tag: str) -> None:
-        self._action("releases/delete", {**self._repo(owner, repo), "tag": tag})
+        self._action("releases/delete", {**self._write_repo(owner, repo), "tag": tag})
 
     def acquire_lock(self, owner: str, repo: str, device_id: str) -> bool:
-        return bool(self._action("locks/acquire", {**self._repo(owner, repo), "device_id": device_id}).get("acquired"))
+        acquired = bool(self._action("locks/acquire", {**self._repo(owner, repo), "device_id": device_id}).get("acquired"))
+        if acquired:
+            self._held_locks[(owner, repo)] = device_id
+        return acquired
 
     def release_lock(self, owner: str, repo: str, device_id: str) -> None:
         self._action("locks/release", {**self._repo(owner, repo), "device_id": device_id})
+        self._held_locks.pop((owner, repo), None)
 
     def test_connection(self) -> dict[str, Any]:
         self.authenticate()

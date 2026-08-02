@@ -144,6 +144,7 @@ def test_cloudbase_upload_streams_file_body(monkeypatch, tmp_path) -> None:  # t
         gateway_url="https://gateway.example.test",
         credential_key="test-key",
     )
+    provider._held_locks[("owner", "repo")] = "dev-test"
     actions: list[str] = []
 
     def fake_action(action, _payload=None):  # type: ignore[no-untyped-def]
@@ -171,3 +172,28 @@ def test_cloudbase_upload_streams_file_body(monkeypatch, tmp_path) -> None:  # t
         "body": b"streamed-cloudbase-upload",
         "length": str(source.stat().st_size),
     }
+
+
+def test_cloudbase_mutations_require_and_forward_held_lock(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    provider = CloudBaseGatewayProvider(
+        environment_id="environment",
+        gateway_url="https://gateway.example.test",
+        credential_key="test-key",
+    )
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    def fake_action(action, payload=None):  # type: ignore[no-untyped-def]
+        seen.append((action, dict(payload or {})))
+        return {"acquired": True}
+
+    monkeypatch.setattr(provider, "_action", fake_action)
+    with pytest.raises(DomainError, match="主写入锁"):
+        provider.write_sync_manifest("owner", "repo", {"format": "test"})
+
+    assert provider.acquire_lock("owner", "repo", "dev-test") is True
+    provider.write_sync_manifest("owner", "repo", {"format": "test"})
+    assert seen[-1][1]["device_id"] == "dev-test"
+    provider.release_lock("owner", "repo", "dev-test")
+
+    with pytest.raises(DomainError, match="主写入锁"):
+        provider.create_release("owner", "repo", tag="v1", name="v1")

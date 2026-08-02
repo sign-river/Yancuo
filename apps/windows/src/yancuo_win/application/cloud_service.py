@@ -195,16 +195,22 @@ class CloudBackupService:
         canonical_profile_id = canonical_profile_id.strip()
         if source_profile_id == canonical_profile_id:
             return
-        index = self._profile_index()
-        profiles = index.setdefault("profiles", {})
-        if not isinstance(profiles, dict) or canonical_profile_id not in profiles:
-            raise DomainError("主资料不存在，不能创建资料别名")
-        aliases = index.setdefault("aliases", {})
-        if not isinstance(aliases, dict):
-            raise DomainError("云端资料别名记录无效")
-        aliases[source_profile_id] = canonical_profile_id
-        self._resolve_profile(index, source_profile_id)
-        self.provider.write_sync_manifest(self.owner, self.repo, index)
+        device_id = self.runtime.identity.device_id
+        if not self.provider.acquire_lock(self.owner, self.repo, device_id):
+            raise DomainError("无法获取主写入锁：另一台设备可能正在修改云端资料")
+        try:
+            index = self._profile_index()
+            profiles = index.setdefault("profiles", {})
+            if not isinstance(profiles, dict) or canonical_profile_id not in profiles:
+                raise DomainError("主资料不存在，不能创建资料别名")
+            aliases = index.setdefault("aliases", {})
+            if not isinstance(aliases, dict):
+                raise DomainError("云端资料别名记录无效")
+            aliases[source_profile_id] = canonical_profile_id
+            self._resolve_profile(index, source_profile_id)
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+        finally:
+            self.provider.release_lock(self.owner, self.repo, device_id)
 
     def upload_backup(self) -> dict[str, Any]:
         """手动云备份：上传完整包成功后才更新 latest。"""
