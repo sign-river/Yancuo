@@ -25,10 +25,11 @@ test("upload credentials are returned and consumed only through a request header
 });
 
 test("failed uploads release their claim for a safe retry", () => {
-  assert.match(
-    gateway,
-    /catch \(error\)[\s\S]{0,300}set claimed_at=null[\s\S]{0,200}throw error/i,
-  );
+  const upload = gateway.slice(gateway.indexOf("async function upload"));
+  const catchAt = upload.indexOf("catch (error)");
+  const releaseAt = upload.indexOf("set claimed_at=null", catchAt);
+  const throwAt = upload.indexOf("throw error", releaseAt);
+  assert.ok(catchAt >= 0 && catchAt < releaseAt && releaseAt < throwAt);
   assert.match(
     gateway,
     /uploaded_at=now\(\),claimed_at=null/i,
@@ -49,6 +50,15 @@ test("upload completion requires a file ID and one persisted session row", () =>
   assert.match(upload, /if \(!stored\?\.fileID\)/);
   assert.match(upload, /const completed = await pool\.query/);
   assert.match(upload, /completed\.rowCount !== 1/);
+});
+
+test("a completed object retries durable session completion before releasing its claim", () => {
+  const upload = gateway.slice(gateway.indexOf("async function upload"));
+  const recoveryAt = upload.indexOf("uploaded_at=coalesce(uploaded_at,now())");
+  const releaseAt = upload.indexOf("set claimed_at=null where upload_id=$1 and uploaded_at is null");
+  assert.ok(recoveryAt >= 0 && recoveryAt < releaseAt);
+  assert.match(upload.slice(recoveryAt, releaseAt), /recovered\?\.rowCount === 1/);
+  assert.match(upload.slice(recoveryAt, releaseAt), /uploaded: true/);
 });
 
 test("expired rows remain retryable when object deletion fails", () => {

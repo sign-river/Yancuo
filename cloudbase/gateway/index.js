@@ -610,7 +610,10 @@ async function upload(req, res, url) {
     stored = await cloud.uploadFile({ cloudPath: row.storage_path, fileContent: counter });
     if (!stored?.fileID) fail("云存储未返回文件标识", 502);
     if (actual !== Number(row.expected_size)) {
-      if (stored.fileID) await cloud.deleteFile({ fileList: [stored.fileID] });
+      if (stored.fileID) {
+        await cloud.deleteFile({ fileList: [stored.fileID] });
+        stored = undefined;
+      }
       fail("上传内容大小与声明不一致", 409);
     }
     const completed = await pool.query(
@@ -619,6 +622,16 @@ async function upload(req, res, url) {
     );
     if (completed.rowCount !== 1) fail("上传会话已过期或被回收", 409);
   } catch (error) {
+    if (stored?.fileID && actual === Number(row.expected_size)) {
+      const recovered = await pool.query(
+        "update yancuo.upload_sessions set file_id=$2,actual_size=$3,uploaded_at=coalesce(uploaded_at,now()),claimed_at=null where upload_id=$1 returning upload_id",
+        [uploadId, stored.fileID, actual],
+      ).catch(() => null);
+      if (recovered?.rowCount === 1) {
+        response(res, 200, { ok: true, data: { uploaded: true } });
+        return;
+      }
+    }
     await pool.query(
       "update yancuo.upload_sessions set claimed_at=null where upload_id=$1 and uploaded_at is null",
       [uploadId],
