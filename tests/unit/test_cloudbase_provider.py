@@ -136,6 +136,63 @@ def test_cloudbase_download_cleans_oversized_partial_file(
     assert not destination.exists()
 
 
+def test_cloudbase_download_failure_preserves_existing_destination(
+    monkeypatch, tmp_path  # type: ignore[no-untyped-def]
+) -> None:
+    monkeypatch.setattr("yancuo_win.cloud.cloudbase._MAX_ASSET_BYTES", 4)
+    provider = CloudBaseGatewayProvider(
+        environment_id="environment",
+        gateway_url="https://gateway.example.test",
+        credential_key="test-key",
+    )
+    monkeypatch.setattr(
+        provider,
+        "_action",
+        lambda *_args, **_kwargs: {"url": "https://storage.example.test/object"},
+    )
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase.safe_urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(b"oversized"),
+    )
+    destination = tmp_path / "snapshot.ebpack"
+    destination.write_bytes(b"known-good")
+
+    with pytest.raises(DomainError, match="超过"):
+        provider.download_release_asset(
+            "owner", "repo", tag="backup", asset_name="snapshot.ebpack", dest=destination
+        )
+
+    assert destination.read_bytes() == b"known-good"
+    assert list(tmp_path.glob(".cloudbase-down-*.tmp")) == []
+
+
+def test_cloudbase_download_atomically_replaces_destination(
+    monkeypatch, tmp_path  # type: ignore[no-untyped-def]
+) -> None:
+    provider = CloudBaseGatewayProvider(
+        environment_id="environment",
+        gateway_url="https://gateway.example.test",
+        credential_key="test-key",
+    )
+    monkeypatch.setattr(
+        provider,
+        "_action",
+        lambda *_args, **_kwargs: {"url": "https://storage.example.test/object"},
+    )
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase.safe_urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(b"new-snapshot"),
+    )
+    destination = tmp_path / "snapshot.ebpack"
+    destination.write_bytes(b"old-snapshot")
+
+    assert provider.download_release_asset(
+        "owner", "repo", tag="backup", asset_name="snapshot.ebpack", dest=destination
+    ) == destination
+    assert destination.read_bytes() == b"new-snapshot"
+    assert list(tmp_path.glob(".cloudbase-down-*.tmp")) == []
+
+
 def test_cloudbase_upload_streams_file_body(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     source = tmp_path / "snapshot.ebpack"
     source.write_bytes(b"streamed-cloudbase-upload")

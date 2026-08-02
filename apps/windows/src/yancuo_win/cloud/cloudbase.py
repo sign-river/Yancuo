@@ -8,7 +8,9 @@ to its documented HTTPS contract and keeps the gateway token in keyring.
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -184,23 +186,36 @@ class CloudBaseGatewayProvider(CloudProvider):
         data = self._action("assets/download-url", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name})
         url = str(data.get("url") or "")
         self._validate_storage_url(url)
+        dest = Path(dest)
+        if dest.is_symlink():
+            raise DomainError("CloudBase 下载目标不能是符号链接")
         dest.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".cloudbase-down-", suffix=".tmp", dir=dest.parent
+        )
+        temporary = Path(temporary_name)
         try:
-            with safe_urlopen(url, timeout=300) as response, dest.open(
-                "wb"
+            with safe_urlopen(url, timeout=300) as response, os.fdopen(
+                descriptor, "wb"
             ) as output:
+                descriptor = -1
                 received = 0
                 while chunk := response.read(1024 * 1024):
                     received += len(chunk)
                     if received > _MAX_ASSET_BYTES:
                         raise DomainError("CloudBase 下载文件超过 512 MiB 上限")
                     output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if dest.is_symlink():
+                raise DomainError("CloudBase 下载目标不能是符号链接")
+            os.replace(temporary, dest)
         except (HTTPError, URLError) as exc:
-            dest.unlink(missing_ok=True)
             raise DomainError(f"CloudBase 存储下载失败：{exc}") from exc
-        except Exception:
-            dest.unlink(missing_ok=True)
-            raise
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
         return dest
 
     def delete_release(self, owner: str, repo: str, *, tag: str) -> None:
