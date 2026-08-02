@@ -21,6 +21,7 @@ from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.sqlite_snapshot import create_sqlite_snapshot
 from yancuo_win.data.models import Problem
 from yancuo_win.domain.identity import DATA_FORMAT_VERSION, SCHEMA_VERSION
+from yancuo_win.domain.identity import read_identity
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
@@ -144,10 +145,22 @@ class EbpackService:
             )
 
             identity_src = self.runtime.paths.identity_file
-            if identity_src.is_symlink():
-                raise DomainError("导出失败，身份文件不能是符号链接")
-            if identity_src.is_file():
-                shutil.copy2(identity_src, staging / "identity.json")
+            if identity_src.is_file() or identity_src.is_symlink():
+                try:
+                    export_identity = read_identity(identity_src)
+                except ValueError as exc:
+                    raise DomainError(f"导出失败，身份文件无效：{exc}") from exc
+                if (
+                    export_identity.database_id != self.runtime.identity.database_id
+                    or export_identity.user_id != self.runtime.identity.user_id
+                    or export_identity.device_id != self.runtime.identity.device_id
+                ):
+                    raise DomainError("导出失败，身份文件与当前资料库不匹配")
+                (staging / "identity.json").write_text(
+                    json.dumps(self.runtime.identity.to_dict(), ensure_ascii=False, indent=2)
+                    + "\n",
+                    encoding="utf-8",
+                )
 
             problem_count = self._problem_count()
             asset_count = len(object_entries)
@@ -425,6 +438,17 @@ class EbpackService:
                 raise DomainError("ebpack manifest asset_count 无效") from exc
             if manifest_asset_count != len(indexed_object_paths):
                 raise DomainError("ebpack manifest asset_count 与对象索引数量不一致")
+        identity_path = root / "identity.json"
+        if identity_path.is_file():
+            try:
+                package_identity = read_identity(identity_path)
+            except ValueError as exc:
+                raise DomainError(f"ebpack identity.json 无效：{exc}") from exc
+            if manifest is not None and (
+                package_identity.database_id != manifest.get("database_id")
+                or package_identity.profile_id != manifest.get("profile_id")
+            ):
+                raise DomainError("ebpack identity.json 与 manifest 身份不一致")
 
     def restore_ebpack(self, pack: Path, target_root: Path) -> dict[str, Any]:
         """校验后恢复到目标数据根；失败不留下半套数据。"""

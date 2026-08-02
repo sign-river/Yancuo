@@ -76,6 +76,7 @@ from yancuo_win.infrastructure.archive import (
     safe_extract_zip,
     validate_zip_members,
 )
+from yancuo_win.domain.identity import read_identity
 
 MAX_BACKUP_METADATA_BYTES = 1024 * 1024
 
@@ -2195,8 +2196,21 @@ class AppServices:
         try:
             snapshot = staging / "error_book.db"
             create_sqlite_snapshot(db_path, snapshot)
-            if identity.is_symlink():
-                raise DomainError("备份失败，身份文件不能是符号链接")
+            backup_identity_payload: str | None = None
+            if identity.is_file() or identity.is_symlink():
+                try:
+                    backup_identity = read_identity(identity)
+                except ValueError as exc:
+                    raise DomainError(f"备份失败，身份文件无效：{exc}") from exc
+                if (
+                    backup_identity.database_id != self.runtime.identity.database_id
+                    or backup_identity.user_id != self.runtime.identity.user_id
+                    or backup_identity.device_id != self.runtime.identity.device_id
+                ):
+                    raise DomainError("备份失败，身份文件与当前资料库不匹配")
+                backup_identity_payload = json.dumps(
+                    self.runtime.identity.to_dict(), ensure_ascii=False, indent=2
+                )
             descriptor, archive_temp_name = tempfile.mkstemp(
                 prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent
             )
@@ -2205,8 +2219,8 @@ class AppServices:
             with zipfile.ZipFile(archive_temp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
                 zf.write(snapshot, arcname="database/error_book.db")
-                if identity.is_file():
-                    zf.write(identity, arcname="identity.json")
+                if backup_identity_payload is not None:
+                    zf.writestr("identity.json", backup_identity_payload)
                 if asset_dir.is_dir():
                     try:
                         for file in iter_regular_files(asset_dir):
@@ -2290,6 +2304,17 @@ class AppServices:
             identity_src = tmp / "identity.json"
             if not db_src.is_file():
                 raise DomainError("备份缺少数据库文件")
+            if identity_src.is_file():
+                try:
+                    restored_identity = read_identity(identity_src)
+                except ValueError as exc:
+                    raise DomainError(f"备份身份文件无效：{exc}") from exc
+                manifest_database_id = manifest.get("database_id")
+                if (
+                    not isinstance(manifest_database_id, str)
+                    or restored_identity.database_id != manifest_database_id
+                ):
+                    raise DomainError("备份身份文件与 manifest 的资料库不匹配")
 
             shutil.copy2(db_src, final_staging / "error_book.db")
             if assets_src.is_dir():

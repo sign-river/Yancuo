@@ -19,6 +19,7 @@ from yancuo_win.domain.identity import (
     SCHEMA_VERSION,
     LocalIdentity,
     load_or_create_identity,
+    read_identity,
 )
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "compute_next_review_at",
     "interval_days_for_grade",
     "load_or_create_identity",
+    "read_identity",
     "validate_grade",
     "validate_priority",
     "validate_status",

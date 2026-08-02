@@ -105,6 +105,32 @@ def test_restore_rejects_oversized_manifest_and_cleans_unique_staging(
     assert list(target.glob(".restore-*-*")) == []
 
 
+def test_restore_rejects_identity_that_disagrees_with_manifest(
+    runtime, tmp_path: Path
+) -> None:
+    original = AppServices(runtime).create_backup(tmp_path / "identity.zip")
+    mismatched = tmp_path / "identity-mismatch.zip"
+    with (
+        zipfile.ZipFile(original, "r") as source,
+        zipfile.ZipFile(
+            mismatched, "w", compression=zipfile.ZIP_DEFLATED
+        ) as target_archive,
+    ):
+        for info in source.infolist():
+            payload = source.read(info.filename)
+            if info.filename == "identity.json":
+                identity = json.loads(payload)
+                identity["database_id"] = "db_other"
+                payload = json.dumps(identity).encode()
+            target_archive.writestr(info.filename, payload)
+    target = tmp_path / "identity-target"
+
+    with pytest.raises(DomainError, match="manifest.*不匹配"):
+        AppServices(runtime).restore_backup(mismatched, target)
+
+    assert list(target.glob(".restore-*-*")) == []
+
+
 def test_local_folder_lock_is_released_and_expired(tmp_path: Path) -> None:
     root = tmp_path / "cloud"
     first = LocalFolderProvider(root, lock_ttl_seconds=60)

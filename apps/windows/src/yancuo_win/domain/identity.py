@@ -42,9 +42,7 @@ def _write_identity(path: Path, identity: LocalIdentity) -> None:
         raise ValueError("identity.json 不能是符号链接")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(identity.to_dict(), ensure_ascii=False, indent=2) + "\n"
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=".identity-", suffix=".tmp", dir=path.parent
-    )
+    fd, temporary_name = tempfile.mkstemp(prefix=".identity-", suffix=".tmp", dir=path.parent)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
@@ -77,10 +75,7 @@ def _validated_identity(raw: object, display_name: str) -> LocalIdentity:
     snapshot_id = raw.get("last_snapshot_id") or ""
     if not isinstance(snapshot_id, str) or (
         snapshot_id
-        and (
-            not snapshot_id.startswith("snapshot_")
-            or _SAFE_ID_RE.fullmatch(snapshot_id) is None
-        )
+        and (not snapshot_id.startswith("snapshot_") or _SAFE_ID_RE.fullmatch(snapshot_id) is None)
     ):
         raise ValueError("identity.json 的 last_snapshot_id 无效")
     shown_name = raw.get("display_name", display_name)
@@ -100,24 +95,41 @@ def _validated_identity(raw: object, display_name: str) -> LocalIdentity:
     )
 
 
+def _read_identity(path: Path, display_name: str) -> tuple[dict[str, object], LocalIdentity]:
+    path = Path(path)
+    if path.is_symlink():
+        raise ValueError("identity.json 不能是符号链接")
+    if not path.is_file():
+        raise ValueError("identity.json 不存在")
+    try:
+        size = path.stat().st_size
+        if size <= 0 or size > MAX_IDENTITY_BYTES:
+            raise ValueError("identity.json 为空或过大")
+        with path.open("rb") as stream:
+            payload = stream.read(MAX_IDENTITY_BYTES + 1)
+        if len(payload) != size or len(payload) > MAX_IDENTITY_BYTES:
+            raise ValueError("identity.json 在读取期间发生变化或过大")
+        raw = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("identity.json 无法读取或解析") from exc
+    identity = _validated_identity(raw, display_name)
+    assert isinstance(raw, dict)
+    return raw, identity
+
+
+def read_identity(path: Path, display_name: str = "本地用户") -> LocalIdentity:
+    """只读验证已有身份文件，不执行兼容性升级。"""
+
+    return _read_identity(path, display_name)[1]
+
+
 def load_or_create_identity(path: Path, display_name: str = "本地用户") -> LocalIdentity:
     """首次启动创建本地身份；不依赖任何云账号。"""
     path = Path(path)
     if path.is_symlink():
         raise ValueError("identity.json 不能是符号链接")
     if path.is_file():
-        try:
-            size = path.stat().st_size
-            if size <= 0 or size > MAX_IDENTITY_BYTES:
-                raise ValueError("identity.json 为空或过大")
-            with path.open("rb") as stream:
-                payload = stream.read(MAX_IDENTITY_BYTES + 1)
-            if len(payload) != size or len(payload) > MAX_IDENTITY_BYTES:
-                raise ValueError("identity.json 在读取期间发生变化或过大")
-            raw = json.loads(payload.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("identity.json 无法读取或解析") from exc
-        identity = _validated_identity(raw, display_name)
+        raw, identity = _read_identity(path, display_name)
         if "profile_id" not in raw:
             _write_identity(path, identity)
         return identity
@@ -156,9 +168,7 @@ def bind_profile(path: Path, identity: LocalIdentity, profile_id: str) -> LocalI
     return bound
 
 
-def record_snapshot_head(
-    path: Path, identity: LocalIdentity, snapshot_id: str
-) -> LocalIdentity:
+def record_snapshot_head(path: Path, identity: LocalIdentity, snapshot_id: str) -> LocalIdentity:
     """Persist the cloud snapshot on which this device's local edits are based."""
 
     snapshot_id = snapshot_id.strip()

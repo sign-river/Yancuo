@@ -219,6 +219,21 @@ def test_local_backup_failure_preserves_existing_destination(
     assert list(services.runtime.paths.cache_dir.glob("backup-export-*")) == []
 
 
+def test_local_backup_rejects_identity_replaced_after_bootstrap(
+    services: AppServices, tmp_path: Path
+) -> None:
+    identity_path = services.runtime.paths.identity_file
+    payload = json.loads(identity_path.read_text(encoding="utf-8"))
+    payload["database_id"] = "db_replaced"
+    identity_path.write_text(json.dumps(payload), encoding="utf-8")
+    destination = tmp_path / "mismatched-identity.zip"
+
+    with pytest.raises(DomainError, match="不匹配"):
+        services.create_backup(destination)
+
+    assert not destination.exists()
+
+
 def test_word_export_preserves_structured_table_order(
     services: AppServices, tmp_path: Path
 ) -> None:
