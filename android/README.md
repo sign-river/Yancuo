@@ -21,6 +21,8 @@ Kotlin + Jetpack Compose 客户端，定位：**移动采集与复习**。
 - 运行配置选择 `:app`，点击 Run。
 - 单元测试：`./gradlew :app:testDebugUnitTest`（Windows：`gradlew.bat :app:testDebugUnitTest`）。
 
+2026-08-03 已验证 Windows 环境：Android Studio JBR 21、Gradle 8.2、AGP 8.2.2、Kotlin 1.9.22、SDK 34，`testDebugUnitTest` 为 `5 passed`。命令行出现 SDK XML v4 兼容警告但不影响构建；升级 Android command-line tools 后可消除该警告。
+
 ## 阶段 I 范围
 
 | 已实现（Android） | 未实现 / 留给 Windows 或后续 |

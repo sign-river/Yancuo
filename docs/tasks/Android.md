@@ -12,15 +12,14 @@
 
 ### AND-001 · 恢复 Android 单元测试基线
 
-- 状态：阻塞
-- 阻塞原因：当前环境尚未配置可用的 Android Studio JBR/SDK。
-- 实施：配置环境后运行 `:app:testDebugUnitTest`，记录 Gradle、JDK、SDK 和测试结果。
-- 验收：测试可重复执行；失败项区分代码问题与依赖解析问题。
+- 状态：已完成（2026-08-03）
+- 实施：使用 Android Studio 自带 JBR 21 与 `%LOCALAPPDATA%\Android\Sdk` 运行 `:app:testDebugUnitTest`；Gradle 8.2、AGP 8.2.2、Kotlin 1.9.22、compile/target SDK 34、min SDK 26。
+- 验收：首次依赖解析后 `5 tests`、0 failures、0 errors；第二次无守护进程复验 `BUILD SUCCESSFUL`，22 个任务中 21 个命中缓存，仍为 `5 passed`。SDK XML v4/旧命令行工具警告不影响构建，后续升级工具链时消除。
 
 ### AND-002 · Android 云下载与增量同步立项
 
 - 状态：阻塞
-- 依赖：AND-001 完成；同步协议和目标通道稳定。
+- 依赖：AND-001 已完成；等待 SYNC-103 的真实 CloudBase 网关、私有存储和双用户验收完成。
 - 范围：CloudBase 云快照下载以及允许通道的增量同步。
 - 边界：共享协议和测试向量可以复用，Windows Python 代码不能直接移植。
 
