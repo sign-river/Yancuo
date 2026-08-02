@@ -150,7 +150,10 @@ def test_cloudbase_upload_streams_file_body(monkeypatch, tmp_path) -> None:  # t
     def fake_action(action, _payload=None):  # type: ignore[no-untyped-def]
         actions.append(action)
         if action == "assets/upload-url":
-            return {"url": "https://storage.example.test/upload", "headers": {}}
+            return {
+                "url": "https://storage.example.test/upload",
+                "headers": {"X-Yancuo-Upload-Token": "opaque-upload-token"},
+            }
         return {"committed": True}
 
     captured = {}
@@ -158,6 +161,7 @@ def test_cloudbase_upload_streams_file_body(monkeypatch, tmp_path) -> None:  # t
     def fake_open(request, **_kwargs):  # type: ignore[no-untyped-def]
         captured["body"] = b"".join(request.data)
         captured["length"] = request.get_header("Content-length")
+        captured["token"] = request.get_header("X-yancuo-upload-token")
         return io.BytesIO(b"")
 
     monkeypatch.setattr(provider, "_action", fake_action)
@@ -171,6 +175,7 @@ def test_cloudbase_upload_streams_file_body(monkeypatch, tmp_path) -> None:  # t
     assert captured == {
         "body": b"streamed-cloudbase-upload",
         "length": str(source.stat().st_size),
+        "token": "opaque-upload-token",
     }
 
 

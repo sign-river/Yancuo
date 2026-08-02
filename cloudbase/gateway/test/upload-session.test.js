@@ -17,6 +17,13 @@ test("upload PUT atomically claims a single session", () => {
   assert.match(gateway, /上传已在进行或凭据已使用/);
 });
 
+test("upload credentials are returned and consumed only through a request header", () => {
+  assert.match(gateway, /"X-Yancuo-Upload-Token": uploadToken/);
+  assert.match(gateway, /req\.headers\["x-yancuo-upload-token"\]/);
+  assert.match(gateway, /url\.searchParams\.has\("token"\)/);
+  assert.doesNotMatch(gateway, /\?token=\$\{encodeURIComponent\(uploadToken\)\}/);
+});
+
 test("failed uploads release their claim for a safe retry", () => {
   assert.match(
     gateway,

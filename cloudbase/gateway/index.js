@@ -455,8 +455,11 @@ async function action(name, payload, identity, req) {
       );
       await client.query("commit");
       return {
-        url: `${PUBLIC_URL}/uploads/${uploadId}?token=${encodeURIComponent(uploadToken)}`,
-        headers: { "Content-Type": "application/octet-stream" },
+        url: `${PUBLIC_URL}/uploads/${uploadId}`,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "X-Yancuo-Upload-Token": uploadToken,
+        },
         upload_id: uploadId,
       };
     }
@@ -552,7 +555,8 @@ function cryptoRandomId() {
 
 async function upload(req, res, url) {
   const uploadId = url.pathname.split("/").pop();
-  const token = String(url.searchParams.get("token") || "");
+  if (url.searchParams.has("token")) fail("上传凭据不得放在 URL 中", 400);
+  const token = String(req.headers["x-yancuo-upload-token"] || "");
   const found = await pool.query(
     "select * from yancuo.upload_sessions where upload_id=$1 and expires_at>=now()",
     [uploadId],

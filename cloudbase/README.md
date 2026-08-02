@@ -64,7 +64,7 @@ Content-Type: application/json
 | `repositories/list/create/get` | 管理私有逻辑仓库；`create` 强制 `private=true`。 |
 | `manifest/read/write` | 读取/写入一个 JSON 索引。`write` 使用 PostgreSQL 单行事务更新。 |
 | `releases/list/create/delete` | 管理不可变快照元数据，`body` 为现有客户端写入的 JSON 字符串。 |
-| `assets/upload-url` | 返回一次性 `url`、可选 `headers`、`upload_id`；目标为 Cloud Storage 私有对象。 |
+| `assets/upload-url` | 返回一次性 `url`、含 `X-Yancuo-Upload-Token` 的 `headers`、`upload_id`；目标为 Cloud Storage 私有对象。凭据不得放入 URL。 |
 | `assets/commit` | 校验对象存在且大小匹配，再把附件记录与快照关联。 |
 | `assets/download-url` | 返回一次性私有下载地址。 |
 | `locks/acquire/release` | 对同一逻辑仓库执行原子主写入锁；`acquire` 返回 `acquired: true/false`。 |
