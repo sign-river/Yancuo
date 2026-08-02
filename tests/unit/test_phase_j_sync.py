@@ -338,6 +338,49 @@ def test_local_structured_figure_update_embeds_referenced_crop(runtime, tmp_path
     assert base64.b64decode(update["attachments"][0]["content_base64"]) == crop.read_bytes()
 
 
+def test_operation_attachment_budget_rejects_before_large_read(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = AppServices(runtime)
+    problem = services.create_problem(title="超限派生图")
+    crop = tmp_path / "large-crop.png"
+    crop.write_bytes(b"12345")
+    stored = services.store.store_copy(crop, role="derived_figure")
+    asset_id = new_id("asset")
+    with runtime.session_factory() as session:
+        session.add(
+            Asset(
+                id=asset_id,
+                problem_id=problem.id,
+                role="derived_figure",
+                sha256=stored.sha256,
+                relative_path=stored.relative_path,
+                mime_type="image/png",
+                size_bytes=stored.size_bytes,
+                is_immutable=True,
+            )
+        )
+        session.commit()
+    content_json = json.dumps(
+        [
+            {
+                "type": "figure",
+                "content": "超限局部题图",
+                "source_region": {"x": 0, "y": 0, "width": 1, "height": 1},
+                "derived_asset_id": asset_id,
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "yancuo_win.application.sync_service.MAX_OPERATION_ATTACHMENT_BYTES", 4
+    )
+
+    with pytest.raises(DomainError, match="32 MiB"):
+        SyncService(runtime)._content_block_attachments(
+            problem.id, {"question_content_json": content_json}
+        )
+
+
 def test_remote_create_materializes_unknown_problem(runtime, tmp_path: Path):
     cloud_root = tmp_path / "remote-create"
     provider = LocalFolderProvider(cloud_root)

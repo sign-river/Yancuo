@@ -40,6 +40,7 @@ from yancuo_win.review.changeset import snapshot_problem_fields
 MAX_REMOTE_OPERATION_BATCHES = 10_000
 MAX_REMOTE_OPERATION_BATCH_BYTES = 64 * 1024 * 1024
 MAX_REMOTE_OPERATIONS_PER_BATCH = 100_000
+MAX_OPERATION_ATTACHMENT_BYTES = 32 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -400,13 +401,20 @@ class SyncService:
                 if asset.id not in referenced_ids or asset.role != "derived_figure":
                     continue
                 path = self.store.resolve(asset.relative_path)
+                remaining = MAX_OPERATION_ATTACHMENT_BYTES - total_bytes
                 try:
-                    payload = path.read_bytes()
+                    size = path.stat().st_size
+                    if size <= 0 or size > remaining:
+                        raise DomainError(
+                            "单个 Operation 的派生题图总大小不能超过 32 MiB"
+                        )
+                    with path.open("rb") as stream:
+                        payload = stream.read(remaining + 1)
                 except OSError:
                     continue
+                if len(payload) != size or len(payload) > remaining:
+                    raise DomainError("派生题图在读取期间发生变化或超过大小上限")
                 total_bytes += len(payload)
-                if total_bytes > 32 * 1024 * 1024:
-                    raise DomainError("单个 Operation 的派生题图总大小不能超过 32 MiB")
                 if hashlib.sha256(payload).hexdigest() != asset.sha256:
                     raise DomainError(f"派生题图哈希不一致：{asset.id}")
                 result.append(
