@@ -8,11 +8,7 @@ import cn.yancuo.android.domain.EBPACK_FORMAT
 import cn.yancuo.android.domain.EBPACK_FORMAT_VERSION
 import cn.yancuo.android.domain.MAX_EBPACK_SCHEMA_VERSION
 import org.json.JSONObject
-import java.io.BufferedInputStream
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.util.zip.ZipInputStream
 
 class EbpackException(message: String) : Exception(message)
 
@@ -43,7 +39,7 @@ class EbpackImporter(
                 throw EbpackException("检测到上次恢复留下的备份目录，请先人工恢复或清理")
             }
             tmp.mkdirs()
-            unzip(packFile, tmp)
+            extractEbpackSafely(packFile, tmp)
             val manifest = validateAndChecksum(tmp)
             val dbSrc = File(tmp, "database/snapshot.sqlite")
             if (!dbSrc.isFile) throw EbpackException("缺少 database/snapshot.sqlite")
@@ -388,29 +384,4 @@ class EbpackImporter(
         }
     }
 
-    private fun unzip(zipFile: File, destDir: File) {
-        ZipInputStream(BufferedInputStream(FileInputStream(zipFile))).use { zis ->
-            var entry = zis.nextEntry
-            while (entry != null) {
-                val outFile = File(destDir, entry.name)
-                val canonicalDest = destDir.canonicalFile
-                val canonicalOut = outFile.canonicalFile
-                if (!canonicalOut.path.startsWith(canonicalDest.path + File.separator) &&
-                    canonicalOut != canonicalDest
-                ) {
-                    throw EbpackException("非法 zip 路径：${entry.name}")
-                }
-                if (entry.isDirectory) {
-                    outFile.mkdirs()
-                } else {
-                    outFile.parentFile?.mkdirs()
-                    FileOutputStream(outFile).use { fos ->
-                        zis.copyTo(fos)
-                    }
-                }
-                zis.closeEntry()
-                entry = zis.nextEntry
-            }
-        }
-    }
 }

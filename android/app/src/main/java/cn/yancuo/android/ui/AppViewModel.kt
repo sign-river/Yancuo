@@ -9,6 +9,9 @@ import androidx.lifecycle.viewModelScope
 import cn.yancuo.android.YancuoApp
 import cn.yancuo.android.data.ebpack.EbpackException
 import cn.yancuo.android.data.ebpack.EbpackImportResult
+import cn.yancuo.android.data.io.MAX_EBPACK_BYTES
+import cn.yancuo.android.data.io.MAX_IMPORT_IMAGE_BYTES
+import cn.yancuo.android.data.io.copyToFileLimited
 import cn.yancuo.android.data.repo.ProblemDetail
 import cn.yancuo.android.data.repo.ProblemSummary
 import cn.yancuo.android.data.repo.ReviewResult
@@ -22,7 +25,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
 
 data class HomeUiState(
     val tab: HomeTab = HomeTab.INBOX,
@@ -152,7 +154,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val dir = File(app.cacheDir, "imports").also { it.mkdirs() }
             val dest = File(dir, "${System.currentTimeMillis()}_$nameHint")
             app.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(dest).use { output -> input.copyTo(output) }
+                copyToFileLimited(input, dest, MAX_IMPORT_IMAGE_BYTES)
             } ?: return null
             dest
         } catch (_: Exception) {
@@ -201,7 +203,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val result: EbpackImportResult = withContext(Dispatchers.IO) {
                     val cache = File(app.paths.cacheDir, "import-${System.currentTimeMillis()}.ebpack")
                     app.contentResolver.openInputStream(uri)?.use { input ->
-                        FileOutputStream(cache).use { output -> input.copyTo(output) }
+                        copyToFileLimited(input, cache, MAX_EBPACK_BYTES)
                     } ?: throw EbpackException("无法读取所选文件")
                     try {
                         val r = app.ebpackImporter.importPack(cache)
