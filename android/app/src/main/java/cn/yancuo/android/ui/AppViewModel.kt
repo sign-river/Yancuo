@@ -60,6 +60,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
+    private val importGate = ExclusiveOperationGate()
 
     fun refreshHome() {
         viewModelScope.launch {
@@ -182,8 +183,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importEbpack(uri: Uri) {
+        if (!importGate.tryEnter()) {
+            _settings.update { it.copy(message = "已有备份正在导入，请等待完成") }
+            return
+        }
+        _busy.value = true
         viewModelScope.launch {
-            _busy.value = true
             try {
                 val result: EbpackImportResult = withContext(Dispatchers.IO) {
                     val cache = File(app.paths.cacheDir, "import-${System.currentTimeMillis()}.ebpack")
@@ -221,6 +226,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             } finally {
+                importGate.exit()
                 _busy.value = false
             }
         }

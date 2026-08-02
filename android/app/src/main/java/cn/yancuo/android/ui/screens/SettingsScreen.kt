@@ -1,5 +1,6 @@
 package cn.yancuo.android.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -43,9 +44,13 @@ fun SettingsScreen(
     onBack: () -> Unit,
 ) {
     val state by viewModel.settings.collectAsState()
+    val busy by viewModel.busy.collectAsState()
     var cloudBaseToken by remember { mutableStateOf("") }
     var showCloudBaseToken by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { viewModel.refreshSettings() }
+    BackHandler(enabled = busy) {
+        // 恢复替换期间保持当前页面，避免并发访问正在重开的数据库。
+    }
 
     val openEbpack = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -58,7 +63,7 @@ fun SettingsScreen(
             TopAppBar(
                 title = { Text("设置") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onBack, enabled = !busy) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
@@ -90,8 +95,9 @@ fun SettingsScreen(
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
             ) {
-                Text("选择 .ebpack 文件")
+                Text(if (busy) "正在导入，请稍候…" else "选择 .ebpack 文件")
             }
             Text(
                 "将校验 manifest（graduate-mistake-book-ebpack v1、未加密）与 checksums.sha256，然后全量替换本地库。",
