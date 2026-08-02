@@ -25,6 +25,8 @@
 | `user_id` | `usr_` + hex | 本地用户，不依赖云 |
 | `device_id` | `dev_win_` / `dev_android_` + hex | 设备 |
 | `database_id` | `db_` + hex | 本库实例 |
+| `profile_id` | `profile_` + hex | 可跨设备恢复/绑定的资料命名空间 |
+| `last_snapshot_id` | `snapshot_` + hex 或空 | 本设备最后确认的云端共同祖先 |
 | 实体 `id` | 前缀 + hex（如 `problem_`） | 全局唯一字符串主键 |
 
 本地身份文件示例（`identity.json`）：
@@ -34,6 +36,8 @@
   "user_id": "usr_…",
   "device_id": "dev_win_…",
   "database_id": "db_…",
+  "profile_id": "profile_…",
+  "last_snapshot_id": "",
   "display_name": "本地用户",
   "created_at": "2026-07-21T10:00:00+00:00"
 }

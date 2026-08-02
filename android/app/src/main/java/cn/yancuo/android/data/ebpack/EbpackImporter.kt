@@ -3,6 +3,7 @@ package cn.yancuo.android.data.ebpack
 import cn.yancuo.android.data.assets.ObjectStore
 import cn.yancuo.android.data.db.YancuoDb
 import cn.yancuo.android.data.identity.IdentityStore
+import cn.yancuo.android.data.identity.IdentityException
 import cn.yancuo.android.data.io.InputSizeLimitException
 import cn.yancuo.android.data.io.MAX_EBPACK_METADATA_BYTES
 import cn.yancuo.android.data.io.readFileLimited
@@ -47,6 +48,18 @@ class EbpackImporter(
             val dbSrc = File(tmp, "database/snapshot.sqlite")
             if (!dbSrc.isFile) throw EbpackException("缺少 database/snapshot.sqlite")
             validateSnapshot(dbSrc, manifest)
+            val importedIdentity = File(tmp, "identity.json")
+            if (importedIdentity.isFile) {
+                try {
+                    identityStore.prepareImportedForRestore(
+                        importedIdentity,
+                        manifest.optString("database_id").ifBlank { null },
+                        manifest.optString("profile_id").ifBlank { null },
+                    )
+                } catch (exc: IdentityException) {
+                    throw EbpackException("ebpack identity.json 无效：${exc.message}")
+                }
+            }
 
             stageExtractedEbpack(tmp, staging)
 
@@ -100,7 +113,7 @@ class EbpackImporter(
             return EbpackImportResult(
                 schemaVersion = schema,
                 problemCount = manifest.optInt("problem_count", 0),
-                note = "已全量替换本地库与资源（含 identity.json，若包内存在）",
+                note = "已全量替换本地库与资源（导入资料身份并保留本机 device_id）",
             )
         } finally {
             tmp.deleteRecursively()
