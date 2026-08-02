@@ -50,6 +50,7 @@ def test_create_then_upload_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         body: dict[str, Any] | None = None,
         expect_json: bool = True,
         raw_body: bytes | None = None,
+        raw_body_path: Path | None = None,
         content_type: str | None = None,
     ) -> Any:
         calls.append((method, url))
@@ -66,7 +67,9 @@ def test_create_then_upload_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         if method == "GET" and url.endswith("/releases/1001"):
             return {"id": 1001, "assets": []}
         if method == "POST" and "uploads.github.com" in url:
-            assert raw_body == b"pack-bytes"
+            assert raw_body is None
+            assert raw_body_path is not None
+            assert raw_body_path.read_bytes() == b"pack-bytes"
             assert content_type == "application/octet-stream"
             return {
                 "id": 55,
@@ -212,3 +215,33 @@ def test_github_download_enforces_actual_size_budget(
             "o", "r", tag="backup", asset_name="snapshot.ebpack", dest=destination
         )
     assert not destination.exists()
+
+
+def test_github_upload_request_streams_file_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider = GitHubProvider(token="ghp_unit_test_token")
+    source = tmp_path / "asset.bin"
+    source.write_bytes(b"streamed-upload")
+    captured: dict[str, Any] = {}
+
+    class UploadResponse(_Response):
+        def read(self, size: int = -1) -> bytes:
+            payload = b'{"id": 1, "name": "asset.bin"}'
+            return payload if size < 0 else payload[:size]
+
+    def fake_open(request, **_kwargs):  # noqa: ANN001
+        captured["body"] = b"".join(request.data)
+        captured["length"] = request.get_header("Content-length")
+        return UploadResponse()
+
+    monkeypatch.setattr("yancuo_win.cloud.github.safe_urlopen", fake_open)
+
+    provider._request_json(
+        "POST",
+        "https://uploads.github.com/repos/o/r/releases/1/assets?name=asset.bin",
+        raw_body_path=source,
+        content_type="application/octet-stream",
+    )
+
+    assert captured == {"body": b"streamed-upload", "length": str(source.stat().st_size)}

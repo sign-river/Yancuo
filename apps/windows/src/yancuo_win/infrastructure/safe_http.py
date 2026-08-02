@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -71,3 +72,11 @@ def safe_urlopen(
         SafeHTTPSRedirectHandler(allow_cross_origin=allow_cross_origin)
     )
     return opener.open(target, timeout=timeout)
+
+
+def iter_file_chunks(path: Path, *, chunk_size: int = 1024 * 1024):
+    """Yield a file body without allocating the complete upload in memory."""
+
+    with Path(path).open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            yield chunk

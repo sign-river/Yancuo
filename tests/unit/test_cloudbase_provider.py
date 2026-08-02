@@ -128,3 +128,40 @@ def test_cloudbase_download_cleans_oversized_partial_file(
             "owner", "repo", tag="backup", asset_name="snapshot.ebpack", dest=destination
         )
     assert not destination.exists()
+
+
+def test_cloudbase_upload_streams_file_body(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    source = tmp_path / "snapshot.ebpack"
+    source.write_bytes(b"streamed-cloudbase-upload")
+    provider = CloudBaseGatewayProvider(
+        environment_id="environment",
+        gateway_url="https://gateway.example.test",
+        credential_key="test-key",
+    )
+    actions: list[str] = []
+
+    def fake_action(action, _payload=None):  # type: ignore[no-untyped-def]
+        actions.append(action)
+        if action == "assets/upload-url":
+            return {"url": "https://storage.example.test/upload", "headers": {}}
+        return {"committed": True}
+
+    captured = {}
+
+    def fake_open(request, **_kwargs):  # type: ignore[no-untyped-def]
+        captured["body"] = b"".join(request.data)
+        captured["length"] = request.get_header("Content-length")
+        return io.BytesIO(b"")
+
+    monkeypatch.setattr(provider, "_action", fake_action)
+    monkeypatch.setattr("yancuo_win.cloud.cloudbase.safe_urlopen", fake_open)
+
+    provider.upload_release_asset(
+        "owner", "repo", tag="backup", file_path=source, asset_name="snapshot.ebpack"
+    )
+
+    assert actions == ["assets/upload-url", "assets/commit"]
+    assert captured == {
+        "body": b"streamed-cloudbase-upload",
+        "length": str(source.stat().st_size),
+    }

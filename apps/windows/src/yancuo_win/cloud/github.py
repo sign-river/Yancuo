@@ -26,7 +26,7 @@ from yancuo_win.cloud.base import (
 )
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import get_secret
-from yancuo_win.infrastructure.safe_http import safe_urlopen
+from yancuo_win.infrastructure.safe_http import iter_file_chunks, safe_urlopen
 
 logger = logging.getLogger("yancuo.cloud.github")
 
@@ -125,17 +125,30 @@ class GitHubProvider(CloudProvider):
         body: dict[str, Any] | None = None,
         expect_json: bool = True,
         raw_body: bytes | None = None,
+        raw_body_path: Path | None = None,
         content_type: str | None = None,
     ) -> Any:
         self._validate_authenticated_url(url)
+        if raw_body is not None and raw_body_path is not None:
+            raise ValueError("raw_body 与 raw_body_path 不能同时提供")
         data = raw_body
         headers = self._headers(content_type=content_type)
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
+        if raw_body_path is not None:
+            upload_path = Path(raw_body_path)
+            if not upload_path.is_file():
+                raise DomainError(f"待上传文件不存在：{upload_path}")
+            headers["Content-Length"] = str(upload_path.stat().st_size)
         raw = b""
         for attempt in range(1, _MAX_REQUEST_ATTEMPTS + 1):
-            req = Request(url, data=data, method=method, headers=headers)
+            request_data = (
+                iter_file_chunks(upload_path)
+                if raw_body_path is not None
+                else data
+            )
+            req = Request(url, data=request_data, method=method, headers=headers)
             try:
                 with safe_urlopen(req, timeout=300) as resp:
                     raw = resp.read(_MAX_JSON_RESPONSE_BYTES + 1)
@@ -321,6 +334,9 @@ class GitHubProvider(CloudProvider):
         path = Path(file_path)
         if not path.is_file():
             raise DomainError(f"待上传文件不存在：{path}")
+        limit = self._caps.max_asset_bytes
+        if limit is not None and path.stat().st_size > limit:
+            raise DomainError("GitHub 上传文件超过允许大小")
 
         upload_url = self._upload_urls.get(tag)
         release_id = self._release_ids.get(tag)
@@ -349,11 +365,10 @@ class GitHubProvider(CloudProvider):
 
         base = upload_url.split("{", 1)[0]
         url = f"{base}?name={quote(asset_name)}"
-        data = path.read_bytes()
         payload = self._request_json(
             "POST",
             url,
-            raw_body=data,
+            raw_body_path=path,
             content_type="application/octet-stream",
         )
         if not isinstance(payload, dict):

@@ -17,7 +17,7 @@ from urllib.request import Request
 from yancuo_win.cloud.base import CloudCapabilities, CloudProvider, CloudUser, RemoteRelease
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import get_secret
-from yancuo_win.infrastructure.safe_http import safe_urlopen
+from yancuo_win.infrastructure.safe_http import iter_file_chunks, safe_urlopen
 
 
 _MAX_GATEWAY_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -154,7 +154,14 @@ class CloudBaseGatewayProvider(CloudProvider):
         url = str(data.get("url") or "")
         self._validate_storage_url(url)
         headers = data.get("headers") if isinstance(data.get("headers"), dict) else {}
-        request = Request(url, data=file_path.read_bytes(), method="PUT", headers={str(k): str(v) for k, v in headers.items()})
+        upload_headers = {str(k): str(v) for k, v in headers.items()}
+        upload_headers["Content-Length"] = str(size)
+        request = Request(
+            url,
+            data=iter_file_chunks(file_path),
+            method="PUT",
+            headers=upload_headers,
+        )
         try:
             with safe_urlopen(request, timeout=300):
                 pass
