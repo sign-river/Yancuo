@@ -38,10 +38,10 @@ class EbpackImporter(
         val previous = File(paths.root, ".ebpack_previous")
         try {
             if (tmp.exists()) tmp.deleteRecursively()
-            if (staging.exists()) staging.deleteRecursively()
             if (previous.exists()) {
-                throw EbpackException("检测到上次恢复留下的备份目录，请先人工恢复或清理")
+                throw EbpackException("检测到未恢复的中断备份，请重启应用后重试")
             }
+            if (staging.exists()) staging.deleteRecursively()
             tmp.mkdirs()
             extractEbpackSafely(packFile, tmp)
             val manifest = validateAndChecksum(tmp)
@@ -64,47 +64,36 @@ class EbpackImporter(
             stageExtractedEbpack(tmp, staging)
 
             YancuoDb.resetInstance()
-            previous.mkdirs()
-            val movedOld = mutableListOf<Pair<File, File>>()
-            val installed = mutableListOf<File>()
             try {
                 val stagedIdentity = File(staging, "identity.json")
                 val destinations = mutableListOf(paths.database, paths.assetDir)
                 if (stagedIdentity.isFile) destinations += paths.identityFile
+                createEbpackRestorePlan(previous, destinations)
                 for (destination in destinations) {
                     if (destination.exists()) {
                         val backup = File(previous, destination.name)
                         moveWithinDataRoot(destination, backup)
-                        movedOld += (destination to backup)
                     }
                 }
 
                 val stagedDatabase = File(staging, "error_book.db")
-                installed += paths.database
                 moveWithinDataRoot(stagedDatabase, paths.database)
                 val stagedAssets = File(staging, "assets")
-                installed += paths.assetDir
                 moveWithinDataRoot(stagedAssets, paths.assetDir)
                 if (stagedIdentity.isFile) {
-                    installed += paths.identityFile
                     moveWithinDataRoot(stagedIdentity, paths.identityFile)
                 }
                 paths.ensureDirectories()
                 validateSnapshot(paths.database, manifest)
                 identityStore.loadOrCreate()
             } catch (exc: Exception) {
-                installed.asReversed().forEach { installedPath ->
-                    if (installedPath.isDirectory) {
-                        installedPath.deleteRecursively()
-                    } else {
-                        installedPath.delete()
-                    }
+                try {
+                    recoverInterruptedEbpack(paths)
+                } catch (recovery: Exception) {
+                    throw EbpackException(
+                        "ebpack 恢复失败且自动回滚未完成：${recovery.message}",
+                    )
                 }
-                movedOld.asReversed().forEach { (destination, backup) ->
-                    if (backup.exists()) moveWithinDataRoot(backup, destination)
-                }
-                paths.ensureDirectories()
-                previous.deleteRecursively()
                 throw EbpackException("ebpack 恢复失败，已回滚：${exc.message}")
             }
             previous.deleteRecursively()
@@ -117,7 +106,7 @@ class EbpackImporter(
             )
         } finally {
             tmp.deleteRecursively()
-            staging.deleteRecursively()
+            if (!previous.exists()) staging.deleteRecursively()
         }
     }
 

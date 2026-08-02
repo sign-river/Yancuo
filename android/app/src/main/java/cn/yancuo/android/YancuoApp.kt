@@ -4,6 +4,7 @@ import android.app.Application
 import cn.yancuo.android.data.credentials.TokenStore
 import cn.yancuo.android.data.db.YancuoDb
 import cn.yancuo.android.data.ebpack.EbpackImporter
+import cn.yancuo.android.data.ebpack.recoverInterruptedEbpack
 import cn.yancuo.android.data.identity.IdentityStore
 import cn.yancuo.android.data.paths.DataPaths
 import cn.yancuo.android.data.identity.LocalIdentity
@@ -27,6 +28,7 @@ class YancuoApp : Application() {
     override fun onCreate() {
         super.onCreate()
         paths = DataPaths.from(this)
+        recoverInterruptedEbpack(paths)
         identityStore = IdentityStore(paths.identityFile)
         val identity = identityStore.loadOrCreate()
         LocalIdentityHolder.current = identity

@@ -208,7 +208,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             } catch (e: Exception) {
-                _settings.update { it.copy(message = "导入失败：${e.message}") }
+                val reopenFailure = runCatching {
+                    withContext(Dispatchers.IO) { app.reopenAfterImport() }
+                }.exceptionOrNull()
+                _settings.update {
+                    it.copy(
+                        message = if (reopenFailure == null) {
+                            "导入失败：${e.message}"
+                        } else {
+                            "导入失败且本地库重开失败，请重启应用：${e.message}"
+                        },
+                    )
+                }
             } finally {
                 _busy.value = false
             }
