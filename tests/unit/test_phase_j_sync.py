@@ -294,6 +294,52 @@ def test_pull_orders_remote_operations_by_normalized_timestamp(
     assert services.get_problem(problem_id).solution_markdown == "最新解析"
 
 
+def test_pull_skips_invalid_problem_field_value_and_applies_valid_peer(
+    runtime, tmp_path: Path
+) -> None:
+    provider = LocalFolderProvider(tmp_path / "invalid-field-value")
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "invalid-field-value-repo"
+    runtime.settings.sync.create_snapshot_before_merge = False
+    services = AppServices(runtime)
+    problem_id = services.create_problem(title="字段值校验题").id
+    base = {
+        "format": "yancuo-operation",
+        "format_version": 1,
+        "device_id": "dev_remote",
+        "database_id": "db_remote",
+        "entity_type": "problem",
+        "entity_id": problem_id,
+        "operation": "update",
+        "base_revision": 1,
+        "new_revision": 2,
+        "base_fields": {},
+        "tombstone": False,
+    }
+    invalid = {
+        **base,
+        "operation_id": "op_invalid_priority_type",
+        "timestamp": "2026-07-22T00:00:00+00:00",
+        "changed_fields": {"priority": {"unexpected": True}},
+    }
+    valid = {
+        **base,
+        "operation_id": "op_valid_after_invalid",
+        "timestamp": "2026-07-22T00:01:00+00:00",
+        "changed_fields": {"solution_markdown": "有效解析"},
+    }
+    provider.append_operations(
+        "local", "invalid-field-value-repo", "dev_remote", [invalid, valid]
+    )
+
+    result = SyncService(runtime, provider).pull_and_merge()
+
+    assert result["applied"] == 1
+    assert services.get_problem(problem_id).solution_markdown == "有效解析"
+    with runtime.session_factory() as session:
+        assert session.get(SyncOperation, invalid["operation_id"]) is None
+
+
 def test_pull_same_field_creates_review(runtime, tmp_path: Path):
     cloud_root = tmp_path / "cloud2"
     provider = LocalFolderProvider(cloud_root)

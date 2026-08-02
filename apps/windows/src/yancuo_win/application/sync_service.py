@@ -157,10 +157,14 @@ def _coerce_sync_value(field: str, value: Any) -> Any:
     if field not in _SYNC_MUTABLE_FIELDS:
         raise DomainError(f"同步字段不可修改：{field}")
     if field == "status":
+        if value is None:
+            return "inbox"
         return validate_status(str(value))
     if field in {"next_review_at", "deleted_at"}:
         return _parse_datetime(value)
     if field == "priority":
+        if value is None:
+            return 3
         try:
             return validate_priority(int(value))
         except (TypeError, ValueError) as exc:
@@ -168,6 +172,8 @@ def _coerce_sync_value(field: str, value: Any) -> Any:
     if field in {"difficulty", "mastery", "review_count"}:
         if value is None and field in {"difficulty", "mastery"}:
             return None
+        if value is None and field == "review_count":
+            return 0
         try:
             number = int(value)
         except (TypeError, ValueError) as exc:
@@ -176,8 +182,12 @@ def _coerce_sync_value(field: str, value: Any) -> Any:
             raise DomainError("同步 review_count 不得为负数")
         return number
     if field in {"is_favorite", "needs_redo", "allow_print", "human_confirmed"}:
+        if value is None:
+            return field == "allow_print"
         return _coerce_bool(value)
     if field in _SYNC_REQUIRED_TEXT_FIELDS:
+        if value is None:
+            return "[]" if field == "question_content_json" else ""
         if not isinstance(value, str):
             raise DomainError(f"同步文本字段无效：{field}={value!r}")
         return value
@@ -186,6 +196,55 @@ def _coerce_sync_value(field: str, value: Any) -> Any:
             raise DomainError(f"同步文本字段无效：{field}={value!r}")
         return value
     return value
+
+
+def _normalize_problem_operation(op: dict[str, Any]) -> dict[str, Any]:
+    """在进入合并器前校验并规范化题目字段值。"""
+
+    if op.get("entity_type") != "problem":
+        return op
+    normalized = dict(op)
+    for label in ("changed_fields", "base_fields"):
+        if label not in op:
+            continue
+        fields: dict[str, Any] = {}
+        for field, value in op[label].items():
+            if field == "revision":
+                if isinstance(value, bool):
+                    raise DomainError("同步 revision 字段无效")
+                if value is None:
+                    fields[field] = 0
+                    continue
+                try:
+                    revision = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise DomainError("同步 revision 字段无效") from exc
+                if revision < 0:
+                    raise DomainError("同步 revision 字段不得为负数")
+                fields[field] = revision
+                continue
+            if field == "tags":
+                if value is None:
+                    fields[field] = []
+                    continue
+                if not isinstance(value, list) or len(value) > 20:
+                    raise DomainError("同步 tags 字段必须是最多 20 项的数组")
+                tags: set[str] = set()
+                for raw_name in value:
+                    if not isinstance(raw_name, str):
+                        raise DomainError("同步 tag 名称必须是字符串")
+                    name = raw_name.strip()
+                    if not name or len(name) > 128:
+                        raise DomainError("同步 tag 名称为空或过长")
+                    tags.add(name)
+                fields[field] = sorted(tags)
+                continue
+            if field in {"next_review_at", "deleted_at"}:
+                fields[field] = _iso_datetime(_parse_datetime(value))
+                continue
+            fields[field] = _coerce_sync_value(field, value)
+        normalized[label] = fields
+    return normalized
 
 
 def sync_snapshot(problem: Problem, tag_names: list[str] | None = None) -> dict[str, Any]:
@@ -490,7 +549,7 @@ class SyncService:
         )
         op["base_fields"] = base_fields
         op["attachments"] = self._content_block_attachments(problem_id, changed)
-        validate_operation(op)
+        op = _normalize_problem_operation(validate_operation(op))
         with self.runtime.session_factory() as s:
             existing = s.get(SyncOperation, op["operation_id"])
             if existing:
@@ -663,7 +722,9 @@ class SyncService:
                 for operation_id, payload_json in rows:
                     try:
                         payload = json.loads(payload_json)
-                        known[operation_id] = validate_operation(payload)
+                        known[operation_id] = _normalize_problem_operation(
+                            validate_operation(payload)
+                        )
                     except (json.JSONDecodeError, DomainError) as exc:
                         raise DomainError(
                             f"本地已应用 Operation 载荷损坏：{operation_id}"
@@ -690,7 +751,7 @@ class SyncService:
         incoming: dict[str, dict[str, Any]] = {}
         for raw in remote_ops:
             try:
-                op = validate_operation(raw)
+                op = _normalize_problem_operation(validate_operation(raw))
             except DomainError:
                 continue
             if op["entity_type"] != "problem":
