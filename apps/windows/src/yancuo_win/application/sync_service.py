@@ -1028,6 +1028,7 @@ class SyncService:
                     if previous is not None and previous != attachment:
                         raise DomainError(f"同步派生题图 ID 载荷冲突：{asset_id}")
                     attachments[asset_id] = attachment
+        declared_total = 0
         for asset_id in sorted(referenced_ids):
             attachment = attachments.get(asset_id)
             if attachment is None:
@@ -1035,7 +1036,18 @@ class SyncService:
                 if existing is not None and existing.problem_id == problem.id:
                     continue
                 raise DomainError(f"同步 Operation 缺少派生题图附件：{asset_id}")
+            declared_total += int(attachment.get("size_bytes") or 0)
+            if declared_total > MAX_OPERATION_ATTACHMENT_BYTES:
+                raise DomainError("实体 Operation 派生题图总大小不能超过 32 MiB")
+        decoded_total = 0
+        for asset_id in sorted(referenced_ids):
+            attachment = attachments.get(asset_id)
+            if attachment is None:
+                continue
             payload = base64.b64decode(str(attachment["content_base64"]), validate=True)
+            decoded_total += len(payload)
+            if decoded_total > MAX_OPERATION_ATTACHMENT_BYTES:
+                raise DomainError("实体 Operation 派生题图实际总大小超过 32 MiB")
             expected = str(attachment["sha256"])
             if hashlib.sha256(payload).hexdigest() != expected:
                 raise DomainError(f"同步派生题图哈希不一致：{asset_id}")
