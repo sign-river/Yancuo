@@ -211,7 +211,7 @@ def test_ebpack_rejects_oversized_manifest_before_json_decode(
     pack = eb.export_ebpack(tmp_path / "metadata-budget.ebpack")
     monkeypatch.setattr(ebpack_module, "MAX_EBPACK_METADATA_BYTES", 4)
 
-    with pytest.raises(DomainError, match="manifest.json 过大"):
+    with pytest.raises(DomainError, match="manifest.json.*过大"):
         eb.verify_ebpack(pack)
 
 

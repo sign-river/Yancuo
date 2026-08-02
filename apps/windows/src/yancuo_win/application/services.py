@@ -72,9 +72,12 @@ from yancuo_win.domain.similarity import normalize_text, text_similarity
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
     iter_regular_files,
+    read_zip_member_limited,
     safe_extract_zip,
     validate_zip_members,
 )
+
+MAX_BACKUP_METADATA_BYTES = 1024 * 1024
 
 
 @dataclass
@@ -2230,12 +2233,11 @@ class AppServices:
         if not zip_path.is_file():
             raise DomainError("备份文件不存在")
         target_root.mkdir(parents=True, exist_ok=True)
-        tmp = target_root / ".restore_tmp"
-        final_staging = target_root / ".restore_final_staging"
-        previous = target_root / ".restore_previous"
-        for path in (tmp, final_staging, previous):
-            if path.exists():
-                shutil.rmtree(path)
+        tmp = Path(tempfile.mkdtemp(prefix=".restore-extract-", dir=target_root))
+        final_staging = Path(
+            tempfile.mkdtemp(prefix=".restore-final-", dir=target_root)
+        )
+        previous = Path(tempfile.mkdtemp(prefix=".restore-previous-", dir=target_root))
 
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
@@ -2247,8 +2249,18 @@ class AppServices:
                 if "manifest.json" not in names or "database/error_book.db" not in names:
                     raise DomainError("无效的备份包")
                 try:
-                    manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    manifest = json.loads(
+                        read_zip_member_limited(
+                            zf,
+                            "manifest.json",
+                            max_bytes=MAX_BACKUP_METADATA_BYTES,
+                        ).decode("utf-8")
+                    )
+                except (
+                    ArchiveSecurityError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                ) as exc:
                     raise DomainError("备份 manifest.json 无效") from exc
                 if (
                     not isinstance(manifest, dict)
@@ -2279,7 +2291,6 @@ class AppServices:
             if not db_src.is_file():
                 raise DomainError("备份缺少数据库文件")
 
-            final_staging.mkdir(parents=True)
             shutil.copy2(db_src, final_staging / "error_book.db")
             if assets_src.is_dir():
                 try:
@@ -2318,7 +2329,6 @@ class AppServices:
             destinations = [db_dest, assets_dest]
             if identity_src.is_file():
                 destinations.append(identity_dest)
-            previous.mkdir(parents=True)
             moved_old: list[tuple[Path, Path]] = []
             moved_new: list[Path] = []
             try:

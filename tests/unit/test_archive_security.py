@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import yancuo_win.application.services as services_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.cloud.local_folder import LocalFolderProvider
@@ -89,6 +90,19 @@ def test_restore_rejects_invalid_database_without_replacing_target(
     assert (target / "error_book.db").read_bytes() == b"old database sentinel"
     assert (target / "assets" / "keep.txt").read_bytes() == b"old asset sentinel"
     assert not (target / "assets" / "new.txt").exists()
+
+
+def test_restore_rejects_oversized_manifest_and_cleans_unique_staging(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backup = AppServices(runtime).create_backup(tmp_path / "metadata.zip")
+    target = tmp_path / "restore-target"
+    monkeypatch.setattr(services_module, "MAX_BACKUP_METADATA_BYTES", 4)
+
+    with pytest.raises(DomainError, match="manifest.json 无效"):
+        AppServices(runtime).restore_backup(backup, target)
+
+    assert list(target.glob(".restore-*-*")) == []
 
 
 def test_local_folder_lock_is_released_and_expired(tmp_path: Path) -> None:
@@ -215,7 +229,11 @@ def test_local_folder_download_rejects_symlink_source(
 
     with pytest.raises(DomainError, match="symlink"):
         provider.download_release_asset(
-            "local", "repo", tag="backup", asset_name="linked.bin", dest=tmp_path / "out.bin"
+            "local",
+            "repo",
+            tag="backup",
+            asset_name="linked.bin",
+            dest=tmp_path / "out.bin",
         )
 
 
@@ -231,9 +249,7 @@ def test_local_folder_metadata_writes_are_atomic_and_bounded(
     assert list(root.rglob(".*.tmp")) == []
     monkeypatch.setattr(LocalFolderProvider, "MAX_METADATA_FILE_BYTES", 32)
     with pytest.raises(DomainError, match="size limit"):
-        provider.create_release(
-            "local", "repo", tag="oversized", name="x" * 128
-        )
+        provider.create_release("local", "repo", tag="oversized", name="x" * 128)
     assert not (root / "local" / "repo" / "releases" / "oversized").exists()
 
 
@@ -299,7 +315,8 @@ def test_local_folder_rejects_non_utf8_operation_logs(tmp_path: Path) -> None:
 
 
 def test_local_folder_bounds_and_atomically_writes_sync_metadata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "cloud"
     provider = LocalFolderProvider(root)

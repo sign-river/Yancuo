@@ -26,6 +26,7 @@ from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
     copy_tree_no_symlinks,
     iter_regular_files,
+    read_zip_member_limited,
     safe_extract_zip,
     validate_relative_checksum_path,
     validate_zip_members,
@@ -54,19 +55,9 @@ def _read_metadata_file(path: Path, label: str) -> bytes:
 
 def _read_zip_metadata(zf: zipfile.ZipFile, name: str) -> bytes:
     try:
-        info = zf.getinfo(name)
-    except KeyError as exc:
-        raise DomainError(f"ebpack 缺少条目：{name}") from exc
-    if info.file_size > MAX_EBPACK_METADATA_BYTES:
-        raise DomainError(f"ebpack {name} 过大")
-    try:
-        with zf.open(info, "r") as stream:
-            payload = stream.read(MAX_EBPACK_METADATA_BYTES + 1)
-    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-        raise DomainError(f"ebpack {name} 读取失败") from exc
-    if len(payload) != info.file_size or len(payload) > MAX_EBPACK_METADATA_BYTES:
-        raise DomainError(f"ebpack {name} 实际大小与声明不一致或超限")
-    return payload
+        return read_zip_member_limited(zf, name, max_bytes=MAX_EBPACK_METADATA_BYTES)
+    except ArchiveSecurityError as exc:
+        raise DomainError(f"ebpack {name} 读取被拒绝：{exc}") from exc
 
 
 def _sha256_file(path: Path) -> str:
