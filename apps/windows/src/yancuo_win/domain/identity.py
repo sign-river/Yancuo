@@ -13,7 +13,7 @@ from pathlib import Path
 
 # 与 protocol/data-format-v1.md、迁移目标版本一致
 DATA_FORMAT_VERSION = 1
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 MAX_IDENTITY_BYTES = 64 * 1024
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 

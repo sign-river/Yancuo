@@ -65,7 +65,10 @@ class ShareIncludeOptions:
     solution: bool = True
     tags: bool = True
     source: bool = True
-    original_images: bool = True
+    question_figures: bool = True
+    # Kept only so older callers deserialize cleanly. Source originals are
+    # never exported, regardless of this legacy flag.
+    original_images: bool = False
     error_analysis: bool = False
     user_answer: bool = False  # 即使 True 也被 HARD_DENY 挡住
     notes: bool = False
@@ -118,6 +121,7 @@ class GmshareService:
         includes.user_answer = False
         includes.notes = False
         includes.review_history = False
+        includes.original_images = False
 
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         dest = (
@@ -158,11 +162,12 @@ class GmshareService:
                                     f"分享题目数超过上限（{MAX_SHARE_PROBLEMS}）"
                                 )
                             rec = self._serialize_problem(problem, includes)
-                            # 复制原图
+                            # Only durable cropped question figures cross the
+                            # sharing boundary; upload/review originals never do.
                             asset_refs: list[dict[str, Any]] = []
-                            if includes.original_images:
+                            if includes.question_figures:
                                 for asset in problem.assets:
-                                    if asset.role != "original":
+                                    if asset.role != "derived_figure":
                                         continue
                                     src = self.store.resolve(asset.relative_path)
                                     if not src.is_file():
@@ -176,7 +181,8 @@ class GmshareService:
                                     if not out.is_file():
                                         shutil.copy2(src, out)
                                     ref = {
-                                        "role": "original",
+                                        "asset_id": asset.id,
+                                        "role": "derived_figure",
                                         "sha256": asset.sha256,
                                         "relative_path": rel
                                         if rel.startswith("objects/")
@@ -221,7 +227,8 @@ class GmshareService:
                     "solution": includes.solution,
                     "tags": includes.tags,
                     "source": includes.source,
-                    "original_images": includes.original_images,
+                    "question_figures": includes.question_figures,
+                    "original_images": False,
                     "error_analysis": includes.error_analysis,
                     "user_answer": False,
                     "notes": False,
@@ -254,6 +261,32 @@ class GmshareService:
             rec["title"] = problem.title
             rec["question_markdown"] = problem.question_markdown or ""
             rec["question_latex"] = problem.question_latex or ""
+            try:
+                raw_blocks = json.loads(problem.question_content_json or "[]")
+            except json.JSONDecodeError:
+                raw_blocks = []
+            blocks: list[dict[str, Any]] = []
+            if isinstance(raw_blocks, list):
+                for value in raw_blocks[:100]:
+                    if not isinstance(value, dict):
+                        continue
+                    block = {
+                        key: field
+                        for key, field in value.items()
+                        if key
+                        not in {
+                            "source_asset_id",
+                            "source_image_index",
+                            "source_region",
+                        }
+                    }
+                    if block.get("type") == "figure":
+                        if not includes.question_figures or not block.get(
+                            "derived_asset_id"
+                        ):
+                            continue
+                    blocks.append(block)
+            rec["question_content"] = blocks
         if includes.correct_answer:
             rec["correct_answer"] = problem.correct_answer or ""
         if includes.solution:
@@ -322,6 +355,7 @@ class GmshareService:
                         title=raw.get("title"),
                         question_markdown=str(raw.get("question_markdown") or ""),
                         question_latex=str(raw.get("question_latex") or ""),
+                        question_content_json="[]",
                         correct_answer=str(raw.get("correct_answer") or ""),
                         solution_markdown=str(raw.get("solution_markdown") or ""),
                         error_analysis=str(raw.get("error_analysis") or ""),
@@ -351,8 +385,9 @@ class GmshareService:
                             s.add(tag)
                             s.flush()
                         problem.tags.append(tag)
+                    imported_asset_ids: dict[str, str] = {}
                     for ref in raw.get("assets") or []:
-                        if not isinstance(ref, dict) or ref.get("role") != "original":
+                        if not isinstance(ref, dict) or ref.get("role") != "derived_figure":
                             continue
                         rel = str(ref.get("relative_path") or "").replace("\\", "/")
                         try:
@@ -361,12 +396,13 @@ class GmshareService:
                             raise DomainError(f"分享包资源路径非法：{rel}") from exc
                         if not src.is_file():
                             continue
-                        stored = self.store.store_copy(src, role="original")
+                        stored = self.store.store_copy(src, role="derived_figure")
+                        imported_id = new_id("asset")
                         s.add(
                             Asset(
-                                id=new_id("asset"),
+                                id=imported_id,
                                 problem_id=problem.id,
-                                role="original",
+                                role="derived_figure",
                                 sha256=stored.sha256,
                                 relative_path=stored.relative_path,
                                 mime_type=stored.mime_type,
@@ -374,6 +410,33 @@ class GmshareService:
                                 is_immutable=True,
                             )
                         )
+                        source_id = str(ref.get("asset_id") or "")
+                        if source_id:
+                            imported_asset_ids[source_id] = imported_id
+                    imported_blocks: list[dict[str, Any]] = []
+                    raw_blocks = raw.get("question_content") or []
+                    if isinstance(raw_blocks, list):
+                        for value in raw_blocks[:100]:
+                            if not isinstance(value, dict):
+                                continue
+                            block = dict(value)
+                            for key in (
+                                "source_asset_id",
+                                "source_image_index",
+                                "source_region",
+                            ):
+                                block.pop(key, None)
+                            if block.get("type") == "figure":
+                                mapped = imported_asset_ids.get(
+                                    str(block.get("derived_asset_id") or "")
+                                )
+                                if not mapped:
+                                    continue
+                                block["derived_asset_id"] = mapped
+                            imported_blocks.append(block)
+                    problem.question_content_json = json.dumps(
+                        imported_blocks, ensure_ascii=False
+                    )
                     s.add(
                         ProblemOrigin(
                             problem_id=problem.id,

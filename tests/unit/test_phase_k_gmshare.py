@@ -13,7 +13,8 @@ import yancuo_win.import_export.gmshare as gmshare_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
-from yancuo_win.data.models import SyncOperation
+from yancuo_win.data.ids import new_id
+from yancuo_win.data.models import Asset, SyncOperation
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.import_export.gmshare import HARD_DENY_FIELDS, GmshareService
 
@@ -71,6 +72,78 @@ def test_gmshare_excludes_private_fields(runtime, tmp_path: Path) -> None:
         assert "私人备注" not in body
         assert line["solution_markdown"] == "解析公开"
         assert "identity.json" not in zf.namelist()
+
+
+def test_gmshare_roundtrips_only_derived_question_figures(runtime, tmp_path: Path) -> None:
+    services = AppServices(runtime)
+    problem = services.create_problem(title="带题图")
+    source = tmp_path / "source.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\nsource")
+    crop = tmp_path / "crop.png"
+    crop.write_bytes(b"\x89PNG\r\n\x1a\ncrop")
+    original = services.store.store_copy(source, role="original")
+    derived = services.store.store_copy(crop, role="derived_figure")
+    derived_id = new_id("asset")
+    with services.session() as session:
+        session.add_all(
+            [
+                Asset(
+                    id=new_id("asset"),
+                    problem_id=problem.id,
+                    role="original",
+                    sha256=original.sha256,
+                    relative_path=original.relative_path,
+                    mime_type=original.mime_type,
+                    size_bytes=original.size_bytes,
+                    is_immutable=True,
+                ),
+                Asset(
+                    id=derived_id,
+                    problem_id=problem.id,
+                    role="derived_figure",
+                    sha256=derived.sha256,
+                    relative_path=derived.relative_path,
+                    mime_type=derived.mime_type,
+                    size_bytes=derived.size_bytes,
+                    is_immutable=True,
+                ),
+            ]
+        )
+        session.commit()
+    services.update_problem(
+        problem.id,
+        {
+            "question_content_json": json.dumps(
+                [
+                    {
+                        "type": "figure",
+                        "derived_asset_id": derived_id,
+                        "source_asset_id": "must-not-leak",
+                        "source_region": {"x": 0, "y": 0, "width": 1, "height": 1},
+                    }
+                ]
+            )
+        },
+    )
+
+    share = GmshareService(runtime)
+    pack = share.export_share([problem.id], dest=tmp_path / "figure.gmshare")
+    assert pack.asset_count == 1
+    with zipfile.ZipFile(pack.path, "r") as archive:
+        assert b"must-not-leak" not in archive.read("problems.jsonl")
+        assert source.read_bytes() not in [
+            archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("assets/objects/")
+        ]
+
+    imported = share.import_share(pack.path)
+    imported_problem = services.get_problem(imported.created_ids[0])
+    assert imported_problem is not None
+    assert [asset.role for asset in imported_problem.assets] == ["derived_figure"]
+    imported_blocks = json.loads(imported_problem.question_content_json)
+    assert imported_blocks[0]["derived_asset_id"] == imported_problem.assets[0].id
+    assert "source_region" not in imported_blocks[0]
 
 
 def test_gmshare_export_streams_problems_in_bounded_batches(

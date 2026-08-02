@@ -17,6 +17,8 @@ from yancuo_win.application.note_intake_service import (
 )
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
+from yancuo_win.data.ids import new_id
+from yancuo_win.data.models import Asset
 from yancuo_win.domain.identity import SCHEMA_VERSION
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.import_export.ebpack import EbpackService
@@ -38,6 +40,21 @@ def test_ebpack_roundtrip_consistent(
     img = tmp_path / "p.jpg"
     img.write_bytes(b"\xff\xd8\xff" + b"ebpack-bytes")
     pid = services.import_images([img])["created"][0]
+    stored_figure = services.store.store_copy(img, role="derived_figure")
+    with services.session() as session:
+        session.add(
+            Asset(
+                id=new_id("asset"),
+                problem_id=pid,
+                role="derived_figure",
+                sha256=stored_figure.sha256,
+                relative_path=stored_figure.relative_path,
+                mime_type=stored_figure.mime_type,
+                size_bytes=stored_figure.size_bytes,
+                is_immutable=True,
+            )
+        )
+        session.commit()
     services.update_problem(pid, {"question_markdown": "ebpack题目内容"})
     note_img = tmp_path / "note.jpg"
     note_img.write_bytes(b"\xff\xd8\xff" + b"ebpack-note-draft")
@@ -69,7 +86,8 @@ def test_ebpack_roundtrip_consistent(
     assert manifest["format"] == "graduate-mistake-book-ebpack"
     assert manifest["format_version"] == 1
     assert manifest["schema_version"] == SCHEMA_VERSION
-    assert manifest["asset_count"] == 2
+    # The formal crop is archived; both source originals stay out of backups.
+    assert manifest["asset_count"] == 1
     assert manifest["encrypted"] is False
     assert manifest["authoritative_payload"] == "database/snapshot.sqlite"
     portable_snapshot = tmp_path / "portable-snapshot.sqlite"
@@ -122,11 +140,13 @@ def test_ebpack_roundtrip_consistent(
     restored_draft = NoteIntakeService(restored_rt).get_session(draft.id)
     assert restored_draft is not None
     assert restored_draft.groups[0].blocks[0].content_markdown == "包内保留的概念块"
-    assert (
+    assert not (
         NoteIntakeService(restored_rt)
         .resolve_source_path(restored_draft.assets[0])
         .is_file()
     )
+    restored_figure = next(asset for asset in got.assets if asset.role == "derived_figure")
+    assert (restored_rt.paths.asset_dir / restored_figure.relative_path).is_file()
 
 
 def test_ebpack_export_failure_preserves_existing_destination(

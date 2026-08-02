@@ -25,6 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from yancuo_win.application.bootstrap import RuntimeContext
+from yancuo_win.application.formal_assets import formal_asset_relative_paths
 from yancuo_win.application.sqlite_snapshot import create_sqlite_snapshot
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.infrastructure.atomic_file import atomic_text_writer
@@ -38,6 +39,7 @@ from yancuo_win.data.models import (
     ChapterAlias,
     IntakeAsset,
     IntakeCandidateRecord,
+    MetaKV,
     NoteAsset,
     NoteIntakeAsset,
     NoteDocument,
@@ -187,6 +189,25 @@ class AppServices:
         self.runtime = runtime
         self.store = ObjectStore(runtime.paths.asset_objects_dir)
         self._review_date_cache: tuple[float, str] | None = None
+        self._finish_retired_original_cleanup()
+
+    def _finish_retired_original_cleanup(self) -> None:
+        """Delete objects retired by v23 only after their DB transaction committed."""
+
+        with self.session() as session:
+            marker = session.get(MetaKV, "retired_original_paths_v23")
+            if marker is None:
+                return
+            try:
+                values = json.loads(marker.value)
+            except json.JSONDecodeError:
+                values = []
+            relative_paths = {
+                value for value in values if isinstance(value, str) and value
+            }
+            session.delete(marker)
+            session.commit()
+        self._remove_unreferenced_asset_files(relative_paths)
 
     def session(self) -> Session:
         return self.runtime.session_factory()
@@ -2256,6 +2277,9 @@ class AppServices:
         asset_dir = self.runtime.paths.asset_dir
         identity = self.runtime.paths.identity_file
 
+        with self.session() as session:
+            formal_paths = formal_asset_relative_paths(session)
+
         # 释放长连接，再通过 SQLite API 合并已提交的 WAL 页。
         self.runtime.engine.dispose()
 
@@ -2291,8 +2315,10 @@ class AppServices:
             if asset_dir.is_dir():
                 try:
                     asset_files = [
-                        (file, f"assets/{file.relative_to(asset_dir).as_posix()}")
-                        for file in iter_regular_files(asset_dir)
+                        (file, f"assets/{relative_path}")
+                        for relative_path in sorted(formal_paths)
+                        for file in [asset_dir / Path(relative_path)]
+                        if file.is_file()
                     ]
                 except ArchiveSecurityError as exc:
                     raise DomainError(f"备份失败，资源目录不安全：{exc}") from exc

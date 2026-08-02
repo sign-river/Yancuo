@@ -7,7 +7,7 @@ theme = "system"
 auto_save_seconds = 30
 ai_completion_notification_seconds = 8
 confirm_before_delete = true
-schema_version = 22
+schema_version = 23
 
 [paths]
 # 相对路径相对于数据根目录解析；也可用绝对路径覆盖。

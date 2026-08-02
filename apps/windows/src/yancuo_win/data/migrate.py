@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from datetime import datetime, timezone
+import json
 import logging
 import os
 from pathlib import Path
@@ -11,12 +12,24 @@ import shutil
 import sqlite3
 from collections.abc import Callable
 
-from sqlalchemy import text
+from sqlalchemy import select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from yancuo_win.data.ids import new_id
-from yancuo_win.data.models import Base, MetaKV, Prompt
+from yancuo_win.data.models import (
+    AiJobItem,
+    Asset,
+    AuditLog,
+    Base,
+    MetaKV,
+    NoteAsset,
+    NoteBlock,
+    Problem,
+    ProblemSet,
+    ProblemSetAsset,
+    Prompt,
+)
 from yancuo_win.domain.identity import SCHEMA_VERSION
 
 logger = logging.getLogger("yancuo.data.migrate")
@@ -477,6 +490,130 @@ def _migrate_to_v22(engine: Engine) -> None:
     logger.info("migrated database to schema_version=22")
 
 
+def _migrate_to_v23(engine: Engine) -> None:
+    """Retire provably redundant formal originals and scrub source coordinates."""
+
+    retired_paths: set[str] = set()
+    with Session(engine) as session:
+        assets_by_id = {
+            asset.id: asset
+            for asset in session.scalars(select(Asset)).all()
+        }
+        for problem in session.scalars(select(Problem)).all():
+            try:
+                blocks = json.loads(problem.question_content_json or "[]")
+            except json.JSONDecodeError:
+                blocks = None
+            safe = isinstance(blocks, list)
+            normalized: list[object] = []
+            if safe:
+                for value in blocks:
+                    if not isinstance(value, dict):
+                        safe = False
+                        normalized.append(value)
+                        continue
+                    block = dict(value)
+                    if block.get("type") == "figure":
+                        derived_id = str(block.get("derived_asset_id") or "")
+                        derived = assets_by_id.get(derived_id)
+                        if derived is None or derived.role != "derived_figure":
+                            safe = False
+                        elif derived.problem_id != problem.id:
+                            safe = False
+                        else:
+                            block.pop("source_asset_id", None)
+                            block.pop("source_image_index", None)
+                            block.pop("source_region", None)
+                    normalized.append(block)
+                problem.question_content_json = json.dumps(
+                    normalized, ensure_ascii=False
+                )
+
+            originals = [
+                value
+                for value in assets_by_id.values()
+                if value.problem_id == problem.id and value.role == "original"
+            ]
+            if not originals:
+                continue
+            if safe:
+                original_ids = [value.id for value in originals]
+                session.execute(
+                    update(AiJobItem)
+                    .where(AiJobItem.asset_id.in_(original_ids))
+                    .values(asset_id=None)
+                )
+                for original in originals:
+                    if original.relative_path:
+                        retired_paths.add(original.relative_path)
+                    session.delete(original)
+            else:
+                session.add(
+                    AuditLog(
+                        id=new_id("audit"),
+                        action="legacy_original_cleanup_blocked",
+                        entity_type="problem",
+                        entity_id=problem.id,
+                        detail_json=json.dumps(
+                            {
+                                "reason": "figure_without_verified_derived_asset",
+                                "original_count": len(originals),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        actor="migration_v23",
+                    )
+                )
+
+        for note_asset in session.scalars(
+            select(NoteAsset).where(NoteAsset.role == "original")
+        ).all():
+            if note_asset.relative_path:
+                retired_paths.add(note_asset.relative_path)
+            session.delete(note_asset)
+        session.execute(update(NoteBlock).values(source_region_json="{}"))
+
+        for problem_set in session.scalars(select(ProblemSet)).all():
+            originals = session.scalars(
+                select(ProblemSetAsset).where(
+                    ProblemSetAsset.problem_set_id == problem_set.id
+                )
+            ).all()
+            if not originals:
+                continue
+            if problem_set.material_markdown.strip():
+                for original in originals:
+                    if original.relative_path:
+                        retired_paths.add(original.relative_path)
+                    session.delete(original)
+            else:
+                session.add(
+                    AuditLog(
+                        id=new_id("audit"),
+                        action="legacy_original_cleanup_blocked",
+                        entity_type="problem_set",
+                        entity_id=problem_set.id,
+                        detail_json=json.dumps(
+                            {"reason": "material_text_missing"}, ensure_ascii=False
+                        ),
+                        actor="migration_v23",
+                    )
+                )
+
+        session.merge(
+            MetaKV(
+                key="retired_original_paths_v23",
+                value=json.dumps(sorted(retired_paths), ensure_ascii=False),
+            )
+        )
+        set_schema_version(session, 23)
+        session.commit()
+    logger.info(
+        "migrated database to schema_version=23; retired %s original object references",
+        len(retired_paths),
+    )
+
+
 def ensure_search_index_schema(engine: Engine) -> None:
     """Create the platform-local FTS table and repair it from the projection."""
 
@@ -543,6 +680,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     20: _migrate_to_v20,
     21: _migrate_to_v21,
     22: _migrate_to_v22,
+    23: _migrate_to_v23,
 }
 
 

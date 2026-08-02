@@ -15,6 +15,8 @@ from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.cloud.local_folder import LocalFolderProvider
 from yancuo_win.config.settings import default_toml_path
+from yancuo_win.data.ids import new_id
+from yancuo_win.data.models import Asset
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
@@ -142,7 +144,22 @@ def test_restore_rejects_corrupted_asset_before_replacing_target(
     source_image = tmp_path / "source.png"
     source_image.write_bytes(b"\x89PNG\r\n\x1a\noriginal")
     services = AppServices(runtime)
-    services.import_images([source_image])
+    problem_id = services.import_images([source_image])["created"][0]
+    stored = services.store.store_copy(source_image, role="derived_figure")
+    with services.session() as session:
+        session.add(
+            Asset(
+                id=new_id("asset"),
+                problem_id=problem_id,
+                role="derived_figure",
+                sha256=stored.sha256,
+                relative_path=stored.relative_path,
+                mime_type=stored.mime_type,
+                size_bytes=stored.size_bytes,
+                is_immutable=True,
+            )
+        )
+        session.commit()
     original = services.create_backup(tmp_path / "asset.zip")
     corrupted = tmp_path / "asset-corrupted.zip"
     changed = False

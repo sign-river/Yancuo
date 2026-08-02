@@ -19,7 +19,10 @@ from yancuo_win.data.migrate import (
     verify_sqlite_database,
 )
 from yancuo_win.domain.identity import SCHEMA_VERSION
-from sqlalchemy import text
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
+
+from yancuo_win.data.models import Asset, AuditLog, MetaKV, Problem
 
 migrate_module = importlib.import_module("yancuo_win.data.migrate")
 
@@ -113,6 +116,72 @@ def test_migrate_v21_to_v22_adds_persistent_ai_job_events(tmp_path: Path) -> Non
         "started_at",
         "heartbeat_at",
     } <= columns
+
+
+def test_migrate_v23_retires_only_provably_safe_originals(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path / "original-policy-upgrade.db")
+    assert migrate(engine, target_version=22) == 22
+    with Session(engine) as session:
+        safe = Problem(
+            id="problem_safe",
+            question_content_json=(
+                '[{"type":"figure","derived_asset_id":"asset_crop",'
+                '"source_asset_id":"asset_original_safe",'
+                '"source_region":{"x":0,"y":0,"width":1,"height":1}}]'
+            ),
+        )
+        blocked = Problem(
+            id="problem_blocked",
+            question_content_json=(
+                '[{"type":"figure","source_asset_id":"asset_original_blocked",'
+                '"source_region":{"x":0,"y":0,"width":1,"height":1}}]'
+            ),
+        )
+        session.add_all([safe, blocked])
+        session.add_all(
+            [
+                Asset(
+                    id="asset_crop",
+                    problem_id=safe.id,
+                    role="derived_figure",
+                    sha256="c" * 64,
+                    relative_path="objects/cc/crop.png",
+                ),
+                Asset(
+                    id="asset_original_safe",
+                    problem_id=safe.id,
+                    role="original",
+                    sha256="a" * 64,
+                    relative_path="objects/aa/original.png",
+                ),
+                Asset(
+                    id="asset_original_blocked",
+                    problem_id=blocked.id,
+                    role="original",
+                    sha256="b" * 64,
+                    relative_path="objects/bb/original.png",
+                ),
+            ]
+        )
+        session.commit()
+
+    assert migrate(engine, target_version=23) == 23
+    with Session(engine) as session:
+        safe = session.get(Problem, "problem_safe")
+        assert safe is not None
+        assert "source_asset_id" not in safe.question_content_json
+        assert session.get(Asset, "asset_original_safe") is None
+        assert session.get(Asset, "asset_original_blocked") is not None
+        marker = session.get(MetaKV, "retired_original_paths_v23")
+        assert marker is not None
+        assert "objects/aa/original.png" in marker.value
+        blocked_log = session.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "legacy_original_cleanup_blocked",
+                AuditLog.entity_id == "problem_blocked",
+            )
+        )
+        assert blocked_log is not None
 
 
 def test_migrate_v5_to_v6_adds_dedicated_intake_tables(tmp_path: Path) -> None:

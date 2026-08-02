@@ -15,7 +15,7 @@
 
 ## 当前基线
 
-- Windows 数据库：`schema_version=22`
+- Windows 数据库：`schema_version=23`
 - 跨端字段语义：`data_format_version=1`
 - Windows 最近完整单元测试：`482 passed`
 - 路线图 A—K 已完成

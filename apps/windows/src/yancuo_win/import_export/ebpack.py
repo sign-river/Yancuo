@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 
 from yancuo_win import __version__
 from yancuo_win.application.bootstrap import RuntimeContext
+from yancuo_win.application.formal_assets import formal_asset_relative_paths
 from yancuo_win.application.sqlite_snapshot import create_sqlite_snapshot
 from yancuo_win.data.models import Problem
 from yancuo_win.domain.identity import DATA_FORMAT_VERSION, SCHEMA_VERSION
@@ -105,19 +106,17 @@ class EbpackService:
             assets_dst = staging / "assets"
             assets_dst.mkdir()
             objects_dst = assets_dst / "objects"
-            if self.runtime.paths.asset_dir.is_dir():
-                # 复制整个 asset_dir 内容（含 objects）
-                for item in self.runtime.paths.asset_dir.iterdir():
-                    target = assets_dst / item.name
-                    if item.is_symlink():
-                        raise DomainError(f"导出失败，资源目录包含符号链接：{item}")
-                    if item.is_dir():
-                        try:
-                            copy_tree_no_symlinks(item, target)
-                        except ArchiveSecurityError as exc:
-                            raise DomainError(f"导出失败，资源目录不安全：{exc}") from exc
-                    elif item.is_file():
-                        shutil.copy2(item, target)
+            with self.runtime.session_factory() as session:
+                formal_paths = formal_asset_relative_paths(session)
+            for relative_path in sorted(formal_paths):
+                source = self.runtime.paths.asset_dir / Path(relative_path)
+                if source.is_symlink():
+                    raise DomainError(f"导出失败，正式资源包含符号链接：{source}")
+                if not source.is_file():
+                    continue
+                target = assets_dst / Path(relative_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
             objects_dst.mkdir(parents=True, exist_ok=True)
 
             object_entries = []
