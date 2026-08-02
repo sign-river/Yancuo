@@ -364,10 +364,7 @@ def test_note_page_moves_a_note_to_the_recycle_bin(note_page: NotePage) -> None:
     assert note_page.status_filter.currentData() == "active"
 
 
-def test_note_page_opens_original_on_demand_with_source_regions(
-    note_page: NotePage,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_confirmed_note_has_no_original_view_entry(note_page: NotePage) -> None:
     source_path = note_page.notes.runtime.paths.root / "note-source.png"
     source = QPixmap(24, 24)
     source.fill(Qt.GlobalColor.white)
@@ -390,29 +387,10 @@ def test_note_page_opens_original_on_demand_with_source_regions(
         ],
     )
     note = note_page.note_ai.commit_draft(draft)
-    opened: dict = {}
-
-    class _ViewerStub:
-        def __init__(self, pixmap, parent=None, *, source_regions=()) -> None:
-            opened["valid"] = not pixmap.isNull()
-            opened["regions"] = list(source_regions)
-
-        def exec(self) -> None:
-            opened["executed"] = True
-
-    monkeypatch.setattr(note_page_module, "ImageViewerDialog", _ViewerStub)
     note_page.reload(select_note_id=note.id)
 
-    assert not note_page.original_button.isHidden()
-    assert note_page.original_button.isEnabled()
-    note_page._open_original()
-    assert opened == {
-        "valid": True,
-        "regions": [
-            {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}
-        ],
-        "executed": True,
-    }
+    assert note.assets == []
+    assert not hasattr(note_page, "original_button")
 
 
 def test_draft_preview_moves_a_block_between_groups(note_page: NotePage) -> None:

@@ -49,7 +49,6 @@ from yancuo_win.data.models import NoteBlock, NoteDocument, NoteIntakeSession
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.tasks.note_search_worker import NoteAiSearchWorker
-from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.icons import bind_icon
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
@@ -687,7 +686,6 @@ class NotePage(QWidget):
         self._notes: list[NoteDocument] = []
         self._note: NoteDocument | None = None
         self._block: NoteBlock | None = None
-        self._original_path: Path | None = None
         self._loading = False
         self._narrow_layout = False
         self._narrow_space_open = False
@@ -1076,9 +1074,6 @@ class NotePage(QWidget):
         actions = QHBoxLayout(action_bar)
         actions.setContentsMargins(10, 8, 10, 8)
         actions.setSpacing(8)
-        self.original_button = ghost_button("查看原图")
-        self.original_button.setToolTip("按需打开录入时保存的不可变原图")
-        self.original_button.clicked.connect(self._open_original)
         self.read_button = primary_button("完成编辑")
         self.read_button.clicked.connect(lambda: self._set_mode("read"))
         self.edit_button = primary_button("编辑笔记")
@@ -1089,7 +1084,6 @@ class NotePage(QWidget):
         more_menu.addAction("加入合集", self._edit_note_collections)
         more_menu.addAction("加入复习计划", self._request_review)
         self.more_button.setMenu(more_menu)
-        actions.addWidget(self.original_button)
         actions.addWidget(self.more_button)
         actions.addStretch(1)
         actions.addWidget(self.read_button)
@@ -1569,28 +1563,6 @@ class NotePage(QWidget):
         self.save_note_button.setEnabled(editable)
         self.trash_button.setVisible(editable)
         self.restore_button.setVisible(note.status == "trashed")
-        original_asset = next(
-            (asset for asset in note.assets if asset.role == "original"),
-            None,
-        )
-        self._original_path = (
-            self.note_ai.store.resolve(original_asset.relative_path)
-            if original_asset is not None
-            else None
-        )
-        has_original = original_asset is not None
-        original_available = bool(
-            self._original_path is not None and self._original_path.is_file()
-        )
-        self.original_button.setVisible(
-            has_original and self.mode_stack.currentIndex() == 1
-        )
-        self.original_button.setEnabled(original_available)
-        self.original_button.setToolTip(
-            "按需打开录入时保存的不可变原图"
-            if original_available
-            else "原图文件已丢失，请从备份恢复"
-        )
         self.block_list.clear()
         for index, block in enumerate(note.blocks, start=1):
             value = block.content_latex if block.block_type == "formula" else block.content_markdown
@@ -2047,9 +2019,6 @@ class NotePage(QWidget):
         self.read_button.setVisible(not reading)
         self.edit_button.setVisible(reading)
         self.more_button.setVisible(reading)
-        self.original_button.setVisible(
-            reading and self._original_path is not None
-        )
         if not reading:
             self._set_editor_section("content")
         if mode == "read":
@@ -2088,24 +2057,6 @@ class NotePage(QWidget):
             ),
             tag_names=(tag.name for tag in note.tags),
         )
-
-    def _open_original(self) -> None:
-        if self._original_path is None or not self._original_path.is_file():
-            self.status_message.emit("原图文件不存在，请从备份恢复")
-            return
-        pixmap = QPixmap(str(self._original_path))
-        if pixmap.isNull():
-            self.status_message.emit("原图格式无法读取")
-            return
-        regions = (
-            self._decode_source_region(block.source_region_json)
-            for block in (self._note.blocks if self._note is not None else ())
-        )
-        ImageViewerDialog(
-            pixmap,
-            self,
-            source_regions=(region for region in regions if region),
-        ).exec()
 
     @staticmethod
     def _decode_source_region(value: str) -> dict[str, float]:
