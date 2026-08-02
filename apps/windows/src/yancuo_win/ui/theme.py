@@ -210,19 +210,20 @@ def app_stylesheet(theme: str = "light") -> str:
     QMenu {{
         background: {t.surface};
         color: {t.text};
-        border: 1px solid {t.divider};
+        border: 1px solid {t.border_strong};
         border-radius: {m.radius_surface}px;
-        padding: 6px;
+        padding: 8px;
     }}
     QMenu::item {{
         min-width: 144px;
-        padding: 8px 24px 8px 12px;
-        margin: 1px 0;
+        min-height: 38px;
+        padding: 0 28px 0 16px;
+        margin: 2px 0;
         border-radius: {m.radius_control}px;
     }}
     QMenu::item:selected {{
-        background: {t.list_selected};
-        color: {t.primary};
+        background: {t.list_hover};
+        color: {t.text};
     }}
     QMenu::item:disabled {{
         color: {t.muted};
@@ -234,7 +235,7 @@ def app_stylesheet(theme: str = "light") -> str:
     QMenu::separator {{
         height: 1px;
         background: {t.border};
-        margin: 6px 8px;
+        margin: 8px 10px;
     }}
 
     QFrame#AppSidebar {{
@@ -832,7 +833,7 @@ def app_stylesheet(theme: str = "light") -> str:
         selection-background-color: {t.list_selected};
     }}
     QComboBox {{
-        padding-right: 32px;
+        padding: 7px 38px 7px 12px;
     }}
     QComboBox:hover {{
         background: {t.surface_subtle};
@@ -841,12 +842,19 @@ def app_stylesheet(theme: str = "light") -> str:
     QComboBox::drop-down {{
         subcontrol-origin: padding;
         subcontrol-position: top right;
-        width: 28px;
+        width: 34px;
         border: none;
         border-top-right-radius: {m.radius_control}px;
         border-bottom-right-radius: {m.radius_control}px;
     }}
     QComboBox::drop-down:hover {{
+        background: {t.list_hover};
+    }}
+    QComboBox:on {{
+        background: {t.surface_subtle};
+        border-color: {t.border_strong};
+    }}
+    QComboBox:on::drop-down {{
         background: {t.list_hover};
     }}
     QComboBox::down-arrow {{
@@ -864,24 +872,28 @@ def app_stylesheet(theme: str = "light") -> str:
     QComboBox QAbstractItemView {{
         background: {t.surface};
         color: {t.text};
-        border: 1px solid {t.divider};
+        border: 1px solid {t.border_strong};
         border-radius: {m.radius_surface}px;
         outline: none;
-        padding: 4px;
+        padding: 8px;
         selection-background-color: transparent;
     }}
     QComboBox QAbstractItemView::item {{
-        min-height: 30px;
-        padding: 0 10px;
-        margin: 1px 2px;
+        min-height: 38px;
+        padding: 0 14px;
+        margin: 2px 0;
         border-radius: {m.radius_control}px;
     }}
     QComboBox QAbstractItemView::item:hover {{
         background: {t.list_hover};
     }}
     QComboBox QAbstractItemView::item:selected {{
-        background: {t.list_selected};
-        color: {t.primary};
+        background: {t.list_hover};
+        color: {t.text};
+    }}
+    QComboBox QAbstractItemView::item:disabled {{
+        color: {t.muted};
+        background: transparent;
     }}
     QTreeWidget, QTableWidget, QTableView {{
         background: {t.card};

@@ -217,6 +217,23 @@ def test_soft_visual_tokens_and_library_surfaces_are_rendered() -> None:
     assert 'QFrame#StateNotice[state="permission"]' in rendered
 
 
+@pytest.mark.parametrize(("mode", "tokens"), [("light", LIGHT_THEME), ("dark", DARK_THEME)])
+def test_dropdown_surfaces_share_spacious_floating_panel_states(mode, tokens) -> None:
+    rendered = app_stylesheet(mode)
+
+    assert "QMenu::item" in rendered
+    assert "min-height: 38px" in rendered
+    assert "padding: 0 28px 0 16px" in rendered
+    assert "margin: 8px 10px" in rendered
+    assert "QMenu::item:selected" in rendered
+    assert "QComboBox:on" in rendered
+    assert "QComboBox:on::drop-down" in rendered
+    assert "QComboBox QAbstractItemView::item:disabled" in rendered
+    assert "padding: 0 14px" in rendered
+    assert tokens.border_strong in rendered
+    assert tokens.list_hover in rendered
+
+
 @pytest.mark.parametrize("mode", ["light", "dark"])
 def test_theme_mode_buttons_have_a_distinct_selected_state(mode: str) -> None:
     rendered = app_stylesheet(mode)
