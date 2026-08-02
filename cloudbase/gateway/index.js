@@ -22,6 +22,8 @@ const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_AUTH_RESPONSE_BYTES = 64 * 1024;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+const MAX_RELEASE_BODY_BYTES = 64 * 1024;
+const RELEASE_LIST_LIMIT = 100;
 const MAX_ASSET_BYTES = integerSetting(
   process.env.MAX_ASSET_BYTES,
   "MAX_ASSET_BYTES",
@@ -40,6 +42,20 @@ const USER_REPOSITORIES = integerSetting(
   process.env.USER_REPOSITORIES,
   "USER_REPOSITORIES",
   5,
+  1,
+  1000,
+);
+const MAX_RELEASES_PER_REPOSITORY = integerSetting(
+  process.env.MAX_RELEASES_PER_REPOSITORY,
+  "MAX_RELEASES_PER_REPOSITORY",
+  10_000,
+  1,
+  100_000,
+);
+const MAX_ASSETS_PER_RELEASE = integerSetting(
+  process.env.MAX_ASSETS_PER_RELEASE,
+  "MAX_ASSETS_PER_RELEASE",
+  16,
   1,
   1000,
 );
@@ -323,13 +339,16 @@ async function action(name, payload, identity, req) {
     if (name === "releases/list") {
       await cleanupPendingDeletions(subject);
       const releases = await client.query(
-        "select tag,name,body,created_at from yancuo.releases where repository_id=$1 order by created_at desc limit 500",
-        [repo.repository_id],
+        "select tag,name,case when octet_length(body)<=$2 then body else '' end as body,created_at from yancuo.releases where repository_id=$1 order by created_at desc limit $3",
+        [repo.repository_id, MAX_RELEASE_BODY_BYTES, RELEASE_LIST_LIMIT],
       );
-      const assets = await client.query(
-        "select release_tag,asset_name,byte_size from yancuo.release_assets where repository_id=$1",
-        [repo.repository_id],
-      );
+      const tags = releases.rows.map((row) => row.tag);
+      const assets = tags.length
+        ? await client.query(
+          "select release_tag,asset_name,byte_size from yancuo.release_assets where repository_id=$1 and release_tag=any($2::text[])",
+          [repo.repository_id, tags],
+        )
+        : { rows: [] };
       const byTag = new Map();
       for (const row of assets.rows) {
         if (!byTag.has(row.release_tag)) byTag.set(row.release_tag, []);
@@ -340,23 +359,30 @@ async function action(name, payload, identity, req) {
     if (name === "releases/create") {
       const tag = boundedName(payload.tag, "发布标签");
       const releaseName = boundedText(payload.name || tag, "发布名称", 512);
-      const body = boundedText(payload.body, "发布说明", 1024 * 1024);
+      const body = boundedText(payload.body, "发布说明", MAX_RELEASE_BODY_BYTES);
       await client.query("begin");
       await requireWriteLock(client, repo.repository_id, payload);
-      const inserted = await client.query(
-        "insert into yancuo.releases(repository_id,tag,name,body) values($1,$2,$3,$4) on conflict(repository_id,tag) do nothing returning tag,name,body,created_at",
-        [repo.repository_id, tag, releaseName, body],
+      const existing = await client.query(
+        "select tag,name,body,created_at from yancuo.releases where repository_id=$1 and tag=$2",
+        [repo.repository_id, tag],
       );
-      if (!inserted.rowCount) {
-        const existing = await client.query(
-          "select tag,name,body,created_at from yancuo.releases where repository_id=$1 and tag=$2",
-          [repo.repository_id, tag],
-        );
+      if (existing.rowCount) {
         const row = existing.rows[0];
-        if (!row || row.name !== releaseName || row.body !== body) fail("发布标签已被不同内容占用", 409);
+        if (row.name !== releaseName || row.body !== body) fail("发布标签已被不同内容占用", 409);
         await client.query("commit");
         return row;
       }
+      const releaseCount = await client.query(
+        "select count(*)::int as value from yancuo.releases where repository_id=$1",
+        [repo.repository_id],
+      );
+      if (releaseCount.rows[0].value >= MAX_RELEASES_PER_REPOSITORY) {
+        fail("资料库发布数量已达到上限", 409);
+      }
+      const inserted = await client.query(
+        "insert into yancuo.releases(repository_id,tag,name,body) values($1,$2,$3,$4) returning tag,name,body,created_at",
+        [repo.repository_id, tag, releaseName, body],
+      );
       await client.query("commit");
       return inserted.rows[0];
     }
@@ -375,6 +401,13 @@ async function action(name, payload, identity, req) {
         [repo.repository_id, tag],
       );
       if (!release.rowCount) fail("发布不存在", 404);
+      const assetCount = await client.query(
+        "select ((select count(*) from yancuo.release_assets where repository_id=$1 and release_tag=$2) + (select count(*) from yancuo.upload_sessions where repository_id=$1 and release_tag=$2 and expires_at>=now()))::int as value",
+        [repo.repository_id, tag],
+      );
+      if (assetCount.rows[0].value >= MAX_ASSETS_PER_RELEASE) {
+        fail("发布附件数量已达到上限", 409);
+      }
       const existingAsset = await client.query(
         "select 1 from yancuo.release_assets where repository_id=$1 and release_tag=$2 and asset_name=$3",
         [repo.repository_id, tag, assetName],

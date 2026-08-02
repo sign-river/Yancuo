@@ -24,6 +24,8 @@
 | `PG_SSL` | 否 | 默认为 TLS；仅本地开发可设为 `disable`。 |
 | `USER_STORAGE_BYTES` | 否 | 单用户已提交对象与有效上传预留的合计预算，默认 512 MiB。 |
 | `USER_REPOSITORIES` | 否 | 单用户逻辑资料库数量，默认 5。 |
+| `MAX_RELEASES_PER_REPOSITORY` | 否 | 单资料库 Release 数量，默认 10000，硬上限 100000。 |
+| `MAX_ASSETS_PER_RELEASE` | 否 | 单 Release 附件与有效上传会话合计数量，默认 16，硬上限 1000。 |
 | `RATE_PER_MINUTE` | 否 | 所有函数实例共享的单用户分钟请求预算，默认 120。 |
 | `MAX_ASSET_BYTES` | 否 | 单对象预算，上限固定 512 MiB。 |
 
@@ -79,3 +81,4 @@ Content-Type: application/json
 - 资料库数量与存储预算在 PostgreSQL 事务内按用户加 advisory lock；所有网关实例共享同一配额串行化边界，有效上传会话在提交前也占用预算。
 - 登录成功后的请求频率由 PostgreSQL 单行 UPSERT 原子计数；函数横向扩容不会把单用户额度按实例倍增，也不在 Node 进程中永久保留用户键。
 - Release 删除先在同一事务写入对象删除队列，再移除元数据；Cloud Storage 暂时失败时保留队列并在后续列表/删除操作重试，避免永久孤儿对象。
+- Release 说明最多 64 KiB；列表只返回最近 100 个 Release，并只查询这一页对应的附件。数量配额同时计算未过期上传会话，避免用零字节或未提交对象绕过元数据预算。
