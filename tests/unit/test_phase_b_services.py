@@ -12,6 +12,7 @@ import pytest
 from docx import Document
 from sqlalchemy import select
 
+import yancuo_win.application.services as services_module
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices, ProblemFilter
@@ -277,6 +278,17 @@ def test_chapter_template_roundtrip(services: AppServices, tmp_path: Path) -> No
     # 再导入到同名科目应跳过已有章节且不报错
     services.import_chapter_template(tpl)
     assert len(services.list_chapters(sub.id)) == 2
+
+
+def test_chapter_template_import_rejects_oversized_file_before_json_decode(
+    services: AppServices, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = tmp_path / "oversized-template.json"
+    template.write_bytes(b"12345")
+    monkeypatch.setattr(services_module, "MAX_CHAPTER_TEMPLATE_BYTES", 4)
+
+    with pytest.raises(DomainError, match="过大"):
+        services.import_chapter_template(template)
 
 
 def test_chapter_template_v2_preserves_duplicate_names_in_different_paths(

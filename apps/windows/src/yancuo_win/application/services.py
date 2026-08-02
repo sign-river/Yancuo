@@ -73,6 +73,7 @@ from yancuo_win.domain.similarity import normalize_text, text_similarity
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
     iter_regular_files,
+    read_regular_file_limited,
     read_zip_member_limited,
     safe_extract_zip,
     validate_zip_members,
@@ -80,6 +81,8 @@ from yancuo_win.infrastructure.archive import (
 from yancuo_win.domain.identity import read_identity
 
 MAX_BACKUP_METADATA_BYTES = 4 * 1024 * 1024
+MAX_CHAPTER_TEMPLATE_BYTES = 4 * 1024 * 1024
+MAX_CHAPTER_TEMPLATE_ITEMS = 10_000
 
 
 def _sha256_file(path: Path) -> str:
@@ -752,13 +755,28 @@ class AppServices:
         return dest
 
     def import_chapter_template(self, path: Path) -> str:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(
+                read_regular_file_limited(path, max_bytes=MAX_CHAPTER_TEMPLATE_BYTES).decode(
+                    "utf-8"
+                )
+            )
+        except (ArchiveSecurityError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainError(f"章节模板无法读取或解析：{exc}") from exc
+        if not isinstance(raw, dict):
+            raise DomainError("章节模板根节点必须是对象")
         if raw.get("format") != "yancuo-chapter-template":
             raise DomainError("不是有效的章节模板")
         version = int(raw.get("version") or 1)
         if version not in {1, 2}:
             raise DomainError(f"不支持的章节模板版本：{version}")
-        subject_name = str(raw["subject"]["name"])
+        chapters = raw.get("chapters")
+        if not isinstance(chapters, list) or len(chapters) > MAX_CHAPTER_TEMPLATE_ITEMS:
+            raise DomainError("章节模板 chapters 必须是未超限数组")
+        subject = raw.get("subject")
+        if not isinstance(subject, dict) or not str(subject.get("name") or "").strip():
+            raise DomainError("章节模板缺少科目名称")
+        subject_name = str(subject["name"])
         with self.session() as s:
             sub = s.scalar(select(Subject).where(Subject.name == subject_name))
             if not sub:
@@ -768,7 +786,7 @@ class AppServices:
             existing = list(s.scalars(select(Chapter).where(Chapter.subject_id == sub.id)).all())
             if version == 1:
                 name_to_id = {chapter.name: chapter.id for chapter in existing}
-                for item in raw.get("chapters", []):
+                for item in chapters:
                     name = str(item["name"]).strip()
                     if not name or name in name_to_id:
                         continue
@@ -815,7 +833,7 @@ class AppServices:
                     path_to_id[chapter_path] = chapter.id
 
                 items = sorted(
-                    raw.get("chapters", []),
+                    chapters,
                     key=lambda item: len(item.get("parent_path") or []),
                 )
                 for item in items:
