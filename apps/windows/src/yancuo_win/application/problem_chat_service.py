@@ -22,6 +22,11 @@ from yancuo_win.data.models import Asset, Problem, ProblemConversation, ProblemM
 from yancuo_win.domain.rules import DomainError
 
 
+_MAX_CHAT_IMAGE_COUNT = 20
+_MAX_CHAT_IMAGE_BYTES = 32 * 1024 * 1024
+_MAX_CHAT_IMAGE_TOTAL_BYTES = 64 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class ProblemReference:
     """A stable, normalized visual excerpt from an immutable original asset."""
@@ -431,15 +436,31 @@ class ProblemChatService:
             if not assets:
                 return []
             sources = [(asset.relative_path, asset.mime_type or "image/jpeg") for asset in assets]
+        if len(sources) > _MAX_CHAT_IMAGE_COUNT:
+            raise DomainError(f"题目对话最多附带 {_MAX_CHAT_IMAGE_COUNT} 张原图")
         store = ObjectStore(self.runtime.paths.asset_objects_dir)
         content: list[dict[str, Any]] = [
             {"type": "text", "text": "用户已明确授权附带当前题目的原图。"},
         ]
+        total_bytes = 0
         for relative_path, mime_type in sources:
             path = store.resolve(relative_path)
-            if not path.is_file() or path.stat().st_size == 0:
+            if not path.is_file():
                 continue
-            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            size = path.stat().st_size
+            if size <= 0 or size > _MAX_CHAT_IMAGE_BYTES:
+                raise DomainError("题目对话单张原图必须在 1 字节到 32 MiB 之间")
+            total_bytes += size
+            if total_bytes > _MAX_CHAT_IMAGE_TOTAL_BYTES:
+                raise DomainError("题目对话附带原图总大小不能超过 64 MiB")
+            try:
+                with path.open("rb") as stream:
+                    payload = stream.read(_MAX_CHAT_IMAGE_BYTES + 1)
+            except OSError as exc:
+                raise DomainError("题目原图读取失败") from exc
+            if len(payload) != size or len(payload) > _MAX_CHAT_IMAGE_BYTES:
+                raise DomainError("题目原图在读取期间发生变化或超过大小上限")
+            encoded = base64.b64encode(payload).decode("ascii")
             content.append(
                 {
                     "type": "image_url",

@@ -199,6 +199,42 @@ def test_missing_original_image_safely_falls_back_to_text_chat(
     assert all(isinstance(message["content"], str) for message in provider.requests[0])
 
 
+def test_original_image_context_rejects_oversized_asset_before_ai(
+    chat: tuple[AppServices, ProblemChatService],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services, problem_chat = chat
+    problem = services.create_problem(title="大图题", status="active")
+    source = tmp_path / "large.png"
+    source.write_bytes(b"12345")
+    stored = services.store.store_copy(source, role="original")
+    with problem_chat._session() as session:
+        session.add(
+            Asset(
+                id="asset_large",
+                problem_id=problem.id,
+                role="original",
+                sha256=stored.sha256,
+                relative_path=stored.relative_path,
+                mime_type="image/png",
+            )
+        )
+        session.commit()
+    monkeypatch.setattr(chat_module, "_MAX_CHAT_IMAGE_BYTES", 4)
+    provider = _CapturingChatProvider()
+    monkeypatch.setattr(chat_module, "get_provider", lambda *_args: provider)
+    conversation = problem_chat.create_conversation(
+        problem.id, include_original_image=True
+    )
+
+    failed = problem_chat.send_message(conversation.id, "解释大图")
+
+    assert failed.status == "failed"
+    assert "32 MiB" in failed.error_message
+    assert provider.requests == []
+
+
 def test_retry_reuses_failed_user_message_without_duplicate_prompt(
     chat: tuple[AppServices, ProblemChatService],
     monkeypatch: pytest.MonkeyPatch,
