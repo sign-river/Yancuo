@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,9 @@ from pydantic_settings import (
     SettingsConfigDict,
     TomlConfigSettingsSource,
 )
+
+
+MAX_PREFERENCES_BYTES = 1024 * 1024
 
 
 class ApplicationConfig(BaseModel):
@@ -290,18 +294,61 @@ def load_settings(config_file: Path | None = None) -> AppSettings:
         raise ConfigError(f"配置加载失败：{exc}") from exc
 
 
+def _load_preferences(path: Path) -> dict[str, Any]:
+    path = Path(path)
+    if path.is_symlink():
+        raise ConfigError(f"本地偏好设置不能是符号链接：{path}")
+    if not path.is_file():
+        return {}
+    try:
+        size = path.stat().st_size
+        if size <= 0 or size > MAX_PREFERENCES_BYTES:
+            raise ConfigError(f"本地偏好设置为空或超过 1 MiB：{path}")
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_PREFERENCES_BYTES + 1)
+        if len(raw) != size or len(raw) > MAX_PREFERENCES_BYTES:
+            raise ConfigError(f"本地偏好设置读取期间发生变化或过大：{path}")
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"本地偏好设置无法读取：{path}") from exc
+    if not isinstance(payload, dict):
+        raise ConfigError(f"本地偏好设置格式无效：{path}")
+    return payload
+
+
+def _write_preferences(path: Path, payload: dict[str, Any]) -> None:
+    path = Path(path)
+    if path.is_symlink():
+        raise ConfigError(f"本地偏好设置不能是符号链接：{path}")
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    if len(encoded) > MAX_PREFERENCES_BYTES:
+        raise ConfigError("本地偏好设置超过 1 MiB，拒绝写入")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".preferences-", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.is_symlink():
+            raise ConfigError(f"本地偏好设置不能是符号链接：{path}")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSettings:
     """Apply non-sensitive per-user overrides stored beside the local database."""
 
     path = Path(data_root) / "preferences.json"
-    if not path.is_file():
+    payload = _load_preferences(path)
+    if not payload:
         return settings
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ConfigError(f"本地偏好设置无法读取：{path}") from exc
-    if not isinstance(payload, dict):
-        raise ConfigError(f"本地偏好设置格式无效：{path}")
 
     application = payload.get("application")
     if isinstance(application, dict):
@@ -384,25 +431,13 @@ def save_ai_preferences(
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "preferences.json"
-    payload: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                payload = existing
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    payload = _load_preferences(path)
     payload["ai"] = {
         "enabled": enabled,
         "default_provider": provider,
         "default_vision_model": model,
     }
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_preferences(path, payload)
     return path
 
 
@@ -428,14 +463,7 @@ def save_cloud_preferences(
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "preferences.json"
-    payload: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                payload = existing
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    payload = _load_preferences(path)
     payload["cloud"] = {
         "enabled": enabled,
         "default_provider": provider,
@@ -451,12 +479,7 @@ def save_cloud_preferences(
             "environment_id": cloudbase_environment_id.strip(),
             "gateway_url": cloudbase_gateway_url.strip(),
         }
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_preferences(path, payload)
     return path
 
 
@@ -471,25 +494,13 @@ def save_theme_preference(data_root: Path, theme: str) -> Path:
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "preferences.json"
-    payload: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                payload = existing
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    payload = _load_preferences(path)
     application = payload.get("application")
     if not isinstance(application, dict):
         application = {}
     application["theme"] = normalized
     payload["application"] = application
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_preferences(path, payload)
     return path
 
 
@@ -500,25 +511,13 @@ def save_preview_zoom_preference(data_root: Path, scale: float) -> Path:
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "preferences.json"
-    payload: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                payload = existing
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    payload = _load_preferences(path)
     application = payload.get("application")
     if not isinstance(application, dict):
         application = {}
     application["preview_zoom_scale"] = normalized
     payload["application"] = application
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_preferences(path, payload)
     return path
 
 

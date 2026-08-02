@@ -12,6 +12,7 @@ import yancuo_win
 from yancuo_win.config.settings import (
     ApplicationConfig,
     ConfigError,
+    MAX_PREFERENCES_BYTES,
     apply_user_preferences,
     default_toml_path,
     load_settings,
@@ -83,10 +84,31 @@ def test_theme_preferences_roundtrip_without_ai_settings(tmp_path: Path) -> None
     path = save_theme_preference(tmp_path, "dark")
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload == {"application": {"theme": "dark"}}
+    assert list(tmp_path.glob(".preferences-*.tmp")) == []
 
     settings = load_settings(default_toml_path())
     apply_user_preferences(settings, tmp_path)
     assert settings.application.theme == "dark"
+
+
+def test_preferences_reject_oversized_file(tmp_path: Path) -> None:
+    path = tmp_path / "preferences.json"
+    path.write_bytes(b" " * (MAX_PREFERENCES_BYTES + 1))
+    settings = load_settings(default_toml_path())
+
+    with pytest.raises(ConfigError, match="1 MiB"):
+        apply_user_preferences(settings, tmp_path)
+
+
+def test_preference_save_does_not_replace_corrupt_existing_file(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "preferences.json"
+    path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="无法读取"):
+        save_theme_preference(tmp_path, "light")
+    assert path.read_text(encoding="utf-8") == "{broken"
 
 
 def test_cloud_preferences_roundtrip_without_token(tmp_path: Path) -> None:
