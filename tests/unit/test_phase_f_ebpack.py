@@ -181,6 +181,49 @@ def test_ebpack_export_includes_committed_wal_changes(runtime, tmp_path: Path) -
     assert title == "committed in WAL"
 
 
+def test_ebpack_verify_does_not_delete_legacy_named_cache_directory(
+    runtime, tmp_path: Path
+) -> None:
+    AppServices(runtime).create_problem(title="verify isolation")
+    service = EbpackService(runtime)
+    pack = service.export_ebpack(tmp_path / "verify-isolation.ebpack")
+    legacy = runtime.paths.cache_dir / f"ebpack-verify-{pack.stem}"
+    legacy.mkdir(parents=True)
+    sentinel = legacy / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    service.verify_ebpack(pack)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert list(runtime.paths.cache_dir.glob("ebpack-verify-*")) == [legacy]
+
+
+def test_ebpack_restore_does_not_delete_legacy_named_work_directories(
+    runtime, tmp_path: Path
+) -> None:
+    AppServices(runtime).create_problem(title="restore isolation")
+    service = EbpackService(runtime)
+    pack = service.export_ebpack(tmp_path / "restore-isolation.ebpack")
+    target = tmp_path / "restore-isolation"
+    target.mkdir()
+    legacy_directories = [
+        target / ".ebpack_restore_tmp",
+        target / ".ebpack_final_staging",
+        target / ".ebpack_previous",
+    ]
+    for directory in legacy_directories:
+        directory.mkdir()
+        (directory / "sentinel.txt").write_text("keep", encoding="utf-8")
+
+    service.restore_ebpack(pack, target)
+
+    assert all(
+        (directory / "sentinel.txt").read_text(encoding="utf-8") == "keep"
+        for directory in legacy_directories
+    )
+    assert list(target.glob(".ebpack-*-*")) == []
+
+
 def test_corrupt_ebpack_rejected(runtime, tmp_path: Path) -> None:
     services = AppServices(runtime)
     eb = EbpackService(runtime)

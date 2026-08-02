@@ -256,10 +256,10 @@ class EbpackService:
                 self._validate_manifest(manifest)
 
                 # 解压到临时目录做校验
-                tmp = self.runtime.paths.cache_dir / f"ebpack-verify-{pack.stem}"
-                if tmp.exists():
-                    shutil.rmtree(tmp)
-                tmp.mkdir(parents=True)
+                self.runtime.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+                tmp = Path(
+                    tempfile.mkdtemp(prefix="ebpack-verify-", dir=self.runtime.paths.cache_dir)
+                )
                 try:
                     try:
                         safe_extract_zip(zf, tmp)
@@ -448,11 +448,10 @@ class EbpackService:
         target_root = Path(target_root)
         manifest = self.verify_ebpack(pack)
 
-        tmp = target_root / ".ebpack_restore_tmp"
-        if tmp.exists():
-            shutil.rmtree(tmp)
         target_root.mkdir(parents=True, exist_ok=True)
-        tmp.mkdir(parents=True)
+        tmp = Path(tempfile.mkdtemp(prefix=".ebpack-restore-", dir=target_root))
+        final_staging = Path(tempfile.mkdtemp(prefix=".ebpack-final-", dir=target_root))
+        previous = Path(tempfile.mkdtemp(prefix=".ebpack-previous-", dir=target_root))
 
         try:
             with zipfile.ZipFile(pack, "r") as zf:
@@ -471,14 +470,6 @@ class EbpackService:
             identity_dest = target_root / "identity.json"
 
             # 写入临时最终位置，成功后再替换，避免半导入
-            final_staging = target_root / ".ebpack_final_staging"
-            previous = target_root / ".ebpack_previous"
-            if final_staging.exists():
-                shutil.rmtree(final_staging)
-            if previous.exists():
-                shutil.rmtree(previous)
-            final_staging.mkdir()
-            previous.mkdir()
             shutil.copy2(db_src, final_staging / "error_book.db")
             if assets_src.is_dir():
                 try:
@@ -559,5 +550,5 @@ class EbpackService:
             raise
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-            shutil.rmtree(target_root / ".ebpack_final_staging", ignore_errors=True)
-            shutil.rmtree(target_root / ".ebpack_previous", ignore_errors=True)
+            shutil.rmtree(final_staging, ignore_errors=True)
+            shutil.rmtree(previous, ignore_errors=True)
