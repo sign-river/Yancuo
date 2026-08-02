@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QColor, QPixmap, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -37,6 +37,49 @@ def test_content_block_editor_preserves_order_spans_and_figure_region() -> None:
     assert blocks[0]["source_image_index"] == 1
     assert blocks[0]["source_region"]["width"] == pytest.approx(0.3)
     assert blocks[1]["rows"][0][0]["colspan"] == 2
+
+
+@pytest.mark.parametrize("angle_delta", [-120, 120])
+def test_content_block_numeric_fields_ignore_wheel_changes(angle_delta: int) -> None:
+    app = QApplication.instance() or QApplication([])
+    editor = ContentBlocksEditor()
+    editor.set_blocks(
+        [
+            {
+                "type": "figure",
+                "content": "figure",
+                "source_image_index": 2,
+                "source_region": {
+                    "x": 0.1,
+                    "y": 0.2,
+                    "width": 0.3,
+                    "height": 0.4,
+                },
+            }
+        ]
+    )
+    changed: list[bool] = []
+    editor.changed.connect(lambda: changed.append(True))
+
+    for spin in (editor.source_image_index, *editor.region_values):
+        before = spin.value()
+        event = QWheelEvent(
+            QPointF(4, 4),
+            QPointF(4, 4),
+            QPoint(),
+            QPoint(0, angle_delta),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(spin, event)
+        assert spin.value() == before
+        assert not event.isAccepted()
+
+    app.processEvents()
+    assert changed == []
+    editor.close()
 
 
 def _make_preview() -> tuple[QApplication, ImagePreviewLabel]:

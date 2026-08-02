@@ -46,6 +46,7 @@ from yancuo_win.tasks.model_worker import AIModelListWorker
 from yancuo_win.tasks.worker import CallableWorker
 from yancuo_win.ui.widgets import (
     CardFrame,
+    ChevronComboBox,
     PageHeader,
     StateNotice,
     danger_button,
@@ -231,7 +232,7 @@ class ServiceSettingsPage(QWidget):
             QLabel((faro_cfg.base_url if faro_cfg else "") or "https://faroapi.com/v1"),
         )
 
-        self.ai_model = QComboBox()
+        self.ai_model = ChevronComboBox()
         describe_field(
             self.ai_model,
             "图片模型 ID",
@@ -245,7 +246,7 @@ class ServiceSettingsPage(QWidget):
         self.ai_model.lineEdit().setPlaceholderText(
             "从 API 获取或手动输入支持图片的模型 ID"
         )
-        self.fetch_ai_models = QPushButton("获取模型名称")
+        self.fetch_ai_models = QPushButton("获取可用模型名称")
         self.fetch_ai_models.clicked.connect(self._fetch_ai_models)
         ai_model_control = QWidget()
         ai_model_row = QHBoxLayout(ai_model_control)
@@ -797,7 +798,7 @@ class ServiceSettingsPage(QWidget):
         worker = self._ai_model_worker
         self._ai_model_worker = None
         self.fetch_ai_models.setEnabled(True)
-        self.fetch_ai_models.setText("获取模型名称")
+        self.fetch_ai_models.setText("获取可用模型名称")
         if worker is not None:
             worker.deleteLater()
 

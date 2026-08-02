@@ -15,12 +15,13 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QAction, QColor, QPainter, QPen
+from PySide6.QtGui import QAction, QColor, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProxyStyle,
     QSizePolicy,
+    QSpinBox,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -178,6 +180,42 @@ def action_combo_box(
 
     combo.activated.connect(trigger)
     return combo
+
+
+class ChevronComboBox(QComboBox):
+    """Combo box with an explicit chevron that remains visible when editable."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("visibleChevron", True)
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().paintEvent(event)
+
+        from yancuo_win.ui.theme import current_theme_name, theme_tokens
+
+        tokens = theme_tokens(current_theme_name())
+        center_x = 17 if self.layoutDirection() == Qt.LayoutDirection.RightToLeft else self.width() - 17
+        center_y = self.height() // 2
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(tokens.muted), 1.8))
+        painter.drawLine(center_x - 4, center_y - 2, center_x, center_y + 2)
+        painter.drawLine(center_x, center_y + 2, center_x + 4, center_y - 2)
+
+
+class ScrollSafeSpinBox(QSpinBox):
+    """Integer input whose wheel gesture remains available to its scroll area."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        event.ignore()
+
+
+class ScrollSafeDoubleSpinBox(QDoubleSpinBox):
+    """Decimal input whose wheel gesture remains available to its scroll area."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        event.ignore()
 
 
 class SoftItemDelegate(QStyledItemDelegate):

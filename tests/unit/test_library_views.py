@@ -33,7 +33,7 @@ from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.task_center import TaskCenterDialog
-from yancuo_win.ui.widgets import SoftItemDelegate, ThemedTreeBranchStyle
+from yancuo_win.ui.widgets import ChevronComboBox, SoftItemDelegate, ThemedTreeBranchStyle
 
 
 class _ReaderStub(QWidget):
@@ -506,6 +506,10 @@ def test_service_settings_use_a_compact_aligned_form_surface(
         ai_settings.fetch_ai_models.parentWidget()
         is ai_settings.ai_model.parentWidget()
     )
+    assert isinstance(ai_settings.ai_model, ChevronComboBox)
+    assert ai_settings.ai_model.isEditable()
+    assert ai_settings.ai_model.property("visibleChevron") is True
+    assert ai_settings.fetch_ai_models.text() == "获取可用模型名称"
     assert ai_settings.clear_ai_button.objectName() == "DangerButton"
     assert cloud_settings.clear_cloud_token_button.objectName() == "DangerButton"
 

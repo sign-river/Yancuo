@@ -64,6 +64,8 @@ from yancuo_win.ui.widgets import (
     CardFrame,
     IconButton,
     PageHeader,
+    ScrollSafeDoubleSpinBox,
+    ScrollSafeSpinBox,
     SoftItemDelegate,
     WorkflowStepBar,
     danger_button,
@@ -125,7 +127,7 @@ class ContentBlocksEditor(QWidget):
         self.table_rows.setPlaceholderText(
             "每行一行、制表符分隔；合并单元格可直接填写 rows JSON"
         )
-        self.source_image_index = QSpinBox()
+        self.source_image_index = ScrollSafeSpinBox()
         self.source_image_index.setRange(0, 999)
         self.region_row = QWidget()
         region_layout = QHBoxLayout(self.region_row)
@@ -133,7 +135,7 @@ class ContentBlocksEditor(QWidget):
         self.region_values: list[QDoubleSpinBox] = []
         for label, default in (("x", 0.0), ("y", 0.0), ("宽", 1.0), ("高", 1.0)):
             region_layout.addWidget(QLabel(label))
-            spin = QDoubleSpinBox()
+            spin = ScrollSafeDoubleSpinBox()
             spin.setRange(0.0, 1.0)
             spin.setDecimals(4)
             spin.setSingleStep(0.01)
