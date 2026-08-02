@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -88,10 +89,12 @@ class ContentBlocksEditor(QWidget):
     """Ordered editor for AI-recognized text, formula, table, and figure blocks."""
 
     changed = Signal()
+    figure_crop_requested = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._blocks: list[dict[str, Any]] = []
+        self._source_images: list[Path] = []
         self._loading = False
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -154,6 +157,21 @@ class ContentBlocksEditor(QWidget):
         form.addRow("来源图片序号", self.source_image_index)
         form.addRow("归一化裁剪区域", self.region_row)
         root.addLayout(form)
+
+        self.figure_panel = QFrame()
+        self.figure_panel.setObjectName("FigureBlockEditor")
+        figure_layout = QVBoxLayout(self.figure_panel)
+        figure_layout.setContentsMargins(12, 10, 12, 10)
+        self.figure_preview = QLabel("选择来源图片并调整裁剪区域")
+        self.figure_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.figure_preview.setMinimumHeight(120)
+        self.figure_preview.setObjectName("ImagePreview")
+        figure_layout.addWidget(self.figure_preview)
+        self.crop_figure_button = ghost_button("在原图上调整裁剪")
+        self.crop_figure_button.setAccessibleName("调整当前题图裁剪区域")
+        self.crop_figure_button.clicked.connect(self._request_figure_crop)
+        figure_layout.addWidget(self.crop_figure_button)
+        root.addWidget(self.figure_panel)
 
         self.block_list.currentRowChanged.connect(self._select)
         self.kind.currentIndexChanged.connect(self._write_current)
@@ -258,6 +276,72 @@ class ContentBlocksEditor(QWidget):
         self.table_rows.setVisible(kind == "table")
         self.source_image_index.setVisible(kind == "figure")
         self.region_row.setVisible(kind == "figure")
+        self.figure_panel.setVisible(kind == "figure")
+        self._refresh_figure_preview()
+
+    def _request_figure_crop(self) -> None:
+        row = self.block_list.currentRow()
+        if 0 <= row < len(self._blocks):
+            self.figure_crop_requested.emit(row)
+
+    def set_source_images(self, paths: list[Path]) -> None:
+        self._source_images = [Path(path) for path in paths]
+        self.source_image_index.setMaximum(max(0, len(self._source_images) - 1))
+        self.crop_figure_button.setEnabled(bool(self._source_images))
+        self._refresh_figure_preview()
+
+    def apply_figure_crop(
+        self,
+        row: int,
+        source_image_index: int,
+        region: dict[str, float],
+    ) -> None:
+        if not 0 <= row < len(self._blocks):
+            raise DomainError("题图内容块已经不存在")
+        block = dict(self._blocks[row])
+        if block.get("type") != "figure":
+            raise DomainError("当前内容块不是题图")
+        block["source_image_index"] = source_image_index
+        block["source_region"] = dict(region)
+        self._blocks[row] = block
+        self._refresh_list(row)
+        self.changed.emit()
+
+    def _refresh_figure_preview(self) -> None:
+        if not hasattr(self, "figure_preview"):
+            return
+        row = self.block_list.currentRow()
+        if not 0 <= row < len(self._blocks):
+            self.figure_preview.setPixmap(QPixmap())
+            self.figure_preview.setText("请选择题图内容块")
+            return
+        block = self._blocks[row]
+        index = int(block.get("source_image_index", 0))
+        region = block.get("source_region") or {}
+        if not 0 <= index < len(self._source_images):
+            self.figure_preview.setPixmap(QPixmap())
+            self.figure_preview.setText("当前题图没有可用的审核期来源图片")
+            return
+        image = QImage(str(self._source_images[index]))
+        if image.isNull() or not region:
+            self.figure_preview.setPixmap(QPixmap())
+            self.figure_preview.setText("题图来源或裁剪区域无效")
+            return
+        rect = QRectF(
+            image.width() * float(region.get("x", 0)),
+            image.height() * float(region.get("y", 0)),
+            image.width() * float(region.get("width", 0)),
+            image.height() * float(region.get("height", 0)),
+        ).toAlignedRect().intersected(image.rect())
+        crop = QPixmap.fromImage(image.copy(rect))
+        self.figure_preview.setText("")
+        self.figure_preview.setPixmap(
+            crop.scaled(
+                QSize(640, 220),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
     def blocks(self) -> list[dict[str, Any]]:
         return normalize_content_blocks(self._blocks)
@@ -1123,6 +1207,76 @@ class ProblemForm(QWidget):
         self.set_values({})
 
 
+class FigureCropDialog(QDialog):
+    """Visual review-only crop editor for one formal figure block."""
+
+    def __init__(
+        self,
+        source_images: list[Path],
+        *,
+        source_image_index: int = 0,
+        region: dict[str, float] | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        if not source_images:
+            raise DomainError("当前候选没有可用于裁剪的来源图片")
+        self.source_images = [Path(path) for path in source_images]
+        self.setWindowTitle("调整题图裁剪")
+        self.setMinimumSize(760, 620)
+        root = QVBoxLayout(self)
+        hint = QLabel(
+            "拖动蓝框内部可移动，拖动边缘控制柄可缩放；在框外拖拽可重新绘制。"
+        )
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("来源图片"))
+        self.source = QComboBox()
+        for index, path in enumerate(self.source_images):
+            self.source.addItem(f"第 {index + 1} 张 · {path.name}", index)
+        source_row.addWidget(self.source, stretch=1)
+        root.addLayout(source_row)
+        self.preview = ImagePreviewLabel("无法读取来源图片")
+        self.preview.set_editable(True)
+        root.addWidget(self.preview, stretch=1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("采用此裁剪")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self._accept_crop)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+        self.source.currentIndexChanged.connect(self._source_changed)
+        initial = max(0, min(source_image_index, len(self.source_images) - 1))
+        self.source.setCurrentIndex(initial)
+        self.preview.set_path(self.source_images[initial])
+        self.preview.set_region(
+            region
+            or {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
+        )
+
+    def _source_changed(self, index: int) -> None:
+        if not 0 <= index < len(self.source_images):
+            return
+        self.preview.set_path(self.source_images[index])
+        self.preview.set_region(
+            {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
+        )
+
+    def _accept_crop(self) -> None:
+        region = self.preview.region
+        if not region or region.get("width", 0) <= 0 or region.get("height", 0) <= 0:
+            return
+        self.accept()
+
+    def result_crop(self) -> tuple[int, dict[str, float]]:
+        return self.source.currentIndex(), dict(self.preview.region)
+
+
 class IntakePage(QWidget):
     problem_committed = Signal(str)
     status_message = Signal(str)
@@ -1498,6 +1652,9 @@ class IntakePage(QWidget):
         )
         self.ai_form.changed.connect(self._queue_ai_preview)
         self.ai_form.answer_capture_requested.connect(self._open_answer_capture)
+        self.ai_form.content_blocks.figure_crop_requested.connect(
+            self._edit_figure_crop
+        )
         form_layout.addWidget(self.ai_form)
         self.ai_result_tabs.addTab(self._scroll(form_host), "编辑字段")
         self.ai_result_tabs.addTab(
@@ -2456,6 +2613,7 @@ class IntakePage(QWidget):
             return
         self.candidate_index %= len(self.ai_candidates)
         candidate = self.ai_candidates[self.candidate_index]
+        self.ai_form.content_blocks.set_source_images(candidate.source_images)
         self.ai_form.set_values(candidate.fields)
         self._refresh_ai_preview()
         self.image_preview.set_path(candidate.original_image)
@@ -2642,6 +2800,7 @@ class IntakePage(QWidget):
             QMessageBox.warning(self, "无法调整来源图", str(exc))
             self._load_candidate()
             return
+        self.ai_form.content_blocks.set_source_images(paths)
         blocks = self.ai_form.content_blocks.blocks()
         for block in blocks:
             if block.get("type") != "figure":
@@ -2656,6 +2815,39 @@ class IntakePage(QWidget):
         self.ai_form.content_blocks.set_blocks(blocks)
         self._queue_ai_preview()
         self.status_message.emit("来源图片顺序已保存；不会自动重新识别")
+
+    def _edit_figure_crop(self, row: int) -> None:
+        if not self.ai_candidates:
+            return
+        candidate = self.ai_candidates[self.candidate_index]
+        sources = self.intake.candidate_source_images(candidate.review_item_id)
+        blocks = self.ai_form.content_blocks.blocks()
+        if not 0 <= row < len(blocks) or blocks[row].get("type") != "figure":
+            self.status_message.emit("当前题图内容块已经变化，请重新选择")
+            return
+        block = blocks[row]
+        try:
+            dialog = FigureCropDialog(
+                sources,
+                source_image_index=int(block.get("source_image_index", 0)),
+                region=block.get("source_region") or None,
+                parent=self,
+            )
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        source_index, region = dialog.result_crop()
+        try:
+            self.ai_form.content_blocks.apply_figure_crop(
+                row, source_index, region
+            )
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
+        self._queue_ai_preview()
+        self.status_message.emit("题图裁剪已更新，确认入库前仍可继续调整")
 
     def _show_region_label(self, region: dict[str, float]) -> None:
         if region:

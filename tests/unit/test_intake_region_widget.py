@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QPixmap, QWheelEvent
@@ -37,6 +39,48 @@ def test_content_block_editor_preserves_order_spans_and_figure_region() -> None:
     assert blocks[0]["source_image_index"] == 1
     assert blocks[0]["source_region"]["width"] == pytest.approx(0.3)
     assert blocks[1]["rows"][0][0]["colspan"] == 2
+
+
+def test_figure_block_supports_visual_manual_crop(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "source.png"
+    pixmap = QPixmap(400, 300)
+    pixmap.fill(QColor("white"))
+    assert pixmap.save(str(source), "PNG")
+    editor = ContentBlocksEditor()
+    editor.set_source_images([source])
+    editor.set_blocks(
+        [
+            {
+                "type": "figure",
+                "content": "坐标图",
+                "source_image_index": 0,
+                "source_region": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                },
+            }
+        ]
+    )
+    requested: list[int] = []
+    editor.figure_crop_requested.connect(requested.append)
+
+    editor.crop_figure_button.click()
+    editor.apply_figure_crop(
+        0,
+        0,
+        {"x": 0.2, "y": 0.1, "width": 0.5, "height": 0.6},
+    )
+    app.processEvents()
+
+    assert requested == [0]
+    assert editor.blocks()[0]["source_region"]["width"] == pytest.approx(0.5)
+    assert not editor.figure_preview.pixmap().isNull()
+    editor.close()
 
 
 @pytest.mark.parametrize("angle_delta", [-120, 120])
