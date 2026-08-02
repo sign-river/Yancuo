@@ -89,6 +89,39 @@ def test_cloud_upload_failure_cleans_export_cache(runtime, tmp_path: Path, monke
     assert list(runtime.paths.cache_dir.glob("data-v1-*.ebpack")) == []
 
 
+def test_corrupt_cloud_download_preserves_existing_verified_file(
+    runtime, tmp_path: Path
+) -> None:
+    cloud_root = tmp_path / "corrupt-cloud"
+    provider = LocalFolderProvider(cloud_root)
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "corrupt-download"
+    runtime.settings.cloud.enabled = True
+    cloud = CloudBackupService(runtime, provider)
+    cloud.ensure_repository()
+    uploaded = cloud.upload_backup()
+
+    remote_asset = (
+        cloud_root
+        / "local"
+        / "corrupt-download"
+        / "releases"
+        / uploaded["tag"]
+        / "snapshot.ebpack"
+    )
+    remote_asset.write_bytes(b"corrupt-remote-object")
+    destination_dir = tmp_path / "downloads"
+    destination_dir.mkdir()
+    destination = destination_dir / f"{uploaded['tag']}.ebpack"
+    destination.write_bytes(b"known-good-local-copy")
+
+    with pytest.raises(DomainError, match="未替换已有文件"):
+        cloud.download_backup(uploaded["tag"], destination_dir)
+
+    assert destination.read_bytes() == b"known-good-local-copy"
+    assert list(destination_dir.glob(".cloud-verify-*.ebpack")) == []
+
+
 def test_profiles_are_discovered_and_explicitly_bound(runtime, tmp_path: Path, monkeypatch) -> None:
     cloud_root = tmp_path / "profile-cloud"
     provider = LocalFolderProvider(cloud_root)

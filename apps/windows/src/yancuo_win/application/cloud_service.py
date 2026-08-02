@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import tempfile
 import gc
@@ -409,13 +410,29 @@ class CloudBackupService:
         dest_dir = Path(dest_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{tag}.ebpack"
-        self.provider.download_release_asset(
-            self.owner, self.repo, tag=tag, asset_name=asset_name, dest=dest
+        if dest.is_symlink():
+            raise DomainError("云备份下载目标不能是符号链接")
+        descriptor, candidate_name = tempfile.mkstemp(
+            prefix=".cloud-verify-", suffix=".ebpack", dir=dest_dir
         )
-        actual = _sha256(dest)
-        if expected and actual != expected:
-            dest.unlink(missing_ok=True)
-            raise DomainError("下载文件哈希与 latest 记录不一致，已删除损坏文件")
+        os.close(descriptor)
+        candidate = Path(candidate_name)
+        try:
+            self.provider.download_release_asset(
+                self.owner,
+                self.repo,
+                tag=tag,
+                asset_name=asset_name,
+                dest=candidate,
+            )
+            actual = _sha256(candidate)
+            if expected and actual != expected:
+                raise DomainError("下载文件哈希与 latest 记录不一致，未替换已有文件")
+            if dest.is_symlink():
+                raise DomainError("云备份下载目标不能是符号链接")
+            os.replace(candidate, dest)
+        finally:
+            candidate.unlink(missing_ok=True)
         return dest
 
     def restore_profile_to(self, profile_id: str, target_root: Path) -> dict[str, Any]:
