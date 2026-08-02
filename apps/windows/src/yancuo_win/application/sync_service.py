@@ -22,10 +22,12 @@ from yancuo_win.cloud.base import CloudProvider
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
     Asset,
+    Chapter,
     Problem,
     ReviewItem,
     ReviewSession,
     SyncOperation,
+    Subject,
     Tag,
     Version,
 )
@@ -209,6 +211,8 @@ def _coerce_sync_value(field: str, value: Any) -> Any:
     if field in _SYNC_OPTIONAL_TEXT_FIELDS:
         if value is not None and not isinstance(value, str):
             raise DomainError(f"同步文本字段无效：{field}={value!r}")
+        if field in {"subject_id", "chapter_id"} and value == "":
+            return None
         if isinstance(value, str) and len(value) > _SYNC_OPTIONAL_TEXT_LIMITS[field]:
             raise DomainError(f"同步文本字段过长：{field}")
         return value
@@ -748,6 +752,48 @@ class SyncService:
                         ) from exc
         return known
 
+    def _operations_with_known_taxonomy(
+        self, incoming: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """延后引用本地尚不存在科目/章节的 Operation，避免外键提交失败。"""
+
+        subject_ids = {
+            fields["subject_id"]
+            for op in incoming.values()
+            if (fields := op.get("changed_fields") or {}).get("subject_id") is not None
+        }
+        chapter_ids = {
+            fields["chapter_id"]
+            for op in incoming.values()
+            if (fields := op.get("changed_fields") or {}).get("chapter_id") is not None
+        }
+        known_subjects: set[str] = set()
+        known_chapters: set[str] = set()
+        with self.runtime.session_factory() as session:
+            for model, identifiers, target in (
+                (Subject, sorted(subject_ids), known_subjects),
+                (Chapter, sorted(chapter_ids), known_chapters),
+            ):
+                for offset in range(0, len(identifiers), SYNC_OPERATION_ID_QUERY_BATCH):
+                    batch = identifiers[offset : offset + SYNC_OPERATION_ID_QUERY_BATCH]
+                    target.update(
+                        session.scalars(select(model.id).where(model.id.in_(batch))).all()
+                    )
+        return {
+            operation_id: op
+            for operation_id, op in incoming.items()
+            if (
+                (subject_id := (op.get("changed_fields") or {}).get("subject_id"))
+                is None
+                or subject_id in known_subjects
+            )
+            and (
+                (chapter_id := (op.get("changed_fields") or {}).get("chapter_id"))
+                is None
+                or chapter_id in known_chapters
+            )
+        }
+
     def pull_and_merge(self) -> dict[str, Any]:
         provider = self._require_ops_provider()
         snapshot = self._local_snapshot_before_merge()
@@ -783,6 +829,7 @@ class SyncService:
                 continue
             incoming[operation_id] = op
 
+        incoming = self._operations_with_known_taxonomy(incoming)
         known = self._known_applied_operations(set(incoming))
         for operation_id, stored in known.items():
             if incoming[operation_id] != stored:

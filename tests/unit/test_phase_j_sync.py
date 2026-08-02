@@ -369,6 +369,12 @@ def test_pull_skips_invalid_problem_field_value_and_applies_valid_peer(
         "timestamp": "2026-07-22T00:00:30+00:00",
         "changed_fields": {"title": "x" * 257},
     }
+    missing_taxonomy = {
+        **base,
+        "operation_id": "op_missing_taxonomy",
+        "timestamp": "2026-07-22T00:00:45+00:00",
+        "changed_fields": {"chapter_id": "chapter_not_local"},
+    }
     valid = {
         **base,
         "operation_id": "op_valid_after_invalid",
@@ -379,7 +385,7 @@ def test_pull_skips_invalid_problem_field_value_and_applies_valid_peer(
         "local",
         "invalid-field-value-repo",
         "dev_remote",
-        [invalid, oversized, valid],
+        [invalid, oversized, missing_taxonomy, valid],
     )
 
     result = SyncService(runtime, provider).pull_and_merge()
@@ -389,6 +395,7 @@ def test_pull_skips_invalid_problem_field_value_and_applies_valid_peer(
     with runtime.session_factory() as session:
         assert session.get(SyncOperation, invalid["operation_id"]) is None
         assert session.get(SyncOperation, oversized["operation_id"]) is None
+        assert session.get(SyncOperation, missing_taxonomy["operation_id"]) is None
 
 
 def test_pull_same_field_creates_review(runtime, tmp_path: Path):
