@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
@@ -16,6 +17,7 @@ from yancuo_win.infrastructure.safe_http import safe_urlopen
 
 _MAX_AUTH_RESPONSE_BYTES = 64 * 1024
 _REFRESH_EARLY_SECONDS = 120
+_TOKEN_REFRESH_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -135,6 +137,13 @@ def sign_in_with_password(
 def get_access_token(environment_id: str, credential_key: str) -> str:
     """Return a valid access token, rotating a stored refresh token if needed."""
 
+    with _TOKEN_REFRESH_LOCK:
+        return _get_access_token_locked(environment_id, credential_key)
+
+
+def _get_access_token_locked(environment_id: str, credential_key: str) -> str:
+    """Read and possibly rotate a session while holding the process refresh lock."""
+
     raw = get_secret(credential_key)
     if not raw:
         raise DomainError("请先在设置中登录 CloudBase 账户")
@@ -156,5 +165,9 @@ def get_access_token(environment_id: str, credential_key: str) -> str:
             "refresh_token": session.refresh_token,
         },
     )
+    if not refreshed.refresh_token:
+        refreshed = replace(refreshed, refresh_token=session.refresh_token)
+    if not refreshed.subject:
+        refreshed = replace(refreshed, subject=session.subject)
     set_secret(credential_key, refreshed.to_json())
     return refreshed.access_token

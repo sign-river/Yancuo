@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -73,6 +75,71 @@ def test_access_token_refresh_rotates_stored_session(monkeypatch) -> None:  # ty
 
     assert get_access_token("env-123", "cred") == "new"
     assert CloudBaseSession.from_json(saved["cred"]).refresh_token == "new-refresh"
+
+
+def test_access_token_refresh_preserves_unrotated_refresh_token(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    expired = CloudBaseSession("old", "keep-me", int(time.time()) - 1, "user-1")
+    saved = {}
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase_auth.get_secret", lambda _key: expired.to_json()
+    )
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase_auth.set_secret",
+        lambda key, value: saved.update({key: value}),
+    )
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase_auth.safe_urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(
+            b'{"access_token":"new","expires_in":7200}'
+        ),
+    )
+
+    assert get_access_token("env-123", "cred") == "new"
+    restored = CloudBaseSession.from_json(saved["cred"])
+    assert restored is not None
+    assert restored.refresh_token == "keep-me"
+    assert restored.subject == "user-1"
+
+
+def test_concurrent_access_token_refresh_uses_rotating_token_once(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    stored = {
+        "cred": CloudBaseSession(
+            "old", "rotate-once", int(time.time()) - 1, "user-1"
+        ).to_json()
+    }
+    request_count = 0
+    count_lock = threading.Lock()
+
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase_auth.get_secret", lambda key: stored.get(key)
+    )
+    monkeypatch.setattr(
+        "yancuo_win.cloud.cloudbase_auth.set_secret",
+        lambda key, value: stored.update({key: value}),
+    )
+
+    def fake_open(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal request_count
+        with count_lock:
+            request_count += 1
+        time.sleep(0.05)
+        return io.BytesIO(
+            json.dumps(
+                {
+                    "access_token": "new",
+                    "refresh_token": "rotated",
+                    "expires_in": 7200,
+                    "sub": "user-1",
+                }
+            ).encode()
+        )
+
+    monkeypatch.setattr("yancuo_win.cloud.cloudbase_auth.safe_urlopen", fake_open)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: get_access_token("env-123", "cred"), range(2)))
+
+    assert results == ["new", "new"]
+    assert request_count == 1
 
 
 def test_access_token_accepts_legacy_raw_token(monkeypatch) -> None:  # type: ignore[no-untyped-def]
