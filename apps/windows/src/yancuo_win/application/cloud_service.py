@@ -447,7 +447,10 @@ class CloudBackupService:
         pack = self.download_backup(
             str(snapshot["tag"]), self.runtime.paths.cache_dir / "cloud_dl"
         )
-        return self.ebpack.restore_ebpack(pack, Path(target_root))
+        try:
+            return self.ebpack.restore_ebpack(pack, Path(target_root))
+        finally:
+            pack.unlink(missing_ok=True)
 
     @staticmethod
     def _table_key_columns(connection: sqlite3.Connection, table: str) -> list[str]:

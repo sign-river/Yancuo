@@ -68,6 +68,7 @@ def test_local_folder_upload_latest_restore(runtime, tmp_path: Path) -> None:
     result = cloud.restore_latest_to(target)
     assert (target / "error_book.db").is_file()
     assert result["schema_version"] >= 1
+    assert list((runtime.paths.cache_dir / "cloud_dl").glob("*.ebpack")) == []
 
 
 def test_cloud_upload_failure_cleans_export_cache(runtime, tmp_path: Path, monkeypatch) -> None:
