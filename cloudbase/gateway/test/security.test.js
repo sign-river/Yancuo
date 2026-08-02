@@ -12,6 +12,7 @@ const {
   safeTokenEqual,
   subjectStorageKey,
   tokenHash,
+  uuidV4,
 } = require("../security");
 
 test("repository names are bounded", () => {
@@ -52,6 +53,16 @@ test("CloudBase environment IDs cannot escape the official auth hostname", () =>
   assert.equal(environmentId("env-123"), "env-123");
   for (const value of ["", "https://evil.test", "env.example", "a".repeat(65)]) {
     assert.throws(() => environmentId(value), /格式无效/);
+  }
+});
+
+test("upload IDs accept only gateway-issued UUIDv4 values", () => {
+  assert.equal(
+    uuidV4("550E8400-E29B-41D4-A716-446655440000", "upload ID"),
+    "550e8400-e29b-41d4-a716-446655440000",
+  );
+  for (const value of ["", "../upload", "550e8400-e29b-11d4-a716-446655440000"]) {
+    assert.throws(() => uuidV4(value, "upload ID"), /upload ID/);
   }
 });
 

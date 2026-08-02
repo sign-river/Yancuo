@@ -14,6 +14,7 @@ const {
   safeTokenEqual,
   subjectStorageKey,
   tokenHash,
+  uuidV4,
 } = require("./security");
 
 const PORT = integerSetting(process.env.PORT, "PORT", 9000, 1, 65535);
@@ -464,7 +465,7 @@ async function action(name, payload, identity, req) {
       };
     }
     if (name === "assets/commit") {
-      const uploadId = String(payload.upload_id || "");
+      const uploadId = uuidV4(payload.upload_id, "上传 ID");
       await client.query("begin");
       await requireWriteLock(client, repo.repository_id, payload);
       const claimed = await client.query(
@@ -554,7 +555,7 @@ function cryptoRandomId() {
 }
 
 async function upload(req, res, url) {
-  const uploadId = url.pathname.split("/").pop();
+  const uploadId = uuidV4(url.pathname.split("/").pop(), "上传 ID");
   if (url.searchParams.has("token")) fail("上传凭据不得放在 URL 中", 400);
   const token = String(req.headers["x-yancuo-upload-token"] || "");
   const found = await pool.query(

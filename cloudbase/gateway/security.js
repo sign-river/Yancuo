@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const ENVIRONMENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const POSTGRES_SSL_QUERY_KEYS = new Set(["sslcert", "sslkey", "sslrootcert", "sslmode"]);
 
 function boundedName(value, label) {
@@ -32,6 +33,16 @@ function environmentId(value) {
     throw new Error("CLOUDBASE_ENV_ID/TCB_ENV 格式无效");
   }
   return result;
+}
+
+function uuidV4(value, label) {
+  const result = String(value || "").trim();
+  if (!UUID_V4_RE.test(result)) {
+    const error = new Error(`${label} format is invalid`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return result.toLowerCase();
 }
 
 function tokenHash(token) {
@@ -112,4 +123,5 @@ module.exports = {
   safeTokenEqual,
   subjectStorageKey,
   tokenHash,
+  uuidV4,
 };
