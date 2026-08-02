@@ -14,6 +14,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from yancuo_win.ai.base import (
     AIProvider,
@@ -85,9 +86,20 @@ class OpenAICompatibleProvider(AIProvider):
         )
 
     def validate_configuration(self) -> None:
-        if not self.base_url.startswith(("https://", "http://")):
-            raise DomainError("AI Base URL 无效")
+        self._validate_base_url()
         self._api_key()
+
+    def _validate_base_url(self) -> None:
+        parsed = urlparse(self.base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise DomainError("AI Base URL 必须是无内嵌凭据、查询参数或片段的 HTTPS 地址")
 
     @staticmethod
     def _encode_image_content(image_paths: list[str]) -> list[dict[str, Any]]:
@@ -157,6 +169,7 @@ class OpenAICompatibleProvider(AIProvider):
         retry_attempts: int | None = None,
         retry_instruction: str = "请检查网络后点击“重新尝试失败项”",
     ) -> dict[str, Any]:
+        self._validate_base_url()
         key = self._api_key()
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         body: Any = None
@@ -261,6 +274,7 @@ class OpenAICompatibleProvider(AIProvider):
     ) -> dict[str, Any]:
         """Read an OpenAI-compatible SSE response and rebuild its final body."""
 
+        self._validate_base_url()
         key = self._api_key()
         stream_payload = dict(payload)
         stream_payload["stream"] = True

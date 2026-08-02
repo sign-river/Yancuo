@@ -105,6 +105,30 @@ def test_api_key_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         p._api_key()
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://faroapi.com/v1",
+        "https://user:secret@faroapi.com/v1",
+        "https://faroapi.com/v1?token=secret",
+    ],
+)
+def test_ai_base_url_rejects_insecure_or_embedded_credentials(
+    base_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    provider = OpenAICompatibleProvider(
+        base_url=base_url, api_key_env="FARO_API_KEY"
+    )
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.safe_urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid URL reached network"),
+    )
+
+    with pytest.raises(DomainError, match="HTTPS"):
+        provider.list_models()
+
+
 def test_json_response_size_budget_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
     monkeypatch.setattr(
