@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
+import yancuo_win.application.search_service as search_service_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.search_service import SearchIndexService
 from yancuo_win.application.services import AppServices, KnowledgeScope
@@ -67,6 +68,28 @@ def test_rebuild_is_atomic_and_idempotent(search_bundle) -> None:
         ).scalar_one()
     assert projection_count == 3
     assert fts_count == 3
+
+
+def test_rebuild_writes_problem_documents_in_bounded_batches(
+    search_bundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, _app, search, *_rest = search_bundle
+    inserted_batch_sizes: list[int] = []
+    original_insert = SearchIndexService._insert_documents
+
+    def record_insert(session, documents):
+        inserted_batch_sizes.append(len(documents))
+        original_insert(session, documents)
+
+    monkeypatch.setattr(search_service_module, "_PROBLEM_REBUILD_BATCH_SIZE", 2)
+    monkeypatch.setattr(
+        SearchIndexService, "_insert_documents", staticmethod(record_insert)
+    )
+
+    assert search.rebuild() == 3
+    assert inserted_batch_sizes == [2, 1]
+    with runtime.engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(SearchDocument)) == 3
 
 
 def test_trigram_search_filters_status_and_searches_tags(search_bundle) -> None:
