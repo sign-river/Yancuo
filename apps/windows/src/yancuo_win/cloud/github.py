@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from yancuo_win.cloud.base import (
     CloudCapabilities,
@@ -26,6 +26,7 @@ from yancuo_win.cloud.base import (
 )
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import get_secret
+from yancuo_win.infrastructure.safe_http import safe_urlopen
 
 logger = logging.getLogger("yancuo.cloud.github")
 
@@ -136,7 +137,7 @@ class GitHubProvider(CloudProvider):
         for attempt in range(1, _MAX_REQUEST_ATTEMPTS + 1):
             req = Request(url, data=data, method=method, headers=headers)
             try:
-                with urlopen(req, timeout=300) as resp:
+                with safe_urlopen(req, timeout=300) as resp:
                     raw = resp.read(_MAX_JSON_RESPONSE_BYTES + 1)
                     if len(raw) > _MAX_JSON_RESPONSE_BYTES:
                         raise DomainError("GitHub API 响应过大")
@@ -398,7 +399,9 @@ class GitHubProvider(CloudProvider):
         headers["Accept"] = "application/octet-stream"
         req = Request(url, headers=headers, method="GET")
         try:
-            with urlopen(req, timeout=600) as resp, dest.open("wb") as out:
+            with safe_urlopen(
+                req, timeout=600, allow_cross_origin=True
+            ) as resp, dest.open("wb") as out:
                 received = 0
                 while chunk := resp.read(1024 * 1024):
                     received += len(chunk)

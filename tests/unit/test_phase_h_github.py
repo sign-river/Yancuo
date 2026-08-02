@@ -151,7 +151,7 @@ def test_github_request_retries_transient_tls_disconnect(monkeypatch: pytest.Mon
             raise ssl.SSLEOFError("TLS closed")
         return _Response()
 
-    monkeypatch.setattr("yancuo_win.cloud.github.urlopen", flaky_urlopen)
+    monkeypatch.setattr("yancuo_win.cloud.github.safe_urlopen", flaky_urlopen)
     monkeypatch.setattr("yancuo_win.cloud.github.time.sleep", delays.append)
 
     assert provider._request_json("GET", "https://api.github.com/user") == {"login": "sign-river"}
@@ -176,7 +176,8 @@ def test_github_request_rejects_oversized_json(monkeypatch: pytest.MonkeyPatch) 
             return payload if size < 0 else payload[:size]
 
     monkeypatch.setattr(
-        "yancuo_win.cloud.github.urlopen", lambda *_args, **_kwargs: LargeResponse()
+        "yancuo_win.cloud.github.safe_urlopen",
+        lambda *_args, **_kwargs: LargeResponse(),
     )
 
     with pytest.raises(DomainError, match="响应过大"):
@@ -201,7 +202,7 @@ def test_github_download_enforces_actual_size_budget(
         },
     )
     monkeypatch.setattr(
-        "yancuo_win.cloud.github.urlopen",
+        "yancuo_win.cloud.github.safe_urlopen",
         lambda *_args, **_kwargs: io.BytesIO(b"oversized"),
     )
     destination = tmp_path / "snapshot.ebpack"

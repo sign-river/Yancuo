@@ -12,11 +12,12 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from yancuo_win.cloud.base import CloudCapabilities, CloudProvider, CloudUser, RemoteRelease
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import get_secret
+from yancuo_win.infrastructure.safe_http import safe_urlopen
 
 
 _MAX_GATEWAY_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -70,7 +71,7 @@ class CloudBaseGatewayProvider(CloudProvider):
             },
         )
         try:
-            with urlopen(request, timeout=60) as response:  # noqa: S310 - configured gateway
+            with safe_urlopen(request, timeout=60) as response:
                 payload = response.read(_MAX_GATEWAY_RESPONSE_BYTES + 1)
                 if len(payload) > _MAX_GATEWAY_RESPONSE_BYTES:
                     raise DomainError("CloudBase 网关响应过大")
@@ -155,7 +156,7 @@ class CloudBaseGatewayProvider(CloudProvider):
         headers = data.get("headers") if isinstance(data.get("headers"), dict) else {}
         request = Request(url, data=file_path.read_bytes(), method="PUT", headers={str(k): str(v) for k, v in headers.items()})
         try:
-            with urlopen(request, timeout=300):  # noqa: S310 - signed upload URL from gateway
+            with safe_urlopen(request, timeout=300):
                 pass
         except (HTTPError, URLError) as exc:
             raise DomainError(f"CloudBase 存储上传失败：{exc}") from exc
@@ -167,7 +168,9 @@ class CloudBaseGatewayProvider(CloudProvider):
         self._validate_storage_url(url)
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with urlopen(url, timeout=300) as response, dest.open("wb") as output:  # noqa: S310 - signed download URL from gateway
+            with safe_urlopen(url, timeout=300) as response, dest.open(
+                "wb"
+            ) as output:
                 received = 0
                 while chunk := response.read(1024 * 1024):
                     received += len(chunk)

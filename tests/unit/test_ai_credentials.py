@@ -111,7 +111,7 @@ def test_json_response_size_budget_is_enforced(monkeypatch: pytest.MonkeyPatch) 
         "yancuo_win.ai.openai_compatible._MAX_AI_RESPONSE_BYTES", 16
     )
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen",
+        "yancuo_win.ai.openai_compatible.safe_urlopen",
         lambda *_args, **_kwargs: _BytesResponse(b"{" + b"x" * 32 + b"}"),
     )
     provider = OpenAICompatibleProvider(
@@ -130,7 +130,7 @@ def test_stream_response_size_budget_is_enforced(
         "yancuo_win.ai.openai_compatible._MAX_AI_RESPONSE_BYTES", 16
     )
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen",
+        "yancuo_win.ai.openai_compatible.safe_urlopen",
         lambda *_args, **_kwargs: _StreamResponse([b"data: " + b"x" * 32]),
     )
     provider = OpenAICompatibleProvider(
@@ -158,7 +158,7 @@ def test_list_models_uses_faro_compatible_endpoint(
         return _Response({"data": [{"id": "vision-b"}, {"id": "vision-a"}]})
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     provider = OpenAICompatibleProvider(
         base_url="https://faroapi.com/v1",
@@ -211,7 +211,7 @@ def test_structure_from_image_sends_multimodal_chat_completion(
         )
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     provider = OpenAICompatibleProvider(
         base_url="https://faroapi.com/v1",
@@ -277,7 +277,7 @@ def test_stream_structure_from_images_emits_ordered_sse_deltas(
         return _StreamResponse(lines)
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     provider = OpenAICompatibleProvider(
         base_url="https://faroapi.com/v1", api_key_env="FARO_API_KEY"
@@ -347,7 +347,7 @@ def test_structure_from_image_accepts_multi_problem_envelope(
         )
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     provider = OpenAICompatibleProvider(
         base_url="https://faroapi.com/v1",
@@ -388,7 +388,7 @@ def test_remote_disconnect_is_retried_before_succeeding(
         return _Response({"data": [{"id": "vision-model"}]})
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     monkeypatch.setattr(
         "yancuo_win.ai.openai_compatible.time.sleep", delays.append
@@ -412,7 +412,7 @@ def test_remote_disconnect_exhaustion_uses_actionable_chinese_error(
         raise http.client.RemoteDisconnected("remote closed")
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", always_disconnect
+        "yancuo_win.ai.openai_compatible.safe_urlopen", always_disconnect
     )
     monkeypatch.setattr("yancuo_win.ai.openai_compatible.time.sleep", lambda _delay: None)
     provider = OpenAICompatibleProvider(
@@ -433,7 +433,7 @@ def test_chat_disconnect_uses_chat_specific_retry_instruction(
         raise http.client.RemoteDisconnected("remote closed")
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", always_disconnect
+        "yancuo_win.ai.openai_compatible.safe_urlopen", always_disconnect
     )
     monkeypatch.setattr("yancuo_win.ai.openai_compatible.time.sleep", lambda _delay: None)
     provider = OpenAICompatibleProvider(

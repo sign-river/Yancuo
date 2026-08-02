@@ -26,6 +26,7 @@ from yancuo_win.ai.base import (
 )
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import get_secret
+from yancuo_win.infrastructure.safe_http import safe_urlopen
 
 
 _MAX_REQUEST_ATTEMPTS = 3
@@ -133,7 +134,7 @@ class OpenAICompatibleProvider(AIProvider):
                 method=method,
             )
             try:
-                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                with safe_urlopen(request, timeout=timeout_seconds) as response:
                     headers = getattr(response, "headers", None)
                     if headers is not None:
                         for header in (
@@ -238,7 +239,7 @@ class OpenAICompatibleProvider(AIProvider):
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                with safe_urlopen(request, timeout=timeout_seconds) as response:
                     headers = getattr(response, "headers", None)
                     content_type = str(headers.get("Content-Type") if headers else "")
                     if "text/event-stream" not in content_type.lower():

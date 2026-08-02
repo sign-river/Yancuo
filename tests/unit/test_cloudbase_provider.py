@@ -39,7 +39,7 @@ def test_health_uses_gateway_token_and_environment_header(monkeypatch) -> None: 
         return _Response({"ok": True, "data": {"healthy": True}})
 
     monkeypatch.setattr("yancuo_win.cloud.cloudbase.get_secret", lambda _key: "test-token")
-    monkeypatch.setattr("yancuo_win.cloud.cloudbase.urlopen", fake_urlopen)
+    monkeypatch.setattr("yancuo_win.cloud.cloudbase.safe_urlopen", fake_urlopen)
     provider = CloudBaseGatewayProvider(
         environment_id="yancuo-prod-xxxxx",
         gateway_url="https://gateway.example.test/base",
@@ -90,7 +90,7 @@ def test_cloudbase_gateway_response_size_is_bounded(monkeypatch) -> None:  # typ
     monkeypatch.setattr("yancuo_win.cloud.cloudbase.get_secret", lambda _key: "token")
     monkeypatch.setattr("yancuo_win.cloud.cloudbase._MAX_GATEWAY_RESPONSE_BYTES", 16)
     monkeypatch.setattr(
-        "yancuo_win.cloud.cloudbase.urlopen",
+        "yancuo_win.cloud.cloudbase.safe_urlopen",
         lambda *_args, **_kwargs: io.BytesIO(b"{" + b"x" * 32 + b"}"),
     )
     provider = CloudBaseGatewayProvider(
@@ -118,7 +118,7 @@ def test_cloudbase_download_cleans_oversized_partial_file(
         lambda *_args, **_kwargs: {"url": "https://storage.example.test/object"},
     )
     monkeypatch.setattr(
-        "yancuo_win.cloud.cloudbase.urlopen",
+        "yancuo_win.cloud.cloudbase.safe_urlopen",
         lambda *_args, **_kwargs: io.BytesIO(b"oversized"),
     )
     destination = tmp_path / "snapshot.ebpack"
