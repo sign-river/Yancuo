@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session, selectinload
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.sqlite_snapshot import create_sqlite_snapshot
 from yancuo_win.assets.object_store import ObjectStore
+from yancuo_win.infrastructure.atomic_file import atomic_text_writer
 from yancuo_win.infrastructure.safe_http import safe_urlopen
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
@@ -69,6 +70,7 @@ from yancuo_win.domain.review_rules import (
     mastery_from_grade,
     validate_grade,
 )
+
 from yancuo_win.domain.similarity import normalize_text, text_similarity
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
@@ -80,6 +82,7 @@ from yancuo_win.infrastructure.archive import (
 )
 from yancuo_win.domain.identity import read_identity
 
+_STUDY_EXPORT_BATCH_SIZE = 200
 MAX_BACKUP_METADATA_BYTES = 4 * 1024 * 1024
 MAX_CHAPTER_TEMPLATE_BYTES = 4 * 1024 * 1024
 MAX_CHAPTER_TEMPLATE_ITEMS = 10_000
@@ -750,8 +753,8 @@ class AppServices:
             "subject": {"name": subject_name},
             "chapters": chapters_payload,
         }
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        with atomic_text_writer(dest) as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
         return dest
 
     def import_chapter_template(self, path: Path) -> str:
@@ -1845,7 +1848,7 @@ class AppServices:
             return records
 
     def export_study_session_csv(self, study_session_id: str, dest: Path) -> Path:
-        with dest.open("w", encoding="utf-8-sig", newline="") as handle:
+        with atomic_text_writer(dest, encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
                 fieldnames=[
@@ -1859,27 +1862,42 @@ class AppServices:
                 ],
             )
             writer.writeheader()
-            for record in self.study_session_records(study_session_id):
-                writer.writerow(
-                    {
-                        "problem_id": record.problem_id,
-                        "grade": record.grade,
-                        "answer_viewed_at": record.answer_viewed_at.isoformat()
-                        if record.answer_viewed_at
-                        else "",
-                        "answered_at": record.answered_at.isoformat() if record.answered_at else "",
-                        "graded_at": record.graded_at.isoformat(),
-                        "interval_days": record.interval_days,
-                        "next_review_at": record.next_review_at.isoformat(),
-                    }
-                )
+            with self.session() as session:
+                for records in self._study_record_batches(session, study_session_id):
+                    for record in records:
+                        writer.writerow(
+                            {
+                                "problem_id": record.problem_id,
+                                "grade": record.grade,
+                                "answer_viewed_at": record.answer_viewed_at.isoformat()
+                                if record.answer_viewed_at
+                                else "",
+                                "answered_at": record.answered_at.isoformat()
+                                if record.answered_at
+                                else "",
+                                "graded_at": record.graded_at.isoformat(),
+                                "interval_days": record.interval_days,
+                                "next_review_at": record.next_review_at.isoformat(),
+                            }
+                        )
         return dest
+
+    @staticmethod
+    def _study_record_batches(session: Session, study_session_id: str):
+        statement = (
+            select(StudyRecord)
+            .where(StudyRecord.study_session_id == study_session_id)
+            .order_by(StudyRecord.graded_at)
+        )
+        records = session.scalars(statement).yield_per(_STUDY_EXPORT_BATCH_SIZE)
+        return records.partitions(_STUDY_EXPORT_BATCH_SIZE)
 
     def export_study_session_share(self, study_session_id: str, dest: Path) -> Path:
         """Privacy-safe aggregate: no question text, answers, sources, or identifiers."""
         summary = self.finish_study_session(study_session_id)
         summary.pop("session_id", None)
-        dest.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        with atomic_text_writer(dest) as stream:
+            json.dump(summary, stream, ensure_ascii=False, indent=2)
         return dest
 
     def schedule_initial_review(self, problem_id: str) -> None:

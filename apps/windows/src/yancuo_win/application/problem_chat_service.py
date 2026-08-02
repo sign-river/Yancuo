@@ -20,6 +20,7 @@ from yancuo_win.data.ids import new_id
 from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.data.models import Asset, Problem, ProblemConversation, ProblemMessage, utcnow
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.infrastructure.atomic_file import atomic_text_writer
 
 
 _MAX_CHAT_IMAGE_COUNT = 20
@@ -497,5 +498,6 @@ class ProblemChatService:
         for message in conversation.messages:
             role = "我" if message.role == "user" else "AI"
             parts.extend([f"## {role}", message.content_markdown, ""])
-        dest.write_text("\n".join(parts), encoding="utf-8")
+        with atomic_text_writer(dest) as stream:
+            stream.write("\n".join(parts))
         return dest

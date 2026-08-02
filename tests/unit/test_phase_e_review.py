@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import yancuo_win.application.services as services_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.note_service import NoteService
 from yancuo_win.application.services import AppServices
@@ -90,6 +91,54 @@ def test_study_session_records_each_grade_without_reusing_change_review(services
     summary = services.finish_study_session(session.id)
     assert summary["status"] == "completed"
     assert summary["completed_count"] == 1
+
+
+def test_study_session_csv_is_batched_and_atomically_replaced(
+    services: AppServices, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    problems = [
+        services.create_problem(title=f"导出复习题 {index}", status="active")
+        for index in range(3)
+    ]
+    study_session, _queue = services.start_study_session(problem_ids=[p.id for p in problems])
+    for problem in problems:
+        services.record_review(problem.id, 4, study_session_id=study_session.id)
+    batch_sizes: list[int] = []
+    original_batches = AppServices._study_record_batches
+
+    def record_batches(session, study_session_id):
+        for batch in original_batches(session, study_session_id):
+            batch_sizes.append(len(batch))
+            yield batch
+
+    monkeypatch.setattr(services_module, "_STUDY_EXPORT_BATCH_SIZE", 2)
+    monkeypatch.setattr(
+        AppServices, "_study_record_batches", staticmethod(record_batches)
+    )
+    destination = tmp_path / "records.csv"
+
+    services.export_study_session_csv(study_session.id, destination)
+
+    assert batch_sizes == [2, 1]
+    assert len(destination.read_text(encoding="utf-8-sig").splitlines()) == 4
+
+
+def test_study_session_csv_failure_preserves_existing_file(
+    services: AppServices, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "records.csv"
+    destination.write_bytes(b"previous-export")
+
+    def fail_writeheader(_self):
+        raise OSError("simulated csv failure")
+
+    monkeypatch.setattr(services_module.csv.DictWriter, "writeheader", fail_writeheader)
+
+    with pytest.raises(OSError, match="simulated csv failure"):
+        services.export_study_session_csv("missing-session", destination)
+
+    assert destination.read_bytes() == b"previous-export"
+    assert list(tmp_path.glob(".records.csv.*.tmp")) == []
 
 
 def test_review_queue_respects_type_and_quantity_without_rescheduling(services: AppServices) -> None:
