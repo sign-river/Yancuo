@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+import yancuo_win.application.sync_service as sync_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.application.sync_service import SyncService
@@ -133,7 +134,9 @@ def test_operation_validation_rejects_cumulative_attachment_budget(
         validate_operation(operation)
 
 
-def test_local_folder_push_pull_auto_merge(runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_local_folder_push_pull_auto_merge(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     cloud_root = tmp_path / "cloud"
     provider = LocalFolderProvider(cloud_root)
     runtime.settings.cloud.repository.owner = "local"
@@ -221,7 +224,9 @@ def test_pull_same_field_creates_review(runtime, tmp_path: Path):
     assert result["review_session_id"]
     with runtime.session_factory() as s:
         item = s.scalar(
-            select(ReviewItem).where(ReviewItem.problem_id == pid, ReviewItem.status == "conflict")
+            select(ReviewItem).where(
+                ReviewItem.problem_id == pid, ReviewItem.status == "conflict"
+            )
         )
         assert item is not None
         session = s.get(ReviewSession, item.session_id)
@@ -241,14 +246,18 @@ def test_local_mutations_are_recorded_as_operations(runtime):
     services.restore_problem(problem.id, "active")
 
     with runtime.session_factory() as s:
-        rows = list(s.scalars(select(SyncOperation).order_by(SyncOperation.created_at)).all())
+        rows = list(
+            s.scalars(select(SyncOperation).order_by(SyncOperation.created_at)).all()
+        )
 
     operations = [row.operation for row in rows if row.entity_id == problem.id]
     assert "create" in operations
     assert "update" in operations
     assert "delete" in operations
     assert "undelete" in operations
-    payloads = [json.loads(row.payload_json) for row in rows if row.entity_id == problem.id]
+    payloads = [
+        json.loads(row.payload_json) for row in rows if row.entity_id == problem.id
+    ]
     review_payloads = [p for p in payloads if "next_review_at" in p["changed_fields"]]
     assert review_payloads
     assert all(p["new_revision"] > p["base_revision"] for p in review_payloads)
@@ -325,7 +334,12 @@ def test_structured_figure_operation_carries_and_restores_derived_asset(
         assert asset is not None
         assert asset.problem_id == problem.id
         assert asset.is_immutable is True
-        assert SyncService(runtime, provider).store.resolve(asset.relative_path).read_bytes() == payload
+        assert (
+            SyncService(runtime, provider)
+            .store.resolve(asset.relative_path)
+            .read_bytes()
+            == payload
+        )
 
 
 def test_local_structured_figure_update_embeds_referenced_crop(runtime, tmp_path: Path):
@@ -372,7 +386,10 @@ def test_local_structured_figure_update_embeds_referenced_crop(runtime, tmp_path
         if operation["changed_fields"].get("question_content_json") == content_json
     )
     assert update["attachments"][0]["id"] == asset_id
-    assert base64.b64decode(update["attachments"][0]["content_base64"]) == crop.read_bytes()
+    assert (
+        base64.b64decode(update["attachments"][0]["content_base64"])
+        == crop.read_bytes()
+    )
 
 
 def test_operation_attachment_budget_rejects_before_large_read(
@@ -462,7 +479,9 @@ def test_remote_create_materializes_unknown_problem(runtime, tmp_path: Path):
         assert problem.next_review_at is not None
 
 
-def test_remote_update_cannot_overwrite_identity_or_relationships(runtime, tmp_path: Path):
+def test_remote_update_cannot_overwrite_identity_or_relationships(
+    runtime, tmp_path: Path
+):
     provider = LocalFolderProvider(tmp_path / "remote-safe-fields")
     runtime.settings.cloud.repository.owner = "local"
     runtime.settings.cloud.repository.name = "safe-fields-repo"
@@ -561,9 +580,15 @@ def test_remote_update_waits_for_late_create(runtime, tmp_path: Path):
         assert all(row.applied_at is not None for row in rows)
 
 
-def test_github_operation_batch_push_pull_and_profile_isolation(runtime, tmp_path: Path, monkeypatch) -> None:
+def test_github_operation_batch_push_pull_and_profile_isolation(
+    runtime, tmp_path: Path, monkeypatch
+) -> None:
     provider = GitHubProvider(token="ghp_test")
-    manifest: dict[str, Any] = {"format": "yancuo-profile-snapshots", "profiles": {}, "aliases": {}}
+    manifest: dict[str, Any] = {
+        "format": "yancuo-profile-snapshots",
+        "profiles": {},
+        "aliases": {},
+    }
     assets: dict[tuple[str, str], Path] = {}
     locked = False
 
@@ -583,14 +608,17 @@ def test_github_operation_batch_push_pull_and_profile_isolation(runtime, tmp_pat
     provider.read_sync_manifest = lambda *_args: json.loads(json.dumps(manifest))  # type: ignore[method-assign]
     provider.write_sync_manifest = lambda *_args: manifest.update(_args[-1])  # type: ignore[method-assign]
     provider.create_release = lambda *_args, **kwargs: None  # type: ignore[method-assign]
+
     def upload(_owner, _repo, *, tag, file_path, asset_name):
         target = tmp_path / f"{tag}-{asset_name}"
         shutil.copy2(file_path, target)
         assets[(tag, asset_name)] = target
         return {"name": asset_name}
+
     def download(_owner, _repo, *, tag, asset_name, dest):
         shutil.copy2(assets[(tag, asset_name)], dest)
         return dest
+
     provider.upload_release_asset = upload  # type: ignore[method-assign]
     provider.download_release_asset = download  # type: ignore[method-assign]
 
@@ -610,8 +638,17 @@ def test_github_operation_batch_push_pull_and_profile_isolation(runtime, tmp_pat
     assert repeated["applied"] == 0
 
     batch = manifest["operation_batches"][0]
-    assets[(batch["tag"], batch["asset_name"])].write_text("tampered\n", encoding="utf-8")
+    assets[(batch["tag"], batch["asset_name"])].write_text(
+        "tampered\n", encoding="utf-8"
+    )
     with pytest.raises(DomainError, match="哈希"):
+        SyncService(second, provider)._github_remote_operations(provider)
+
+    oversized_line = b"12345"
+    assets[(batch["tag"], batch["asset_name"])].write_bytes(oversized_line)
+    batch["sha256"] = hashlib.sha256(oversized_line).hexdigest()
+    monkeypatch.setattr(sync_module, "MAX_REMOTE_OPERATION_LINE_BYTES", 4)
+    with pytest.raises(DomainError, match="单行过大"):
         SyncService(second, provider)._github_remote_operations(provider)
 
     manifest["operation_batches"][0]["profile_id"] = "profile_other"
@@ -620,14 +657,18 @@ def test_github_operation_batch_push_pull_and_profile_isolation(runtime, tmp_pat
     assert SyncService(third, provider)._github_remote_operations(provider) == []
 
 
-def test_github_batch_upload_failure_keeps_index_and_operations_unpushed(runtime) -> None:
+def test_github_batch_upload_failure_keeps_index_and_operations_unpushed(
+    runtime,
+) -> None:
     provider = GitHubProvider(token="ghp_test")
     manifest: dict[str, Any] = {"format": "yancuo-profile-snapshots", "profiles": {}}
     provider.acquire_lock = lambda *_args: True  # type: ignore[method-assign]
     provider.release_lock = lambda *_args: None  # type: ignore[method-assign]
     provider.read_sync_manifest = lambda *_args: manifest  # type: ignore[method-assign]
     provider.create_release = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
-    provider.upload_release_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(DomainError("模拟上传失败"))  # type: ignore[method-assign]
+    provider.upload_release_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        DomainError("模拟上传失败")
+    )  # type: ignore[method-assign]
     AppServices(runtime).create_problem(title="中断批次")
     sync = SyncService(runtime, provider)
     with pytest.raises(DomainError, match="上传失败"):

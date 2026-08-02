@@ -43,6 +43,7 @@ from yancuo_win.review.changeset import snapshot_problem_fields
 
 MAX_REMOTE_OPERATION_BATCHES = 10_000
 MAX_REMOTE_OPERATION_BATCH_BYTES = 64 * 1024 * 1024
+MAX_REMOTE_OPERATION_LINE_BYTES = 48 * 1024 * 1024
 MAX_REMOTE_OPERATIONS_PER_BATCH = 100_000
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -230,9 +231,7 @@ class SyncService:
 
     @property
     def repo(self) -> str:
-        return (
-            self.runtime.settings.cloud.repository.name or "graduate-mistake-book-data"
-        ).strip()
+        return (self.runtime.settings.cloud.repository.name or "graduate-mistake-book-data").strip()
 
     def _require_ops_provider(self) -> CloudProvider:
         provider = self.provider
@@ -262,20 +261,56 @@ class SyncService:
         tag = f"yancuo-ops-v1-{profile_id[-8:]}-{device_id[-8:]}-{batch_id[-8:]}"
         with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
             payload = Path(temporary) / "operations.jsonl"
-            payload.write_text("".join(json.dumps(op, ensure_ascii=False) + "\n" for op in ops), encoding="utf-8")
+            payload.write_text(
+                "".join(json.dumps(op, ensure_ascii=False) + "\n" for op in ops), encoding="utf-8"
+            )
             sha = self._sha256(payload)
-            body = json.dumps({"format": "yancuo-operation-batch", "format_version": 1, "batch_id": batch_id, "profile_id": profile_id, "device_id": device_id, "asset_name": "operations.jsonl", "operation_count": len(ops), "sha256": sha, "created_at": _utcnow().isoformat()}, ensure_ascii=False)
-            provider.create_release(self.owner, self.repo, tag=tag, name="Yancuo operation batch", body=body)
-            provider.upload_release_asset(self.owner, self.repo, tag=tag, file_path=payload, asset_name="operations.jsonl")
+            body = json.dumps(
+                {
+                    "format": "yancuo-operation-batch",
+                    "format_version": 1,
+                    "batch_id": batch_id,
+                    "profile_id": profile_id,
+                    "device_id": device_id,
+                    "asset_name": "operations.jsonl",
+                    "operation_count": len(ops),
+                    "sha256": sha,
+                    "created_at": _utcnow().isoformat(),
+                },
+                ensure_ascii=False,
+            )
+            provider.create_release(
+                self.owner, self.repo, tag=tag, name="Yancuo operation batch", body=body
+            )
+            provider.upload_release_asset(
+                self.owner, self.repo, tag=tag, file_path=payload, asset_name="operations.jsonl"
+            )
             verified = Path(temporary) / "verified.jsonl"
-            provider.download_release_asset(self.owner, self.repo, tag=tag, asset_name="operations.jsonl", dest=verified)
+            provider.download_release_asset(
+                self.owner, self.repo, tag=tag, asset_name="operations.jsonl", dest=verified
+            )
             if self._sha256(verified) != sha:
                 raise DomainError("远端 Operation 批次哈希不一致，未更新索引")
-        index = provider.read_sync_manifest(self.owner, self.repo) or {"format": "yancuo-profile-snapshots", "format_version": 1, "profiles": {}, "aliases": {}}
+        index = provider.read_sync_manifest(self.owner, self.repo) or {
+            "format": "yancuo-profile-snapshots",
+            "format_version": 1,
+            "profiles": {},
+            "aliases": {},
+        }
         batches = index.setdefault("operation_batches", [])
         if not isinstance(batches, list):
             raise DomainError("云端 Operation 批次索引无效")
-        batches.append({"tag": tag, "batch_id": batch_id, "profile_id": profile_id, "device_id": device_id, "asset_name": "operations.jsonl", "sha256": sha, "created_at": _utcnow().isoformat()})
+        batches.append(
+            {
+                "tag": tag,
+                "batch_id": batch_id,
+                "profile_id": profile_id,
+                "device_id": device_id,
+                "asset_name": "operations.jsonl",
+                "sha256": sha,
+                "created_at": _utcnow().isoformat(),
+            }
+        )
         provider.write_sync_manifest(self.owner, self.repo, index)
 
     def _github_remote_operations(self, provider: CloudProvider) -> list[dict[str, Any]]:
@@ -290,9 +325,17 @@ class SyncService:
         items: list[dict[str, Any]] = []
         seen_batches: set[str] = set()
         for batch in batches:
-            if not isinstance(batch, dict) or batch.get("profile_id") != self.runtime.identity.profile_id or batch.get("device_id") == self.runtime.identity.device_id:
+            if (
+                not isinstance(batch, dict)
+                or batch.get("profile_id") != self.runtime.identity.profile_id
+                or batch.get("device_id") == self.runtime.identity.device_id
+            ):
                 continue
-            tag, asset_name, expected = str(batch.get("tag") or ""), str(batch.get("asset_name") or ""), str(batch.get("sha256") or "")
+            tag, asset_name, expected = (
+                str(batch.get("tag") or ""),
+                str(batch.get("asset_name") or ""),
+                str(batch.get("sha256") or ""),
+            )
             batch_id = str(batch.get("batch_id") or "")
             if (
                 not tag
@@ -305,27 +348,38 @@ class SyncService:
             seen_batches.add(batch_id)
             with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
                 path = Path(temporary) / "operations.jsonl"
-                provider.download_release_asset(self.owner, self.repo, tag=tag, asset_name=asset_name, dest=path)
-                if (
-                    not path.is_file()
-                    or path.stat().st_size > MAX_REMOTE_OPERATION_BATCH_BYTES
-                ):
+                provider.download_release_asset(
+                    self.owner, self.repo, tag=tag, asset_name=asset_name, dest=path
+                )
+                if not path.is_file() or path.stat().st_size > MAX_REMOTE_OPERATION_BATCH_BYTES:
                     raise DomainError("远端 Operation 批次文件过大或不存在")
-                if self._sha256(path) != expected:
-                    raise DomainError("远端 Operation 批次哈希不一致")
+                digest = hashlib.sha256()
+                batch_items: list[dict[str, Any]] = []
+                physical_lines = 0
+                total_bytes = 0
                 try:
-                    lines = path.read_text(encoding="utf-8").splitlines()
+                    with path.open("rb") as stream:
+                        while line_bytes := stream.readline(MAX_REMOTE_OPERATION_LINE_BYTES + 1):
+                            physical_lines += 1
+                            if physical_lines > MAX_REMOTE_OPERATIONS_PER_BATCH:
+                                raise DomainError("远端 Operation 批次物理行数过多")
+                            if len(line_bytes) > MAX_REMOTE_OPERATION_LINE_BYTES:
+                                raise DomainError("远端 Operation 批次单行过大")
+                            total_bytes += len(line_bytes)
+                            if total_bytes > MAX_REMOTE_OPERATION_BATCH_BYTES:
+                                raise DomainError("远端 Operation 批次文件过大")
+                            digest.update(line_bytes)
+                            try:
+                                value = json.loads(line_bytes.decode("utf-8"))
+                            except json.JSONDecodeError:
+                                continue
+                            if isinstance(value, dict):
+                                batch_items.append(value)
                 except UnicodeDecodeError as exc:
                     raise DomainError("远端 Operation 批次不是有效 UTF-8") from exc
-                if len(lines) > MAX_REMOTE_OPERATIONS_PER_BATCH:
-                    raise DomainError("远端 Operation 批次记录过多")
-                for line in lines:
-                    try:
-                        value = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(value, dict):
-                        items.append(value)
+                if digest.hexdigest() != expected:
+                    raise DomainError("远端 Operation 批次哈希不一致")
+                items.extend(batch_items)
         return items
 
     def record_problem_update(
@@ -408,9 +462,7 @@ class SyncService:
                 try:
                     size = path.stat().st_size
                     if size <= 0 or size > remaining:
-                        raise DomainError(
-                            "单个 Operation 的派生题图总大小不能超过 32 MiB"
-                        )
+                        raise DomainError("单个 Operation 的派生题图总大小不能超过 32 MiB")
                     with path.open("rb") as stream:
                         payload = stream.read(remaining + 1)
                 except OSError:
@@ -434,9 +486,7 @@ class SyncService:
                 )
             missing = referenced_ids - {item["id"] for item in result}
             if missing:
-                raise DomainError(
-                    "结构化题目引用的派生题图缺失：" + ", ".join(sorted(missing))
-                )
+                raise DomainError("结构化题目引用的派生题图缺失：" + ", ".join(sorted(missing)))
             return result
 
     def list_unpushed(self) -> list[dict[str, Any]]:
@@ -507,7 +557,13 @@ class SyncService:
     def pull_and_merge(self) -> dict[str, Any]:
         provider = self._require_ops_provider()
         snapshot = self._local_snapshot_before_merge()
-        remote_ops = (provider.list_remote_operations(self.owner, self.repo, exclude_device=self.runtime.identity.device_id) if isinstance(provider, LocalFolderProvider) else self._github_remote_operations(provider))
+        remote_ops = (
+            provider.list_remote_operations(
+                self.owner, self.repo, exclude_device=self.runtime.identity.device_id
+            )
+            if isinstance(provider, LocalFolderProvider)
+            else self._github_remote_operations(provider)
+        )
         applied = 0
         auto_merged = 0
         conflict_items = 0
@@ -701,9 +757,7 @@ class SyncService:
         referenced_ids: set[str] = set()
         attachments: dict[str, dict[str, Any]] = {}
         for operation in operations:
-            content_json = (operation.get("changed_fields") or {}).get(
-                "question_content_json"
-            )
+            content_json = (operation.get("changed_fields") or {}).get("question_content_json")
             if isinstance(content_json, str):
                 referenced_ids.update(
                     str(block.get("derived_asset_id"))
@@ -778,9 +832,7 @@ class SyncService:
         elif problem.status != "trashed":
             problem.deleted_at = None
 
-    def _create_remote_problem(
-        self, session, entity_id: str, fields: dict[str, Any]
-    ) -> Problem:
+    def _create_remote_problem(self, session, entity_id: str, fields: dict[str, Any]) -> Problem:
         """从远端 create Operation 创建本地题目。"""
         kwargs: dict[str, Any] = {}
         for field, value in fields.items():
