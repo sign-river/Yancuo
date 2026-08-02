@@ -34,7 +34,8 @@ class _Response:
 
 class _StreamResponse:
     def __init__(self, lines: list[bytes]) -> None:
-        self.lines = lines
+        self.payload = b"".join(lines)
+        self.offset = 0
         self.headers = {"Content-Type": "text/event-stream; charset=utf-8"}
 
     def __enter__(self):
@@ -43,8 +44,16 @@ class _StreamResponse:
     def __exit__(self, *_args) -> None:
         return None
 
-    def __iter__(self):
-        return iter(self.lines)
+    def readline(self, size: int = -1) -> bytes:
+        if self.offset >= len(self.payload):
+            return b""
+        end = self.payload.find(b"\n", self.offset)
+        end = len(self.payload) if end < 0 else end + 1
+        if size >= 0:
+            end = min(end, self.offset + size)
+        line = self.payload[self.offset : end]
+        self.offset = end
+        return line
 
 
 class _BytesResponse:

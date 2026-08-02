@@ -36,6 +36,7 @@ _MAX_ERROR_RESPONSE_BYTES = 4 * 1024
 _MAX_AI_IMAGE_COUNT = 20
 _MAX_AI_IMAGE_BYTES = 32 * 1024 * 1024
 _MAX_AI_IMAGE_TOTAL_BYTES = 64 * 1024 * 1024
+_MAX_EMBEDDED_JSON_CANDIDATES = 128
 _RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 _TRANSIENT_NETWORK_ERRORS = (
     urllib.error.URLError,
@@ -238,7 +239,7 @@ class OpenAICompatibleProvider(AIProvider):
                     "AI 服务连接中断，程序已自动重试 2 次仍未恢复。"
                     f"{retry_instruction}。详情：{reason}"
                 ) from exc
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
                 raise DomainError("AI 服务返回了无法解析的响应") from exc
         if not isinstance(body, dict):
             raise DomainError("AI 响应格式无效")
@@ -316,7 +317,9 @@ class OpenAICompatibleProvider(AIProvider):
                     model_name = str(payload.get("model") or "")
                     usage: dict[str, Any] = {}
                     received_bytes = 0
-                    for raw_line in response:
+                    while raw_line := response.readline(
+                        _MAX_AI_RESPONSE_BYTES - received_bytes + 1
+                    ):
                         received_bytes += len(raw_line)
                         if received_bytes > _MAX_AI_RESPONSE_BYTES:
                             raise DomainError(
@@ -367,7 +370,7 @@ class OpenAICompatibleProvider(AIProvider):
                     time.sleep(0.6 * attempt)
                     continue
                 raise DomainError("AI 流式连接中断，已接收内容会保留，可重新尝试任务") from exc
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
                 raise DomainError("AI 流式响应格式无效") from exc
         raise DomainError("AI 流式请求未完成")
 
@@ -618,15 +621,16 @@ def _extract_json(text: str) -> dict[str, Any]:
         data = json.loads(text)
         if isinstance(data, dict):
             return data
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         pass
-    match = re.search(r"\{[\s\S]*\}", text)
-    if not match:
-        raise DomainError("无法从 AI 输出解析 JSON")
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise DomainError("AI 返回了无效 JSON") from exc
-    if not isinstance(data, dict):
-        raise DomainError("AI JSON 根节点必须是对象")
-    return data
+    decoder = json.JSONDecoder()
+    for candidate_index, match in enumerate(re.finditer(r"\{", text), start=1):
+        if candidate_index > _MAX_EMBEDDED_JSON_CANDIDATES:
+            raise DomainError("AI 输出包含过多 JSON 起始候选")
+        try:
+            data, _end = decoder.raw_decode(text, match.start())
+        except (json.JSONDecodeError, RecursionError):
+            continue
+        if isinstance(data, dict):
+            return data
+    raise DomainError("无法从 AI 输出解析 JSON")
