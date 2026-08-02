@@ -18,6 +18,11 @@ class YancuoDb private constructor(
     private val dbFile: File,
 ) : SQLiteOpenHelper(context, dbFile.absolutePath, null, DATABASE_VERSION) {
 
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        db.setForeignKeyConstraintsEnabled(true)
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         createCoreTables(db)
         db.execSQL(
