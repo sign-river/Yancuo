@@ -484,7 +484,6 @@ class LocalFolderProvider(CloudProvider):
             large_file_upload=True,
             delete_release=True,
             max_asset_bytes=self.MAX_ASSET_BYTES,
-            assets_first=False,
         )
 
     # —— 阶段 J：增量 Operation ——

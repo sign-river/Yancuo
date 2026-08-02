@@ -16,8 +16,8 @@ import yancuo_win.application.sync_service as sync_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.application.sync_service import SyncService
+from yancuo_win.cloud.cloudbase import CloudBaseGatewayProvider
 from yancuo_win.cloud.local_folder import LocalFolderProvider
-from yancuo_win.cloud.github import GitHubProvider
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.data.models import (
     Asset,
@@ -39,6 +39,14 @@ def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
     return bootstrap_runtime()
+
+
+def _cloudbase_provider() -> CloudBaseGatewayProvider:
+    return CloudBaseGatewayProvider(
+        environment_id="test-environment",
+        gateway_url="https://gateway.example.test",
+        credential_key="test-cloudbase-token",
+    )
 
 
 def test_merge_different_fields_auto() -> None:
@@ -471,9 +479,9 @@ def test_pull_orders_remote_operations_by_normalized_timestamp(
         "new_revision": 3,
         "changed_fields": {"solution_markdown": "最新解析"},
     }
-    provider = GitHubProvider(token="ghp_test")
+    provider = _cloudbase_provider()
     sync = SyncService(runtime, provider)
-    monkeypatch.setattr(sync, "_github_remote_operations", lambda _provider: [newer, older])
+    monkeypatch.setattr(sync, "_release_remote_operations", lambda _provider: [newer, older])
 
     result = sync.pull_and_merge()
 
@@ -937,10 +945,10 @@ def test_remote_update_waits_for_late_create(runtime, tmp_path: Path):
         assert all(row.applied_at is not None for row in rows)
 
 
-def test_github_operation_batch_push_pull_and_profile_isolation(
+def test_cloudbase_operation_batch_push_pull_and_profile_isolation(
     runtime, tmp_path: Path, monkeypatch
 ) -> None:
-    provider = GitHubProvider(token="ghp_test")
+    provider = _cloudbase_provider()
     manifest: dict[str, Any] = {
         "format": "yancuo-profile-snapshots",
         "profiles": {},
@@ -979,12 +987,12 @@ def test_github_operation_batch_push_pull_and_profile_isolation(
     provider.upload_release_asset = upload  # type: ignore[method-assign]
     provider.download_release_asset = download  # type: ignore[method-assign]
 
-    problem = AppServices(runtime).create_problem(title="GitHub 同步题")
+    problem = AppServices(runtime).create_problem(title="CloudBase 同步题")
     pushed = SyncService(runtime, provider).push_operations()
     assert pushed["pushed"] >= 1
     assert manifest["operation_batches"]
 
-    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "github-second"))
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "cloudbase-second"))
     second = bootstrap_runtime()
     second.identity = replace(second.identity, profile_id=runtime.identity.profile_id)
     pulled = SyncService(second, provider).pull_and_merge()
@@ -1001,7 +1009,7 @@ def test_github_operation_batch_push_pull_and_profile_isolation(
         sync_module, "MAX_REMOTE_OPERATION_TOTAL_BYTES", asset.stat().st_size - 1
     )
     with pytest.raises(DomainError, match="累计大小"):
-        SyncService(second, provider)._github_remote_operations(provider)
+        SyncService(second, provider)._release_remote_operations(provider)
     monkeypatch.setattr(sync_module, "MAX_REMOTE_OPERATION_TOTAL_BYTES", total_budget)
 
     spoofed = json.loads(asset.read_text(encoding="utf-8"))
@@ -1009,31 +1017,31 @@ def test_github_operation_batch_push_pull_and_profile_isolation(
     asset.write_text(json.dumps(spoofed, ensure_ascii=False) + "\n", encoding="utf-8")
     batch["sha256"] = hashlib.sha256(asset.read_bytes()).hexdigest()
     with pytest.raises(DomainError, match="设备与批次声明不一致"):
-        SyncService(second, provider)._github_remote_operations(provider)
+        SyncService(second, provider)._release_remote_operations(provider)
 
     assets[(batch["tag"], batch["asset_name"])].write_text(
         "tampered\n", encoding="utf-8"
     )
     with pytest.raises(DomainError, match="哈希"):
-        SyncService(second, provider)._github_remote_operations(provider)
+        SyncService(second, provider)._release_remote_operations(provider)
 
     oversized_line = b"12345"
     assets[(batch["tag"], batch["asset_name"])].write_bytes(oversized_line)
     batch["sha256"] = hashlib.sha256(oversized_line).hexdigest()
     monkeypatch.setattr(sync_module, "MAX_REMOTE_OPERATION_LINE_BYTES", 4)
     with pytest.raises(DomainError, match="单行过大"):
-        SyncService(second, provider)._github_remote_operations(provider)
+        SyncService(second, provider)._release_remote_operations(provider)
 
     manifest["operation_batches"][0]["profile_id"] = "profile_other"
     third = bootstrap_runtime()
     third.identity = replace(third.identity, profile_id=runtime.identity.profile_id)
-    assert SyncService(third, provider)._github_remote_operations(provider) == []
+    assert SyncService(third, provider)._release_remote_operations(provider) == []
 
 
-def test_github_batch_upload_failure_keeps_index_and_operations_unpushed(
+def test_cloudbase_batch_upload_failure_keeps_index_and_operations_unpushed(
     runtime,
 ) -> None:
-    provider = GitHubProvider(token="ghp_test")
+    provider = _cloudbase_provider()
     manifest: dict[str, Any] = {"format": "yancuo-profile-snapshots", "profiles": {}}
     provider.acquire_lock = lambda *_args: True  # type: ignore[method-assign]
     provider.release_lock = lambda *_args: None  # type: ignore[method-assign]
@@ -1053,8 +1061,8 @@ def test_github_batch_upload_failure_keeps_index_and_operations_unpushed(
     assert len(deleted) == 1
 
 
-def test_github_batch_manifest_failure_deletes_unindexed_release(runtime) -> None:
-    provider = GitHubProvider(token="ghp_test")
+def test_cloudbase_batch_manifest_failure_deletes_unindexed_release(runtime) -> None:
+    provider = _cloudbase_provider()
     manifest: dict[str, Any] = {"format": "yancuo-profile-snapshots", "profiles": {}}
     created: list[str] = []
     deleted: list[str] = []
@@ -1089,10 +1097,10 @@ def test_github_batch_manifest_failure_deletes_unindexed_release(runtime) -> Non
     assert sync.list_unpushed()
 
 
-def test_github_batch_rejects_oversized_outgoing_payload_before_release(
+def test_cloudbase_batch_rejects_oversized_outgoing_payload_before_release(
     runtime, monkeypatch
 ) -> None:
-    provider = GitHubProvider(token="ghp_test")
+    provider = _cloudbase_provider()
     released = False
 
     def create_release(*_args, **_kwargs):
@@ -1103,33 +1111,33 @@ def test_github_batch_rejects_oversized_outgoing_payload_before_release(
     monkeypatch.setattr(sync_module, "MAX_REMOTE_OPERATION_BATCH_BYTES", 4)
 
     with pytest.raises(DomainError, match="批次文件过大"):
-        SyncService(runtime, provider)._push_github_batch(provider, [{"value": "12345"}])
+        SyncService(runtime, provider)._push_release_batch(provider, [{"value": "12345"}])
 
     assert released is False
 
 
-def test_github_batch_rejects_malformed_or_full_index_before_release(
+def test_cloudbase_batch_rejects_malformed_or_full_index_before_release(
     runtime, monkeypatch
 ) -> None:
-    provider = GitHubProvider(token="ghp_test")
+    provider = _cloudbase_provider()
     created: list[str] = []
     provider.read_sync_manifest = lambda *_args: {"operation_batches": {}}  # type: ignore[method-assign]
     provider.create_release = lambda *_args, tag, **_kwargs: created.append(tag)  # type: ignore[method-assign]
     with pytest.raises(DomainError, match="索引无效"):
-        SyncService(runtime, provider)._github_remote_operations(provider)
+        SyncService(runtime, provider)._release_remote_operations(provider)
     with pytest.raises(DomainError, match="索引无效"):
-        SyncService(runtime, provider)._push_github_batch(provider, [{"value": 1}])
+        SyncService(runtime, provider)._push_release_batch(provider, [{"value": 1}])
 
     provider.read_sync_manifest = lambda *_args: {"operation_batches": [{}]}  # type: ignore[method-assign]
     monkeypatch.setattr(sync_module, "MAX_REMOTE_OPERATION_BATCHES", 1)
     with pytest.raises(DomainError, match="容量上限"):
-        SyncService(runtime, provider)._push_github_batch(provider, [{"value": 1}])
+        SyncService(runtime, provider)._push_release_batch(provider, [{"value": 1}])
 
     assert created == []
 
 
-def test_github_batch_never_uses_remote_asset_name_as_a_local_path(runtime) -> None:
-    provider = GitHubProvider(token="ghp_test")
+def test_cloudbase_batch_never_uses_remote_asset_name_as_a_local_path(runtime) -> None:
+    provider = _cloudbase_provider()
     downloads: list[Path] = []
     provider.read_sync_manifest = lambda *_args: {  # type: ignore[method-assign]
         "operation_batches": [
@@ -1147,5 +1155,5 @@ def test_github_batch_never_uses_remote_asset_name_as_a_local_path(runtime) -> N
         lambda *_args, **kwargs: downloads.append(Path(kwargs["dest"]))
     )
 
-    assert SyncService(runtime, provider)._github_remote_operations(provider) == []
+    assert SyncService(runtime, provider)._release_remote_operations(provider) == []
     assert downloads == []

@@ -338,28 +338,23 @@ class ServiceSettingsPage(QWidget):
         self.cloud_form = cloud_form
         self.provider = QComboBox()
         describe_field(self.provider, "云端提供商")
-        self.provider.addItem("本地文件夹（推荐先测通）", "local_folder")
-        self.provider.addItem("GitLink", "gitlink")
-        self.provider.addItem("GitHub", "github")
-        self.provider.addItem("腾讯云 CloudBase（完整备份）", "cloudbase")
+        self.provider.addItem("腾讯云 CloudBase", "cloudbase")
+        self.provider.addItem("本地文件夹（离线测试）", "local_folder")
         idx = self.provider.findData(s.cloud.default_provider)
         if idx < 0:
-            idx = self.provider.findData("local_folder")
+            idx = self.provider.findData("cloudbase")
         self.provider.setCurrentIndex(max(0, idx))
         self.provider.currentIndexChanged.connect(self._on_provider_changed)
         cloud_form.addRow("云端提供商", self.provider)
 
         self.owner_edit = QLineEdit(s.cloud.repository.owner)
         self.repo_edit = QLineEdit(s.cloud.repository.name)
-        self.branch_edit = QLineEdit(s.cloud.repository.branch)
         describe_field(self.owner_edit, "仓库 owner")
         describe_field(self.repo_edit, "仓库 name")
-        describe_field(self.branch_edit, "同步分支")
         cloud_form.addRow("仓库 owner", self.owner_edit)
         self._add_field_error(cloud_form, "cloud_owner")
         cloud_form.addRow("仓库 name", self.repo_edit)
         self._add_field_error(cloud_form, "cloud_repo")
-        cloud_form.addRow("同步分支", self.branch_edit)
 
         self.local_root = QLineEdit(_default_local_root(runtime))
         describe_field(self.local_root, "本地云目录")
@@ -430,7 +425,6 @@ class ServiceSettingsPage(QWidget):
             self.provider,
             self.owner_edit,
             self.repo_edit,
-            self.branch_edit,
             self.local_root,
             self.browse_local_button,
             self.token_edit,
@@ -464,7 +458,7 @@ class ServiceSettingsPage(QWidget):
             if section == "appearance"
             else (self.ai_provider, self.ai_model, self.ai_token_edit)
             if section == "ai"
-            else (self.provider, self.owner_edit, self.repo_edit, self.branch_edit, self.local_root, self.cloudbase_environment_edit, self.cloudbase_gateway_edit, self.token_edit)
+            else (self.provider, self.owner_edit, self.repo_edit, self.local_root, self.cloudbase_environment_edit, self.cloudbase_gateway_edit, self.token_edit)
         )
         for field in tracked:
             for signal_name in (
@@ -810,10 +804,6 @@ class ServiceSettingsPage(QWidget):
     def _credential_key_for_provider(self) -> str | None:
         name = self.provider.currentData()
         s = self.runtime.settings
-        if name == "gitlink":
-            return s.cloud.gitlink.credential_key or "yancuo_gitlink_token"
-        if name == "github":
-            return s.cloud.github.credential_key or "yancuo_github_token"
         if name == "cloudbase":
             return s.cloud.cloudbase.credential_key or "yancuo_cloudbase_gateway_token"
         return None
@@ -821,17 +811,7 @@ class ServiceSettingsPage(QWidget):
     def _refresh_token_ui(self) -> None:
         name = self.provider.currentData()
         key = self._credential_key_for_provider()
-        if name == "gitlink":
-            self.token_label.setText("GitLink 令牌")
-            self.token_status.setText(mask_secret(get_secret(key) if key else None))
-            self.token_edit.setEnabled(True)
-            self._set_cloud_permission_state(key)
-        elif name == "github":
-            self.token_label.setText("GitHub PAT")
-            self.token_status.setText(mask_secret(get_secret(key) if key else None))
-            self.token_edit.setEnabled(True)
-            self._set_cloud_permission_state(key)
-        elif name == "cloudbase":
+        if name == "cloudbase":
             self.token_label.setText("CloudBase 网关令牌")
             self.token_status.setText(mask_secret(get_secret(key) if key else None))
             self.token_edit.setEnabled(True)
@@ -846,8 +826,8 @@ class ServiceSettingsPage(QWidget):
                 "本地文件夹提供商不需要云端令牌。",
                 "disabled",
             )
-        remote = name in {"gitlink", "github", "cloudbase"}
-        for field in (self.owner_edit, self.repo_edit, self.branch_edit, self.token_status, self.token_control, self.cloud_permission_notice):
+        remote = name == "cloudbase"
+        for field in (self.owner_edit, self.repo_edit, self.token_status, self.token_control, self.cloud_permission_notice):
             self.cloud_form.setRowVisible(field, remote)
         cloudbase = name == "cloudbase"
         for field in (self.cloudbase_environment_edit, self.cloudbase_gateway_edit):
@@ -924,7 +904,6 @@ class ServiceSettingsPage(QWidget):
                 owner=self.owner_edit.text(),
                 repository=self.repo_edit.text(),
                 local_root=self.local_root.text(),
-                branch=self.branch_edit.text(),
                 cloudbase_environment_id=self.cloudbase_environment_edit.text(),
                 cloudbase_gateway_url=self.cloudbase_gateway_edit.text(),
                 enabled=True,
@@ -942,7 +921,6 @@ class ServiceSettingsPage(QWidget):
         self.runtime.settings.cloud.repository.name = (
             self.repo_edit.text().strip() or "graduate-mistake-book-data"
         )
-        self.runtime.settings.cloud.repository.branch = self.branch_edit.text().strip() or "sync"
         self.runtime.settings.cloud.enabled = True
         local_root = self.local_root.text().strip()
         self.runtime.settings.cloud.local_root = local_root
@@ -989,7 +967,6 @@ class ServiceSettingsPage(QWidget):
                 owner=self.owner_edit.text(),
                 repository=self.repo_edit.text(),
                 local_root=self.local_root.text(),
-                branch=self.branch_edit.text(),
                 cloudbase_environment_id=self.cloudbase_environment_edit.text(),
                 cloudbase_gateway_url=self.cloudbase_gateway_edit.text(),
                 enabled=True,

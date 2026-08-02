@@ -1,4 +1,4 @@
-"""CloudBase complete-snapshot adapter through a deployed gateway function.
+"""CloudBase snapshot and immutable-operation adapter through a gateway.
 
 CloudBase client SDK credentials must never be embedded in a desktop client.
 The gateway owns Cloud Storage and PostgreSQL access; this adapter talks only

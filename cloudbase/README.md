@@ -1,6 +1,6 @@
-# CloudBase 完整备份网关
+# CloudBase 远端网关
 
-本目录是研错库迁移到腾讯云 CloudBase 的离线准备。目标环境为上海区 `yancuo-prod`、CloudBase 免费体验版、PostgreSQL。它只承载完整 `.ebpack` 快照与其索引，不开放现有的高频增量 Operation 同步。
+本目录是研错库腾讯云 CloudBase 正式远端通道的部署契约。目标环境为上海区 `yancuo-prod`、CloudBase 免费体验版、PostgreSQL。网关承载完整 `.ebpack` 快照、不可变 Operation 批次、资料索引和原子写锁。
 
 客户端不能直连 CloudBase PostgreSQL 或携带管理员密钥。部署名为 `yancuo-cloud-gateway` 的 HTTPS 云函数，由它以服务端身份访问 Cloud Storage 和 PostgreSQL；Windows 客户端只保存环境 ID、网关 HTTPS 地址，以及保存在 Windows Credential Manager 中的网关用户令牌。
 
@@ -10,7 +10,7 @@
 2. 在 PostgreSQL 的 SQL 编辑器执行 [`postgres/init.sql`](postgres/init.sql)。该脚本不包含账户、密码或环境 ID。
 3. 部署 `yancuo-cloud-gateway` 云函数，实现下面的 HTTP 契约。函数服务端配置 CloudBase 环境访问权限和令牌校验密钥；不要下发数据库连接串。
 4. 为真实用户签发受限网关令牌，令牌的 `sub` 是资料命名空间。函数须验证它，不能仅相信请求体中的 `owner`。
-5. Windows 设置中选择“腾讯云 CloudBase（完整备份）”，填写环境 ID、网关 HTTPS 地址、逻辑 owner/repository，并粘贴网关令牌。令牌会进入系统凭据，配置文件不保存令牌。
+5. Windows 设置中选择“腾讯云 CloudBase”，填写环境 ID、网关 HTTPS 地址、逻辑 owner/repository，并粘贴网关令牌。令牌会进入系统凭据，配置文件不保存令牌。
 6. 测试连接，创建逻辑仓库后做一次小型 `.ebpack` 备份和下载恢复验证。
 
 ## HTTP 契约
@@ -45,4 +45,4 @@ Content-Type: application/json
 - PostgreSQL 表启用 RLS；函数使用受控服务端角色，桌面端没有数据库账号。
 - 网关令牌、CloudBase SecretId/SecretKey、数据库密码均不得写入 TOML、日志或 Git。
 - `locks/acquire` 需采用 [`postgres/init.sql`](postgres/init.sql) 中的 `INSERT ... ON CONFLICT ... WHERE` 事务语义；不能用“先读再写”。
-- 本次迁移只接通完整备份/恢复。`SyncService` 的增量同步继续保留 LocalFolder/GitHub 通道，直到 CloudBase 的不可变批次与冲突恢复另行设计并验收。
+- 完整快照与 Operation 批次共享同一原子 manifest 和仓库锁；LocalFolder 仅保留为离线测试通道。

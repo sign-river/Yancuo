@@ -110,26 +110,21 @@ class PrivacyConfig(BaseModel):
 class CloudRepositoryConfig(BaseModel):
     owner: str = ""
     name: str = "graduate-mistake-book-data"
-    branch: str = "sync"
     require_private: bool = True
 
 
-class CloudProviderEndpointConfig(BaseModel):
-    base_url: str = ""
-    auth_method: str = "token"
-    credential_key: str = ""
-
-
-class CloudBaseConfig(CloudProviderEndpointConfig):
+class CloudBaseConfig(BaseModel):
     """CloudBase gateway connection details; tokens stay in system credentials."""
 
+    auth_method: str = "token"
+    credential_key: str = ""
     environment_id: str = ""
     gateway_url: str = ""
 
 
 class CloudConfig(BaseModel):
     enabled: bool = False
-    default_provider: str = "gitlink"
+    default_provider: str = "cloudbase"
     local_root: str = ""
     sync_mode: str = "manual"
     auto_backup: bool = True
@@ -140,26 +135,22 @@ class CloudConfig(BaseModel):
     upload_on_exit: bool = False
     download_on_start: bool = False
     repository: CloudRepositoryConfig = Field(default_factory=CloudRepositoryConfig)
-    gitlink: CloudProviderEndpointConfig = Field(
-        default_factory=lambda: CloudProviderEndpointConfig(
-            base_url="https://www.gitlink.org.cn",
-            auth_method="token",
-            credential_key="yancuo_gitlink_token",
-        )
-    )
-    github: CloudProviderEndpointConfig = Field(
-        default_factory=lambda: CloudProviderEndpointConfig(
-            base_url="https://api.github.com",
-            auth_method="token",
-            credential_key="yancuo_github_token",
-        )
-    )
     cloudbase: CloudBaseConfig = Field(
         default_factory=lambda: CloudBaseConfig(
             auth_method="gateway_token",
             credential_key="yancuo_cloudbase_gateway_token",
         )
     )
+
+    @field_validator("default_provider", mode="before")
+    @classmethod
+    def validate_provider(cls, value: object) -> str:
+        provider = str(value or "cloudbase").strip()
+        if provider in {"github", "gitlink"}:
+            return "cloudbase"
+        if provider not in {"local_folder", "cloudbase"}:
+            raise ValueError("云端提供商必须是 cloudbase 或 local_folder")
+        return provider
 
 
 class SyncConfig(BaseModel):
@@ -386,7 +377,9 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
     if isinstance(cloud, dict):
         provider = str(cloud.get("default_provider") or "").strip()
         if provider:
-            if provider not in {"local_folder", "gitlink", "github", "cloudbase"}:
+            if provider in {"gitlink", "github"}:
+                provider = "cloudbase"
+            if provider not in {"local_folder", "cloudbase"}:
                 raise ConfigError(f"本地偏好设置包含未知云端提供商：{provider}")
             settings.cloud.default_provider = provider
         repository = cloud.get("repository")
@@ -395,9 +388,6 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
             name = str(repository.get("name") or "").strip()
             if name:
                 settings.cloud.repository.name = name
-            branch = str(repository.get("branch") or "").strip()
-            if branch:
-                settings.cloud.repository.branch = branch
         settings.cloud.local_root = str(cloud.get("local_root") or "").strip()
         cloudbase = cloud.get("cloudbase")
         if isinstance(cloudbase, dict):
@@ -448,7 +438,6 @@ def save_cloud_preferences(
     owner: str,
     repository: str,
     local_root: str,
-    branch: str = "",
     cloudbase_environment_id: str = "",
     cloudbase_gateway_url: str = "",
     enabled: bool = True,
@@ -456,7 +445,7 @@ def save_cloud_preferences(
     """Persist non-sensitive cloud fields without writing access tokens."""
 
     provider = provider.strip()
-    if provider not in {"local_folder", "gitlink", "github", "cloudbase"}:
+    if provider not in {"local_folder", "cloudbase"}:
         raise ConfigError(f"未知云端提供商：{provider}")
     repository = repository.strip() or "graduate-mistake-book-data"
 
@@ -470,7 +459,6 @@ def save_cloud_preferences(
         "repository": {
             "owner": owner.strip(),
             "name": repository,
-            "branch": branch.strip() or "sync",
         },
         "local_root": local_root.strip(),
     }

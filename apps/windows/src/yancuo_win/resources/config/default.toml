@@ -70,7 +70,7 @@ mask_personal_information = false
 
 [cloud]
 enabled = true
-default_provider = "local_folder"
+default_provider = "cloudbase"
 sync_mode = "manual"
 auto_backup = false
 auto_backup_interval_hours = 24
@@ -83,18 +83,7 @@ download_on_start = false
 [cloud.repository]
 owner = ""
 name = "graduate-mistake-book-data"
-branch = "sync"
 require_private = true
-
-[cloud.gitlink]
-base_url = "https://www.gitlink.org.cn"
-auth_method = "token"
-credential_key = "yancuo_gitlink_token"
-
-[cloud.github]
-base_url = "https://api.github.com"
-auth_method = "token"
-credential_key = "yancuo_github_token"
 
 [cloud.cloudbase]
 # 腾讯云 CloudBase 上海区环境。部署 yancuo-cloud-gateway 后填写环境 ID 和 HTTPS 地址；

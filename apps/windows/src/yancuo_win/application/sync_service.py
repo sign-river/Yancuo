@@ -7,7 +7,6 @@ import json
 import hashlib
 import re
 import tempfile
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -323,9 +322,14 @@ class SyncService:
             self.provider = provider
         if isinstance(provider, LocalFolderProvider):
             return provider
-        if provider.name != "github" or not provider.get_capabilities().release_assets:
+        capabilities = provider.get_capabilities()
+        if provider.name != "cloudbase" or not (
+            capabilities.release_assets
+            and capabilities.atomic_file_update
+            and capabilities.delete_release
+        ):
             raise DomainError(
-                "增量同步仅支持 local_folder 或具备受控批次锁的 GitHub；GitLink 仍用完整备份。"
+                "增量同步仅支持 CloudBase；本地文件夹只用于离线测试。"
             )
         return provider
 
@@ -337,22 +341,22 @@ class SyncService:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def _cleanup_unindexed_github_batch(
+    def _cleanup_unindexed_release_batch(
         self, provider: CloudProvider, tag: str, failure: Exception
     ) -> None:
         try:
             provider.delete_release(self.owner, self.repo, tag=tag)
         except Exception as cleanup_exc:
             raise DomainError(
-                f"GitHub Operation 批次发布失败，且清理未入索引的 Release 失败：{cleanup_exc}"
+                f"CloudBase Operation 批次发布失败，且清理未入索引的 Release 失败：{cleanup_exc}"
             ) from failure
 
-    def _push_github_batch(self, provider: CloudProvider, ops: list[dict[str, Any]]) -> None:
+    def _push_release_batch(self, provider: CloudProvider, ops: list[dict[str, Any]]) -> None:
         if len(ops) > MAX_REMOTE_OPERATIONS_PER_BATCH:
             raise DomainError("待推送 Operation 批次记录过多")
         device_id = self.runtime.identity.device_id
         profile_id = self.runtime.identity.profile_id
-        batch_id = f"batch_{uuid.uuid4().hex}"
+        batch_id = new_id("batch")
         tag = f"yancuo-ops-v1-{profile_id[-8:]}-{device_id[-8:]}-{batch_id[-8:]}"
         with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
             payload = Path(temporary) / "operations.jsonl"
@@ -422,7 +426,7 @@ class SyncService:
                 if self._sha256(verified) != sha:
                     raise DomainError("远端 Operation 批次哈希不一致，未更新索引")
             except Exception as exc:
-                self._cleanup_unindexed_github_batch(provider, tag, exc)
+                self._cleanup_unindexed_release_batch(provider, tag, exc)
                 raise
         try:
             batches.append(
@@ -440,10 +444,10 @@ class SyncService:
             index["operation_batches"] = batches
             provider.write_sync_manifest(self.owner, self.repo, index)
         except Exception as exc:
-            self._cleanup_unindexed_github_batch(provider, tag, exc)
+            self._cleanup_unindexed_release_batch(provider, tag, exc)
             raise
 
-    def _github_remote_operations(self, provider: CloudProvider) -> list[dict[str, Any]]:
+    def _release_remote_operations(self, provider: CloudProvider) -> list[dict[str, Any]]:
         index = provider.read_sync_manifest(self.owner, self.repo) or {}
         batches = index.get("operation_batches")
         if batches is not None and not isinstance(batches, list):
@@ -664,20 +668,20 @@ class SyncService:
 
     def push_operations(self) -> dict[str, Any]:
         provider = self._require_ops_provider()
-        github_batch = not isinstance(provider, LocalFolderProvider)
+        release_batch = not isinstance(provider, LocalFolderProvider)
         ops = self.list_unpushed(
-            limit=MAX_REMOTE_OPERATIONS_PER_BATCH + 1 if github_batch else None
+            limit=MAX_REMOTE_OPERATIONS_PER_BATCH + 1 if release_batch else None
         )
         if not ops:
             return {"pushed": 0}
-        if github_batch and len(ops) > MAX_REMOTE_OPERATIONS_PER_BATCH:
+        if release_batch and len(ops) > MAX_REMOTE_OPERATIONS_PER_BATCH:
             raise DomainError("待推送 Operation 批次记录过多")
         device_id = self.runtime.identity.device_id
         if not provider.acquire_lock(self.owner, self.repo, device_id):
             raise DomainError("无法获取同步锁")
         try:
-            if github_batch:
-                self._push_github_batch(provider, ops)
+            if release_batch:
+                self._push_release_batch(provider, ops)
                 now = _utcnow()
                 with self.runtime.session_factory() as s:
                     for op in ops:
@@ -802,7 +806,7 @@ class SyncService:
                 self.owner, self.repo, exclude_device=self.runtime.identity.device_id
             )
             if isinstance(provider, LocalFolderProvider)
-            else self._github_remote_operations(provider)
+            else self._release_remote_operations(provider)
         )
         applied = 0
         auto_merged = 0

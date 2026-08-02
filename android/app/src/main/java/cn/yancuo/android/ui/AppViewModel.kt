@@ -37,10 +37,7 @@ data class SettingsUiState(
     val dataRoot: String = "",
     val schemaVersion: Int = SCHEMA_VERSION,
     val dataFormatVersion: Int = DATA_FORMAT_VERSION,
-    val gitLinkToken: String = "",
-    val gitHubToken: String = "",
-    val hasGitLink: Boolean = false,
-    val hasGitHub: Boolean = false,
+    val hasCloudBaseToken: Boolean = false,
     val message: String? = null,
 )
 
@@ -180,17 +177,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             dataRoot = app.paths.root.absolutePath,
             schemaVersion = runCatching { app.db.schemaVersion() }.getOrDefault(SCHEMA_VERSION),
             dataFormatVersion = DATA_FORMAT_VERSION,
-            gitLinkToken = "",
-            gitHubToken = "",
-            hasGitLink = tokens.hasGitLinkToken(),
-            hasGitHub = tokens.hasGitHubToken(),
+            hasCloudBaseToken = tokens.hasCloudBaseToken(),
             message = null,
         )
     }
 
-    fun saveTokens(gitLink: String, gitHub: String) {
-        if (gitLink.isNotBlank()) app.tokenStore.saveGitLinkToken(gitLink)
-        if (gitHub.isNotBlank()) app.tokenStore.saveGitHubToken(gitHub)
+    fun saveToken(cloudBase: String) {
+        if (cloudBase.isNotBlank()) app.tokenStore.saveCloudBaseToken(cloudBase)
         refreshSettings()
         _settings.update { it.copy(message = "Token 已保存（加密存储）") }
     }

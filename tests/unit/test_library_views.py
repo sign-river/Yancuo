@@ -1163,7 +1163,7 @@ def test_settings_expose_loading_failure_disabled_and_permission_states(
 
     monkeypatch.setattr(settings_dialog_module, "get_secret", lambda _key: None)
     cloud_settings = window.cloud_settings_page
-    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("github"))
+    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("cloudbase"))
     assert cloud_settings.cloud_permission_notice.property("state") == "permission"
     assert "当前不可用" in cloud_settings.cloud_permission_notice.text()
     cloud_settings.provider.setCurrentIndex(
@@ -1199,7 +1199,9 @@ def test_settings_show_field_level_validation_errors(window: MainWindow) -> None
     assert not ai_settings._field_errors["ai_model"].isHidden()
 
     cloud_settings = window.cloud_settings_page
-    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("github"))
+    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("cloudbase"))
+    cloud_settings.cloudbase_environment_edit.setText("test-environment")
+    cloud_settings.cloudbase_gateway_edit.setText("https://gateway.example.test")
     cloud_settings.owner_edit.clear()
     cloud_settings.repo_edit.clear()
     cloud_settings._save_cloud_settings()
@@ -1219,7 +1221,7 @@ def test_settings_secrets_are_hidden_by_default_and_can_be_revealed(
     assert ai_settings.ai_token_visibility_button.text() == "隐藏"
 
     cloud_settings = window.cloud_settings_page
-    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("github"))
+    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("cloudbase"))
     assert cloud_settings.token_edit.echoMode() == QLineEdit.EchoMode.Password
     cloud_settings.token_visibility_button.click()
     assert cloud_settings.token_edit.echoMode() == QLineEdit.EchoMode.Normal

@@ -15,13 +15,13 @@
 
 ## 当前基线
 
-- Windows 数据库：`schema_version=19`
+- Windows 数据库：`schema_version=22`
 - 跨端字段语义：`data_format_version=1`
-- Windows 最近完整单元测试：`317 passed`
+- Windows 最近完整单元测试：`477 passed`
 - 路线图 A—K 已完成
 - 本地题库、笔记、复习、AI 录题、普通/受限 AI 搜索已经可用
-- `.ebpack` 完整快照、LocalFolder 增量同步和 GitHub Operation 批次已经交付
-- GitLink 因缺少可靠原子锁，只开放完整快照
+- `.ebpack` 完整快照、LocalFolder 离线同步和 CloudBase Operation 批次已经交付
+- 正式远端云通道统一为 CloudBase；旧 Git 仓库型 provider 已移除
 - AI 密钥和云端令牌只保存在系统凭据管理器
 
 详细能力与交付历史见 [`docs/完成记录.md`](docs/完成记录.md)，未完成任务见 [`docs/任务书.md`](docs/任务书.md)。

@@ -2,6 +2,8 @@
 
 > 本文保留云端和 Android 方案的完整设计背景。当前任务状态分别以 [`../tasks/同步与云端.md`](../tasks/同步与云端.md) 和 [`../tasks/Android.md`](../tasks/Android.md) 为准，协议实现以 [`../../protocol/README.md`](../../protocol/README.md) 为准。
 
+> 2026-08-02 起正式远端统一为 CloudBase，LocalFolder 仅作离线测试。本文中的旧 Git 仓库型 provider 章节属于历史比较材料，不再对应可选择的产品入口或运行时代码。
+
 ## 一、总体架构修正
 
 软件应形成三层数据结构：

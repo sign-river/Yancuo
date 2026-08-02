@@ -245,7 +245,33 @@ def test_failed_upload_does_not_update_latest(runtime, tmp_path: Path) -> None:
 
     latest = provider.read_sync_manifest("local", "fail-repo")
     assert latest is None
+    assert provider.list_releases("local", "fail-repo") == []
     assert not (cloud_root / "local" / "fail-repo" / "locks" / "primary.json").exists()
+
+
+def test_failed_manifest_publish_removes_unindexed_release(runtime, tmp_path: Path) -> None:
+    services = AppServices(runtime)
+    services.create_problem(title="interrupted manifest publish")
+    cloud_root = tmp_path / "cloud_manifest_fail"
+    provider = LocalFolderProvider(cloud_root)
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "manifest-fail-repo"
+    runtime.settings.cloud.enabled = True
+    cloud = CloudBackupService(runtime, provider)
+    cloud.ensure_repository()
+
+    def boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise DomainError("simulated manifest publish failure")
+
+    provider.write_sync_manifest = boom  # type: ignore[method-assign]
+
+    with pytest.raises(DomainError, match="manifest publish failure"):
+        cloud.upload_backup()
+
+    assert provider.list_releases("local", "manifest-fail-repo") == []
+    assert not (
+        cloud_root / "local" / "manifest-fail-repo" / "locks" / "primary.json"
+    ).exists()
 
 
 def test_mask_secret_never_full() -> None:

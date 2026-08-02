@@ -39,8 +39,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
 ) {
     val state by viewModel.settings.collectAsState()
-    var gitLink by remember { mutableStateOf("") }
-    var gitHub by remember { mutableStateOf("") }
+    var cloudBaseToken by remember { mutableStateOf("") }
     LaunchedEffect(Unit) { viewModel.refreshSettings() }
 
     val openEbpack = rememberLauncherForActivityResult(
@@ -95,26 +94,14 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            Text("云 Token（仅本地加密存储，阶段 I 不自动下载）", style = MaterialTheme.typography.titleSmall)
+            Text("CloudBase Token（仅本地加密存储，阶段 I 不自动下载）", style = MaterialTheme.typography.titleSmall)
             OutlinedTextField(
-                value = gitLink,
-                onValueChange = { gitLink = it },
+                value = cloudBaseToken,
+                onValueChange = { cloudBaseToken = it },
                 label = {
                     Text(
-                        if (state.hasGitLink) "GitLink Token（已保存，输入新值覆盖）"
-                        else "GitLink Token",
-                    )
-                },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            OutlinedTextField(
-                value = gitHub,
-                onValueChange = { gitHub = it },
-                label = {
-                    Text(
-                        if (state.hasGitHub) "GitHub Token（已保存，输入新值覆盖）"
-                        else "GitHub Token",
+                        if (state.hasCloudBaseToken) "CloudBase 网关 Token（已保存，输入新值覆盖）"
+                        else "CloudBase 网关 Token",
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -122,9 +109,8 @@ fun SettingsScreen(
             )
             Button(
                 onClick = {
-                    viewModel.saveTokens(gitLink, gitHub)
-                    gitLink = ""
-                    gitHub = ""
+                    viewModel.saveToken(cloudBaseToken)
+                    cloudBaseToken = ""
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {

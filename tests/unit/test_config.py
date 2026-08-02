@@ -33,7 +33,7 @@ def test_load_default_settings() -> None:
     assert settings.ai.enabled is True
     assert settings.ai.default_provider == "openai_compatible"
     assert settings.cloud.enabled is True
-    assert settings.cloud.default_provider == "local_folder"
+    assert settings.cloud.default_provider == "cloudbase"
     provider = settings.ai.providers.get("mock")
     assert provider is not None
     openai = settings.ai.providers.get("openai_compatible")
@@ -114,7 +114,7 @@ def test_preference_save_does_not_replace_corrupt_existing_file(
 def test_cloud_preferences_roundtrip_without_token(tmp_path: Path) -> None:
     path = save_cloud_preferences(
         tmp_path,
-        provider="gitlink",
+        provider="local_folder",
         owner="student-user",
         repository="mistake-book-data",
         local_root=r"D:\backups\yancuo",
@@ -123,11 +123,10 @@ def test_cloud_preferences_roundtrip_without_token(tmp_path: Path) -> None:
 
     assert payload["cloud"] == {
         "enabled": True,
-        "default_provider": "gitlink",
+        "default_provider": "local_folder",
         "repository": {
             "owner": "student-user",
             "name": "mistake-book-data",
-            "branch": "sync",
         },
         "local_root": r"D:\backups\yancuo",
     }
@@ -136,7 +135,7 @@ def test_cloud_preferences_roundtrip_without_token(tmp_path: Path) -> None:
     settings = load_settings(default_toml_path())
     apply_user_preferences(settings, tmp_path)
     assert settings.cloud.enabled is True
-    assert settings.cloud.default_provider == "gitlink"
+    assert settings.cloud.default_provider == "local_folder"
     assert settings.cloud.repository.owner == "student-user"
     assert settings.cloud.repository.name == "mistake-book-data"
     assert settings.cloud.local_root == r"D:\backups\yancuo"
@@ -146,7 +145,7 @@ def test_cloud_preferences_preserve_ai_settings(tmp_path: Path) -> None:
     save_ai_preferences(tmp_path, provider="mock", model="offline-test-model")
     path = save_cloud_preferences(
         tmp_path,
-        provider="github",
+        provider="cloudbase",
         owner="student-user",
         repository="mistake-book-data",
         local_root="",
@@ -154,7 +153,22 @@ def test_cloud_preferences_preserve_ai_settings(tmp_path: Path) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
 
     assert payload["ai"]["default_vision_model"] == "offline-test-model"
-    assert payload["cloud"]["default_provider"] == "github"
+    assert payload["cloud"]["default_provider"] == "cloudbase"
+
+
+@pytest.mark.parametrize("legacy_provider", ["github", "gitlink"])
+def test_legacy_remote_preferences_migrate_to_cloudbase(
+    tmp_path: Path, legacy_provider: str
+) -> None:
+    (tmp_path / "preferences.json").write_text(
+        json.dumps({"cloud": {"default_provider": legacy_provider}}),
+        encoding="utf-8",
+    )
+    settings = load_settings(default_toml_path())
+
+    apply_user_preferences(settings, tmp_path)
+
+    assert settings.cloud.default_provider == "cloudbase"
 
 
 def test_cloudbase_preferences_roundtrip_without_token(tmp_path: Path) -> None:

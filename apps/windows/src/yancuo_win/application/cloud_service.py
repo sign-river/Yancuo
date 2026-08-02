@@ -52,7 +52,6 @@ class CloudBackupService:
     def ensure_repository(self) -> dict[str, Any]:
         if self.provider.name == "local_folder":
             return self.provider.create_private_repository(self.repo)
-        # GitLink：仅探测访问
         return self.provider.get_repository(self.owner, self.repo)
 
     @staticmethod
@@ -221,6 +220,8 @@ class CloudBackupService:
         device_id = self.runtime.identity.device_id
         if not self.provider.acquire_lock(self.owner, self.repo, device_id):
             raise DomainError("无法获取主写入锁：另一台设备可能是主编辑设备")
+        created_tag: str | None = None
+        manifest_published = False
         try:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             profile_id = self.runtime.identity.profile_id
@@ -270,37 +271,21 @@ class CloudBackupService:
                 ensure_ascii=False,
             )
 
-            # GitLink：先附件后 Release；LocalFolder：先建目录再拷文件
-            if caps.assets_first:
-                asset_info = self.provider.upload_release_asset(
-                    self.owner,
-                    self.repo,
-                    tag=tag,
-                    file_path=pack,
-                    asset_name=asset_name,
-                )
-                release = self.provider.create_release(
-                    self.owner,
-                    self.repo,
-                    tag=tag,
-                    name=release_name,
-                    body=release_body,
-                )
-            else:
-                release = self.provider.create_release(
-                    self.owner,
-                    self.repo,
-                    tag=tag,
-                    name=release_name,
-                    body=release_body,
-                )
-                asset_info = self.provider.upload_release_asset(
-                    self.owner,
-                    self.repo,
-                    tag=tag,
-                    file_path=pack,
-                    asset_name=asset_name,
-                )
+            release = self.provider.create_release(
+                self.owner,
+                self.repo,
+                tag=tag,
+                name=release_name,
+                body=release_body,
+            )
+            created_tag = tag
+            asset_info = self.provider.upload_release_asset(
+                self.owner,
+                self.repo,
+                tag=tag,
+                file_path=pack,
+                asset_name=asset_name,
+            )
 
             if _sha256(pack) != sha:
                 raise DomainError("上传前后哈希不一致，已中止更新 latest")
@@ -338,6 +323,7 @@ class CloudBackupService:
             # 完整包就绪后才写资料索引；legacy 字段保留给旧客户端读取。
             index["legacy_latest"] = latest
             self.provider.write_sync_manifest(self.owner, self.repo, index)
+            manifest_published = True
             self.runtime.identity = record_snapshot_head(
                 self.runtime.paths.identity_file, self.runtime.identity, snapshot_id
             )
@@ -349,6 +335,18 @@ class CloudBackupService:
                 "release": release.tag,
                 "profile_id": profile_id,
             }
+        except Exception as exc:
+            if created_tag is not None and not manifest_published:
+                try:
+                    self.provider.delete_release(
+                        self.owner, self.repo, tag=created_tag
+                    )
+                except Exception as cleanup_exc:
+                    raise DomainError(
+                        "云快照发布失败，且清理未入索引的 Release 失败："
+                        f"{cleanup_exc}"
+                    ) from exc
+            raise
         finally:
             # 无论导出、上传或写 latest 哪一步失败，都释放主写入锁；
             # LocalFolder 的 TTL 只是最后一道兜底，不替代显式释放。
