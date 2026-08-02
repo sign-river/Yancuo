@@ -7,25 +7,48 @@ const tcb = require("@cloudbase/node-sdk");
 const {
   boundedName,
   boundedText,
+  integerSetting,
   newUploadToken,
   safeTokenEqual,
   subjectStorageKey,
   tokenHash,
 } = require("./security");
 
-const PORT = Number(process.env.PORT || 9000);
+const PORT = integerSetting(process.env.PORT, "PORT", 9000, 1, 65535);
 const ENV_ID = String(process.env.CLOUDBASE_ENV_ID || process.env.TCB_ENV || "").trim();
 const PUBLIC_URL = String(process.env.GATEWAY_PUBLIC_URL || "").replace(/\/$/, "");
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
-const MAX_ASSET_BYTES = Math.min(
-  Number(process.env.MAX_ASSET_BYTES || 512 * 1024 * 1024),
+const MAX_ASSET_BYTES = integerSetting(
+  process.env.MAX_ASSET_BYTES,
+  "MAX_ASSET_BYTES",
+  512 * 1024 * 1024,
+  1,
   512 * 1024 * 1024,
 );
-const USER_STORAGE_BYTES = Number(process.env.USER_STORAGE_BYTES || 512 * 1024 * 1024);
-const USER_REPOSITORIES = Number(process.env.USER_REPOSITORIES || 5);
-const RATE_PER_MINUTE = Number(process.env.RATE_PER_MINUTE || 120);
+const USER_STORAGE_BYTES = integerSetting(
+  process.env.USER_STORAGE_BYTES,
+  "USER_STORAGE_BYTES",
+  512 * 1024 * 1024,
+  1,
+  Number.MAX_SAFE_INTEGER,
+);
+const USER_REPOSITORIES = integerSetting(
+  process.env.USER_REPOSITORIES,
+  "USER_REPOSITORIES",
+  5,
+  1,
+  1000,
+);
+const RATE_PER_MINUTE = integerSetting(
+  process.env.RATE_PER_MINUTE,
+  "RATE_PER_MINUTE",
+  120,
+  1,
+  1_000_000,
+);
+const PG_POOL_SIZE = integerSetting(process.env.PG_POOL_SIZE, "PG_POOL_SIZE", 5, 1, 100);
 
 if (!ENV_ID || !DATABASE_URL) {
   throw new Error("CLOUDBASE_ENV_ID/TCB_ENV and DATABASE_URL are required");
@@ -33,7 +56,7 @@ if (!ENV_ID || !DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  max: Number(process.env.PG_POOL_SIZE || 5),
+  max: PG_POOL_SIZE,
   idleTimeoutMillis: 20_000,
   statement_timeout: 30_000,
   ssl: process.env.PG_SSL === "disable" ? false : { rejectUnauthorized: false },

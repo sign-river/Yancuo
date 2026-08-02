@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const {
   boundedName,
   boundedText,
+  integerSetting,
   newUploadToken,
   safeTokenEqual,
   subjectStorageKey,
@@ -35,4 +36,12 @@ test("storage namespaces never expose raw identity subjects", () => {
   assert.equal(key.includes(subject), false);
   assert.equal(subjectStorageKey(subject), key);
   assert.notEqual(subjectStorageKey("other-user"), key);
+});
+
+test("numeric deployment settings fail closed", () => {
+  assert.equal(integerSetting(undefined, "LIMIT", 5, 1, 10), 5);
+  assert.equal(integerSetting("10", "LIMIT", 5, 1, 10), 10);
+  for (const value of ["NaN", "1.5", "0", "11", "Infinity"]) {
+    assert.throws(() => integerSetting(value, "LIMIT", 5, 1, 10), /LIMIT/);
+  }
 });

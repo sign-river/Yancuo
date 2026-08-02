@@ -36,6 +36,15 @@ function subjectStorageKey(subject) {
   return crypto.createHash("sha256").update(String(subject), "utf8").digest("hex");
 }
 
+function integerSetting(value, label, fallback, min, max) {
+  const raw = value === undefined || value === null || value === "" ? fallback : value;
+  const result = Number(raw);
+  if (!Number.isSafeInteger(result) || result < min || result > max) {
+    throw new Error(`${label} 必须是 ${min}–${max} 范围内的整数`);
+  }
+  return result;
+}
+
 function safeTokenEqual(token, expectedHash) {
   const actual = Buffer.from(tokenHash(token), "hex");
   const expected = Buffer.from(String(expectedHash || ""), "hex");
@@ -45,6 +54,7 @@ function safeTokenEqual(token, expectedHash) {
 module.exports = {
   boundedName,
   boundedText,
+  integerSetting,
   newUploadToken,
   safeTokenEqual,
   subjectStorageKey,
