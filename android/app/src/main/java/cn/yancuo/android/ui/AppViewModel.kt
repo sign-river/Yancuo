@@ -18,6 +18,8 @@ import cn.yancuo.android.data.repo.parseTagCsv
 import cn.yancuo.android.domain.DATA_FORMAT_VERSION
 import cn.yancuo.android.domain.SCHEMA_VERSION
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -62,9 +64,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
     private val importGate = ExclusiveOperationGate()
+    private val homeRequestGate = LatestRequestGate()
+    private val detailRequestGate = LatestRequestGate()
+    private var homeRefreshJob: Job? = null
+    private var detailLoadJob: Job? = null
 
-    fun refreshHome() {
-        viewModelScope.launch {
+    fun refreshHome(debounceMillis: Long = 0) {
+        val request = homeRequestGate.next()
+        homeRefreshJob?.cancel()
+        homeRefreshJob = viewModelScope.launch {
+            if (debounceMillis > 0) delay(debounceMillis)
             val state = _home.value
             val status = when (state.tab) {
                 HomeTab.INBOX -> "inbox"
@@ -78,7 +87,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     all
                 }
             }
-            _home.update { it.copy(items = items) }
+            if (homeRequestGate.isCurrent(request)) {
+                _home.update { it.copy(items = items) }
+            }
         }
     }
 
@@ -89,7 +100,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setQuery(query: String) {
         _home.update { it.copy(query = query.take(512)) }
-        refreshHome()
+        refreshHome(debounceMillis = 180)
     }
 
     fun refreshDue() {
@@ -99,8 +110,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadDetail(id: String) {
-        viewModelScope.launch {
-            _detail.value = withContext(Dispatchers.IO) { app.problems.get(id) }
+        val request = detailRequestGate.next()
+        detailLoadJob?.cancel()
+        detailLoadJob = viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) { app.problems.get(id) }
+            if (detailRequestGate.isCurrent(request)) _detail.value = loaded
         }
     }
 
