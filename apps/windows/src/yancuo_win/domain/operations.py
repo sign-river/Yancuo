@@ -18,6 +18,40 @@ ALLOWED_ENTITIES = frozenset({"problem", "tag", "asset", "review"})
 MAX_OPERATION_ATTACHMENT_BYTES = 32 * 1024 * 1024
 MAX_OPERATION_ID_CHARS = 64
 MAX_OPERATION_TIMESTAMP_CHARS = 64
+MAX_OPERATION_FIELDS = 64
+PROBLEM_OPERATION_FIELDS = frozenset(
+    {
+        "status",
+        "subject_id",
+        "chapter_id",
+        "problem_type",
+        "title",
+        "question_markdown",
+        "question_latex",
+        "question_content_json",
+        "user_answer",
+        "correct_answer",
+        "solution_markdown",
+        "error_analysis",
+        "notes",
+        "source_book",
+        "source_year",
+        "page_number",
+        "original_number",
+        "priority",
+        "difficulty",
+        "mastery",
+        "is_favorite",
+        "needs_redo",
+        "allow_print",
+        "human_confirmed",
+        "next_review_at",
+        "review_count",
+        "deleted_at",
+        "revision",
+        "tags",
+    }
+)
 
 
 def utc_now_iso() -> str:
@@ -103,12 +137,30 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
         raise DomainError("operation timestamp 格式不正确") from exc
     if raw.get("operation") not in ALLOWED_OPS:
         raise DomainError("operation 非法")
-    if raw.get("entity_type") not in ALLOWED_ENTITIES:
+    entity_type = raw.get("entity_type")
+    if entity_type not in ALLOWED_ENTITIES:
         raise DomainError("entity_type 非法")
-    if not isinstance(raw.get("changed_fields"), dict):
-        raise DomainError("缺少 changed_fields")
-    if "base_fields" in raw and not isinstance(raw["base_fields"], dict):
-        raise DomainError("base_fields 必须是对象")
+    field_maps: list[tuple[str, Any]] = [("changed_fields", raw.get("changed_fields"))]
+    if "base_fields" in raw:
+        field_maps.append(("base_fields", raw["base_fields"]))
+    normalized_field_maps: dict[str, dict[str, Any]] = {}
+    for label, fields in field_maps:
+        if not isinstance(fields, dict):
+            raise DomainError(f"{label} 必须是对象")
+        if len(fields) > MAX_OPERATION_FIELDS:
+            raise DomainError(f"{label} 字段过多")
+        invalid_keys = [
+            key
+            for key in fields
+            if not isinstance(key, str) or not key or len(key) > MAX_OPERATION_ID_CHARS
+        ]
+        if invalid_keys:
+            raise DomainError(f"{label} 包含无效字段名")
+        if entity_type == "problem":
+            fields = {
+                key: value for key, value in fields.items() if key in PROBLEM_OPERATION_FIELDS
+            }
+        normalized_field_maps[label] = dict(fields)
     if "tombstone" in raw and not isinstance(raw["tombstone"], bool):
         raise DomainError("tombstone 必须是布尔值")
     attachments = raw.get("attachments", [])
@@ -165,4 +217,5 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
     normalized["format_version"] = format_version
     normalized["tombstone"] = bool(raw.get("tombstone", False))
     normalized["timestamp"] = normalized_timestamp
+    normalized.update(normalized_field_maps)
     return normalized

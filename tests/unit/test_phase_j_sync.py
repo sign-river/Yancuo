@@ -93,6 +93,8 @@ def test_operation_validation_rejects_missing_identity_and_bad_revision() -> Non
         {"operation_id": "op_" + "x" * 62},
         {"timestamp": "2026-07-22T00:00:00"},
         {"timestamp": "not-a-time"},
+        {"changed_fields": {f"field_{index}": index for index in range(65)}},
+        {"base_fields": {1: "invalid-key"}},
         {"base_revision": -1},
         {"new_revision": "not-an-int"},
         {"base_fields": []},
@@ -102,6 +104,13 @@ def test_operation_validation_rejects_missing_identity_and_bad_revision() -> Non
 
     normalized = validate_operation({**base, "timestamp": "2026-07-22T08:00:00+08:00"})
     assert normalized["timestamp"] == "2026-07-22T00:00:00+00:00"
+    normalized = validate_operation(
+        {
+            **base,
+            "changed_fields": {"title": "合法", "unsupported_remote_field": "x"},
+        }
+    )
+    assert normalized["changed_fields"] == {"title": "合法"}
 
 
 def test_operation_validation_rejects_cumulative_attachment_budget(
