@@ -17,6 +17,10 @@ from yancuo_win.cloud.base import (
     RemoteRelease,
 )
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.infrastructure.archive import (
+    ArchiveSecurityError,
+    read_regular_file_limited,
+)
 
 
 class LocalFolderProvider(CloudProvider):
@@ -30,6 +34,7 @@ class LocalFolderProvider(CloudProvider):
     MAX_OPERATION_LINE_BYTES = 48 * 1024 * 1024
     MAX_REMOTE_OPERATIONS = 100_000
     MAX_REMOTE_DEVICES = 10_000
+    MAX_LOCK_FILE_BYTES = 64 * 1024
     # 本地同步目录可能位于 U 盘或网络盘；锁文件无法保证进程崩溃时
     # 自动清理，因此保留一个明确的过期窗口作为最后兜底。
     LOCK_TTL_SECONDS = 15 * 60
@@ -44,19 +49,17 @@ class LocalFolderProvider(CloudProvider):
 
     @classmethod
     def _read_json_file(cls, path: Path, label: str) -> Any:
-        if path.is_symlink():
-            raise DomainError(f"{label} must not be a symlink")
-        if not path.is_file():
-            raise DomainError(f"{label} does not exist")
         try:
-            size = path.stat().st_size
-        except OSError as exc:
-            raise DomainError(f"cannot inspect {label}") from exc
-        if size > cls.MAX_METADATA_FILE_BYTES:
-            raise DomainError(f"{label} exceeds size limit")
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            payload = read_regular_file_limited(path, max_bytes=cls.MAX_METADATA_FILE_BYTES)
+            return json.loads(payload.decode("utf-8"))
+        except ArchiveSecurityError as exc:
+            if "过大" in str(exc) or "超限" in str(exc):
+                raise DomainError(f"{label} exceeds size limit") from exc
+            raise DomainError(f"{label} is not valid JSON") from exc
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise DomainError(f"{label} is not valid JSON") from exc
 
     @classmethod
@@ -214,8 +217,7 @@ class LocalFolderProvider(CloudProvider):
             assets: list[dict[str, Any]] = []
             for asset_path in d.iterdir():
                 if asset_path.name == "release.json" or (
-                    asset_path.name.startswith(".up-")
-                    and asset_path.suffix == ".tmp"
+                    asset_path.name.startswith(".up-") and asset_path.suffix == ".tmp"
                 ):
                     continue
                 if asset_path.is_symlink():
@@ -280,9 +282,7 @@ class LocalFolderProvider(CloudProvider):
         dest = d / asset_name
         if dest.is_symlink():
             raise DomainError("Release asset target must not be a symlink")
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=".up-", suffix=".tmp", dir=d
-        )
+        fd, temporary_name = tempfile.mkstemp(prefix=".up-", suffix=".tmp", dir=d)
         os.close(fd)
         temporary = Path(temporary_name)
         try:
@@ -308,9 +308,7 @@ class LocalFolderProvider(CloudProvider):
         if dest.is_symlink():
             raise DomainError("Download target must not be a symlink")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=".down-", suffix=".tmp", dir=dest.parent
-        )
+        fd, temporary_name = tempfile.mkstemp(prefix=".down-", suffix=".tmp", dir=dest.parent)
         os.close(fd)
         temporary = Path(temporary_name)
         try:
@@ -378,11 +376,16 @@ class LocalFolderProvider(CloudProvider):
             return True
         return (now - acquired).total_seconds() >= self.lock_ttl_seconds
 
-    @staticmethod
-    def _read_lock(lock: Path) -> dict[str, Any] | None:
+    @classmethod
+    def _read_lock(cls, lock: Path) -> dict[str, Any] | None:
         try:
-            raw = json.loads(lock.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            payload = read_regular_file_limited(lock, max_bytes=cls.MAX_LOCK_FILE_BYTES)
+            raw = json.loads(payload.decode("utf-8"))
+        except (
+            ArchiveSecurityError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
             return None
         return raw if isinstance(raw, dict) else None
 
@@ -424,9 +427,7 @@ class LocalFolderProvider(CloudProvider):
                     payload = {
                         "device_id": device_id,
                         "acquired_at": now.isoformat(),
-                        "expires_at": (
-                            now.timestamp() + self.lock_ttl_seconds
-                        ),
+                        "expires_at": (now.timestamp() + self.lock_ttl_seconds),
                     }
                     payload["expires_at"] = datetime.fromtimestamp(
                         float(payload["expires_at"]), tz=timezone.utc
@@ -534,9 +535,7 @@ class LocalFolderProvider(CloudProvider):
         for operation in operations:
             if not isinstance(operation, dict):
                 raise DomainError("operation append item must be an object")
-            encoded = (json.dumps(operation, ensure_ascii=False) + "\n").encode(
-                "utf-8"
-            )
+            encoded = (json.dumps(operation, ensure_ascii=False) + "\n").encode("utf-8")
             if len(encoded) > self.MAX_OPERATION_LINE_BYTES:
                 raise DomainError("single operation exceeds line size limit")
             encoded_lines.append(encoded)
@@ -559,9 +558,7 @@ class LocalFolderProvider(CloudProvider):
                     stream.truncate(current_size)
                     os.fsync(stream.fileno())
             except OSError as rollback_exc:
-                raise DomainError(
-                    "ops.jsonl append and rollback both failed"
-                ) from rollback_exc
+                raise DomainError("ops.jsonl append and rollback both failed") from rollback_exc
             raise DomainError("ops.jsonl append failed") from exc
 
     def list_remote_operations(
@@ -589,9 +586,7 @@ class LocalFolderProvider(CloudProvider):
                 raise DomainError("ops.jsonl exceeds size limit")
             try:
                 with ops_file.open("rb") as stream:
-                    while raw_line := stream.readline(
-                        self.MAX_OPERATION_LINE_BYTES + 1
-                    ):
+                    while raw_line := stream.readline(self.MAX_OPERATION_LINE_BYTES + 1):
                         if len(raw_line) > self.MAX_OPERATION_LINE_BYTES:
                             raise DomainError("single remote operation line exceeds limit")
                         processed_lines += 1
@@ -611,7 +606,9 @@ class LocalFolderProvider(CloudProvider):
         items.sort(key=lambda o: str(o.get("timestamp") or ""))
         return items
 
-    def write_tombstone(self, owner: str, repo: str, entity_id: str, payload: dict[str, Any]) -> None:
+    def write_tombstone(
+        self, owner: str, repo: str, entity_id: str, payload: dict[str, Any]
+    ) -> None:
         entity_id = self._safe_component(entity_id, "entity id")
         d = self._repo_dir(owner, repo) / "tombstones"
         if d.is_symlink():

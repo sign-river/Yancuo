@@ -193,6 +193,20 @@ def test_local_folder_lock_is_released_and_expired(tmp_path: Path) -> None:
     assert first.acquire_lock("local", "repo", "dev-a")
 
 
+def test_local_folder_metadata_reader_does_not_use_unbounded_read_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text('{"value": 1}', encoding="utf-8")
+
+    def fail_unbounded_read(*_args, **_kwargs):
+        raise AssertionError("Path.read_text must not be used")
+
+    monkeypatch.setattr(Path, "read_text", fail_unbounded_read)
+
+    assert LocalFolderProvider._read_json_file(metadata, "metadata")["value"] == 1
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
