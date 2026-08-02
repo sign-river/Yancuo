@@ -96,6 +96,43 @@ def test_operation_validation_rejects_missing_identity_and_bad_revision() -> Non
             validate_operation({**base, **patch})
 
 
+def test_operation_validation_rejects_cumulative_attachment_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"12345"
+    operation = {
+        "format": "yancuo-operation",
+        "format_version": 1,
+        "operation_id": "op_attachment_budget",
+        "device_id": "dev_other",
+        "database_id": "db_shared",
+        "timestamp": "2026-07-22T00:00:00+00:00",
+        "entity_type": "problem",
+        "entity_id": "problem_1",
+        "operation": "update",
+        "base_revision": 1,
+        "new_revision": 2,
+        "changed_fields": {"title": "x"},
+        "attachments": [
+            {
+                "id": "asset_budget",
+                "role": "derived_figure",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "mime_type": "image/png",
+                "size_bytes": len(payload),
+                "content_base64": base64.b64encode(payload).decode("ascii"),
+            }
+        ],
+        "tombstone": False,
+    }
+    monkeypatch.setattr(
+        "yancuo_win.domain.operations.MAX_OPERATION_ATTACHMENT_BYTES", 4
+    )
+
+    with pytest.raises(DomainError, match="附件总大小"):
+        validate_operation(operation)
+
+
 def test_local_folder_push_pull_auto_merge(runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cloud_root = tmp_path / "cloud"
     provider = LocalFolderProvider(cloud_root)

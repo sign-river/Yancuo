@@ -15,6 +15,7 @@ OP_FORMAT = "yancuo-operation"
 OP_FORMAT_VERSION = 1
 ALLOWED_OPS = frozenset({"create", "update", "delete", "undelete"})
 ALLOWED_ENTITIES = frozenset({"problem", "tag", "asset", "review"})
+MAX_OPERATION_ATTACHMENT_BYTES = 32 * 1024 * 1024
 
 
 def utc_now_iso() -> str:
@@ -89,6 +90,7 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
     attachments = raw.get("attachments", [])
     if not isinstance(attachments, list) or len(attachments) > 100:
         raise DomainError("attachments 必须是最多 100 项的数组")
+    attachment_bytes = 0
     for attachment in attachments:
         if not isinstance(attachment, dict):
             raise DomainError("attachment 必须是对象")
@@ -118,6 +120,11 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
             raise DomainError("attachment Base64 无效") from exc
         if attachment.get("size_bytes") is not None and attachment["size_bytes"] != len(decoded):
             raise DomainError("attachment size_bytes 与内容不一致")
+        if not decoded:
+            raise DomainError("attachment 内容不能为空")
+        attachment_bytes += len(decoded)
+        if attachment_bytes > MAX_OPERATION_ATTACHMENT_BYTES:
+            raise DomainError("Operation 附件总大小不能超过 32 MiB")
 
     normalized = dict(raw)
     for field in ("base_revision", "new_revision"):

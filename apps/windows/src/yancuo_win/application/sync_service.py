@@ -29,7 +29,11 @@ from yancuo_win.data.models import (
     Tag,
     Version,
 )
-from yancuo_win.domain.operations import build_operation, validate_operation
+from yancuo_win.domain.operations import (
+    MAX_OPERATION_ATTACHMENT_BYTES,
+    build_operation,
+    validate_operation,
+)
 from yancuo_win.domain.rules import DomainError, validate_priority, validate_status
 from yancuo_win.domain.sync_merge import apply_patch, merge_snapshots
 from yancuo_win.import_export.ebpack import EbpackService
@@ -40,7 +44,6 @@ from yancuo_win.review.changeset import snapshot_problem_fields
 MAX_REMOTE_OPERATION_BATCHES = 10_000
 MAX_REMOTE_OPERATION_BATCH_BYTES = 64 * 1024 * 1024
 MAX_REMOTE_OPERATIONS_PER_BATCH = 100_000
-MAX_OPERATION_ATTACHMENT_BYTES = 32 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
