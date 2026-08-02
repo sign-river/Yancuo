@@ -32,6 +32,7 @@ class LocalFolderProvider(CloudProvider):
     MAX_DEVICES = 10_000
     MAX_OPERATION_FILE_BYTES = 64 * 1024 * 1024
     MAX_OPERATION_LINE_BYTES = 48 * 1024 * 1024
+    MAX_REMOTE_OPERATION_TOTAL_BYTES = 256 * 1024 * 1024
     MAX_REMOTE_OPERATIONS = 100_000
     MAX_REMOTE_DEVICES = 10_000
     MAX_LOCK_FILE_BYTES = 64 * 1024
@@ -581,6 +582,8 @@ class LocalFolderProvider(CloudProvider):
         root = self._changes_dir(owner, repo)
         items: list[dict[str, Any]] = []
         processed_lines = 0
+        declared_bytes = 0
+        processed_bytes = 0
         if not root.is_dir():
             return items
         device_dirs = sorted(root.iterdir())
@@ -596,13 +599,26 @@ class LocalFolderProvider(CloudProvider):
                 raise DomainError("ops.jsonl must not be a symlink")
             if not ops_file.is_file():
                 continue
-            if ops_file.stat().st_size > self.MAX_OPERATION_FILE_BYTES:
+            file_size = ops_file.stat().st_size
+            if file_size > self.MAX_OPERATION_FILE_BYTES:
                 raise DomainError("ops.jsonl exceeds size limit")
+            declared_bytes += file_size
+            if declared_bytes > self.MAX_REMOTE_OPERATION_TOTAL_BYTES:
+                raise DomainError("remote operation logs exceed cumulative size limit")
+            file_bytes = 0
             try:
                 with ops_file.open("rb") as stream:
                     while raw_line := stream.readline(self.MAX_OPERATION_LINE_BYTES + 1):
                         if len(raw_line) > self.MAX_OPERATION_LINE_BYTES:
                             raise DomainError("single remote operation line exceeds limit")
+                        file_bytes += len(raw_line)
+                        processed_bytes += len(raw_line)
+                        if file_bytes > self.MAX_OPERATION_FILE_BYTES:
+                            raise DomainError("ops.jsonl actual size exceeds limit")
+                        if processed_bytes > self.MAX_REMOTE_OPERATION_TOTAL_BYTES:
+                            raise DomainError(
+                                "remote operation logs exceed cumulative size limit"
+                            )
                         processed_lines += 1
                         if processed_lines > self.MAX_REMOTE_OPERATIONS:
                             raise DomainError("remote operation count exceeds limit")

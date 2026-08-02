@@ -358,6 +358,26 @@ def test_local_folder_rejects_oversized_operation_logs(tmp_path: Path) -> None:
         provider.list_remote_operations("local", "repo")
 
 
+def test_local_folder_rejects_cumulative_remote_operation_log_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.append_operations(
+        "local", "repo", "dev-a", [{"operation_id": "op_a", "timestamp": "1"}]
+    )
+    provider.append_operations(
+        "local", "repo", "dev-b", [{"operation_id": "op_b", "timestamp": "2"}]
+    )
+    first = root / "local" / "repo" / "changes" / "dev-a" / "ops.jsonl"
+    monkeypatch.setattr(
+        LocalFolderProvider, "MAX_REMOTE_OPERATION_TOTAL_BYTES", first.stat().st_size
+    )
+
+    with pytest.raises(DomainError, match="cumulative size"):
+        provider.list_remote_operations("local", "repo")
+
+
 def test_local_folder_rejects_operation_append_before_exceeding_file_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
