@@ -40,6 +40,7 @@ MAX_SHARE_JSONL_LINE_BYTES = 4 * 1024 * 1024
 MAX_CHECKSUM_LINE_BYTES = 4 * 1024
 MAX_SHARE_METADATA_BYTES = 8 * 1024 * 1024
 MAX_SHARE_PHYSICAL_LINES = 20_000
+_PROBLEM_EXPORT_BATCH_SIZE = 200
 
 # 默认拒绝：无论 includes 如何，这些键不得写入 problems.jsonl
 HARD_DENY_FIELDS = frozenset(
@@ -136,8 +137,8 @@ class GmshareService:
         objects_dst.mkdir(parents=True)
 
         try:
-            rows: list[dict[str, Any]] = []
             asset_index: list[dict[str, Any]] = []
+            problem_count = 0
             with self.runtime.session_factory() as s:
                 stmt = select(Problem).options(
                     selectinload(Problem.tags), selectinload(Problem.assets)
@@ -146,54 +147,60 @@ class GmshareService:
                     stmt = stmt.where(Problem.id.in_(problem_ids))
                 else:
                     stmt = stmt.where(Problem.deleted_at.is_(None))
-                problems = list(s.scalars(stmt).all())
-                if not problems:
-                    raise DomainError("没有可分享的题目")
-
-                for problem in problems:
-                    if problem.status == "trashed":
-                        continue
-                    rec = self._serialize_problem(problem, includes)
-                    # 复制原图
-                    asset_refs: list[dict[str, Any]] = []
-                    if includes.original_images:
-                        for asset in problem.assets:
-                            if asset.role != "original":
+                with (staging / "problems.jsonl").open("w", encoding="utf-8") as rows_file:
+                    for problems in self._problem_batches(s, stmt):
+                        for problem in problems:
+                            if problem.status == "trashed":
                                 continue
-                            src = self.store.resolve(asset.relative_path)
-                            if not src.is_file():
-                                continue
-                            rel = asset.relative_path.replace("\\", "/")
-                            if rel.startswith("objects/"):
-                                out = assets_root / rel
-                            else:
-                                out = objects_dst / rel
-                            out.parent.mkdir(parents=True, exist_ok=True)
-                            if not out.is_file():
-                                shutil.copy2(src, out)
-                            ref = {
-                                "role": "original",
-                                "sha256": asset.sha256,
-                                "relative_path": rel
-                                if rel.startswith("objects/")
-                                else f"objects/{rel}",
-                                "mime_type": asset.mime_type,
-                            }
-                            asset_refs.append(ref)
-                            asset_index.append(ref)
-                    rec["assets"] = asset_refs
-                    # 最终清洗硬拒绝字段
-                    for bad in HARD_DENY_FIELDS:
-                        rec.pop(bad, None)
-                    rows.append(rec)
+                            problem_count += 1
+                            if problem_count > MAX_SHARE_PROBLEMS:
+                                raise DomainError(
+                                    f"分享题目数超过上限（{MAX_SHARE_PROBLEMS}）"
+                                )
+                            rec = self._serialize_problem(problem, includes)
+                            # 复制原图
+                            asset_refs: list[dict[str, Any]] = []
+                            if includes.original_images:
+                                for asset in problem.assets:
+                                    if asset.role != "original":
+                                        continue
+                                    src = self.store.resolve(asset.relative_path)
+                                    if not src.is_file():
+                                        continue
+                                    rel = asset.relative_path.replace("\\", "/")
+                                    if rel.startswith("objects/"):
+                                        out = assets_root / rel
+                                    else:
+                                        out = objects_dst / rel
+                                    out.parent.mkdir(parents=True, exist_ok=True)
+                                    if not out.is_file():
+                                        shutil.copy2(src, out)
+                                    ref = {
+                                        "role": "original",
+                                        "sha256": asset.sha256,
+                                        "relative_path": rel
+                                        if rel.startswith("objects/")
+                                        else f"objects/{rel}",
+                                        "mime_type": asset.mime_type,
+                                    }
+                                    asset_refs.append(ref)
+                                    asset_index.append(ref)
+                                    if len(asset_index) > MAX_SHARE_ASSET_REFERENCES:
+                                        raise DomainError(
+                                            "分享资源引用数超过上限"
+                                            f"（{MAX_SHARE_ASSET_REFERENCES}）"
+                                        )
+                            rec["assets"] = asset_refs
+                            # 最终清洗硬拒绝字段
+                            for bad in HARD_DENY_FIELDS:
+                                rec.pop(bad, None)
+                            encoded = json.dumps(rec, ensure_ascii=False) + "\n"
+                            if len(encoded.encode("utf-8")) > MAX_SHARE_JSONL_LINE_BYTES:
+                                raise DomainError("分享题目单条记录超过大小上限")
+                            rows_file.write(encoded)
 
-            if not rows:
+            if not problem_count:
                 raise DomainError("没有可分享的题目")
-
-            (staging / "problems.jsonl").write_text(
-                "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
-                encoding="utf-8",
-            )
             (assets_root / "index.json").write_text(
                 json.dumps({"assets": asset_index}, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
@@ -206,7 +213,7 @@ class GmshareService:
                 "title": title,
                 "app_version": __version__,
                 "data_format_version": DATA_FORMAT_VERSION,
-                "problem_count": len(rows),
+                "problem_count": problem_count,
                 "asset_count": len(asset_index),
                 "includes": {
                     "question": includes.question,
@@ -230,11 +237,16 @@ class GmshareService:
             return GmshareExportResult(
                 path=dest,
                 package_id=package_id,
-                problem_count=len(rows),
+                problem_count=problem_count,
                 asset_count=len(asset_index),
             )
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+
+    @staticmethod
+    def _problem_batches(session, statement):
+        problems = session.scalars(statement).yield_per(_PROBLEM_EXPORT_BATCH_SIZE)
+        return problems.partitions(_PROBLEM_EXPORT_BATCH_SIZE)
 
     def _serialize_problem(self, problem: Problem, includes: ShareIncludeOptions) -> dict[str, Any]:
         rec: dict[str, Any] = {"origin_problem_id": problem.id}

@@ -73,6 +73,49 @@ def test_gmshare_excludes_private_fields(runtime, tmp_path: Path) -> None:
         assert "identity.json" not in zf.namelist()
 
 
+def test_gmshare_export_streams_problems_in_bounded_batches(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = AppServices(runtime)
+    for index in range(3):
+        services.create_problem(title=f"分批分享题 {index}")
+    batch_sizes: list[int] = []
+    original_batches = GmshareService._problem_batches
+
+    def record_batches(session, statement):
+        for batch in original_batches(session, statement):
+            batch_sizes.append(len(batch))
+            yield batch
+
+    monkeypatch.setattr(gmshare_module, "_PROBLEM_EXPORT_BATCH_SIZE", 2)
+    monkeypatch.setattr(
+        GmshareService, "_problem_batches", staticmethod(record_batches)
+    )
+
+    result = GmshareService(runtime).export_share(dest=tmp_path / "batched.gmshare")
+
+    assert result.problem_count == 3
+    assert batch_sizes == [2, 1]
+    with zipfile.ZipFile(result.path, "r") as zf:
+        assert len(zf.read("problems.jsonl").splitlines()) == 3
+
+
+def test_gmshare_export_rejects_package_over_problem_budget(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = AppServices(runtime)
+    for index in range(3):
+        services.create_problem(title=f"超限分享题 {index}")
+    destination = tmp_path / "oversized.gmshare"
+    monkeypatch.setattr(gmshare_module, "MAX_SHARE_PROBLEMS", 2)
+
+    with pytest.raises(DomainError, match="分享题目数超过上限"):
+        GmshareService(runtime).export_share(dest=destination)
+
+    assert not destination.exists()
+    assert list(runtime.paths.cache_dir.glob("gmshare-export-*")) == []
+
+
 def test_gmshare_export_failure_preserves_existing_destination(
     runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
