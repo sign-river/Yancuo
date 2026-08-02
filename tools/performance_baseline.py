@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import gc
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 WINDOWS_SOURCE = REPOSITORY_ROOT / "apps" / "windows" / "src"
 DEFAULT_PROBLEMS = 1200
 DEFAULT_NOTES = 300
+UI203_MIN_NOTES = 10_000
 ISOLATION_MARKER = ".yancuo-performance-isolation"
 
 
@@ -100,7 +102,13 @@ def _measure(operation: Callable[[], object], samples: int) -> list[float]:
     return values
 
 
-def generate_dataset(data_root: Path, problem_count: int, note_count: int) -> None:
+def generate_dataset(
+    data_root: Path,
+    problem_count: int,
+    note_count: int,
+    *,
+    ui203: bool = False,
+) -> None:
     """Create canonical rows directly, then rebuild disposable search indexes."""
 
     _configure_imports()
@@ -110,7 +118,14 @@ def generate_dataset(data_root: Path, problem_count: int, note_count: int) -> No
     from yancuo_win.application.bootstrap import bootstrap_runtime
     from yancuo_win.application.search_service import SearchIndexService
     from yancuo_win.application.unified_search_service import UnifiedSearchIndexService
-    from yancuo_win.data.models import Chapter, NoteBlock, NoteDocument, Problem, Subject
+    from yancuo_win.data.models import (
+        Chapter,
+        NoteBlock,
+        NoteDocument,
+        Problem,
+        ReviewWaitingItem,
+        Subject,
+    )
 
     runtime = bootstrap_runtime()
     subject_id = "subject_perf"
@@ -158,20 +173,53 @@ def generate_dataset(data_root: Path, problem_count: int, note_count: int) -> No
         }
         for index in range(note_count)
     ]
-    blocks = [
+    block_kinds = ("text", "formula", "concept", "callout", "image")
+    blocks = []
+    for index in range(note_count):
+        block_type = block_kinds[index % len(block_kinds)] if ui203 else "text"
+        markdown = f"笔记 {index + 1} 的极值与积分要点。"
+        latex = ""
+        source_region = "{}"
+        if ui203 and block_type == "text":
+            markdown = (
+                "| 条件 | 结论 |\n| --- | --- |\n"
+                f"| 样本 {index + 1} | 先求导，再检查边界与驻点 |"
+            )
+        elif ui203 and block_type == "formula":
+            latex = rf"\int_0^1 x^{index % 9 + 1}\,dx=\frac{{1}}{{{index % 9 + 2}}}"
+            markdown = ""
+        elif ui203 and block_type == "concept":
+            markdown = "连续函数在紧区间上取得最大值和最小值。"
+        elif ui203 and block_type == "callout":
+            markdown = "先验证定义域，再讨论端点和驻点，避免遗漏边界。"
+        elif ui203 and block_type == "image":
+            markdown = "隔离原图裁切引用：函数图像与切线示意。"
+            source_region = json.dumps(
+                {"x": 0.1, "y": 0.15, "width": 0.7, "height": 0.55}
+            )
+        blocks.append(
+            {
+                "id": f"nblock_perf_{index:05d}",
+                "note_document_id": f"note_perf_{index:05d}",
+                "sort_order": 0,
+                "block_type": block_type,
+                "content_markdown": markdown,
+                "content_latex": latex,
+                "source_region_json": source_region,
+                "uncertain_json": "[]",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+    waiting = [
         {
-            "id": f"nblock_perf_{index:05d}",
-            "note_document_id": f"note_perf_{index:05d}",
-            "sort_order": 0,
-            "block_type": "text",
-            "content_markdown": f"笔记 {index + 1} 的极值与积分要点。",
-            "source_region_json": "{}",
-            "uncertain_json": "[]",
+            "id": f"review_wait_perf_{index:05d}",
+            "content_type": "note",
+            "source_id": f"note_perf_{index:05d}",
             "created_at": now,
-            "updated_at": now,
         }
         for index in range(note_count)
-    ]
+    ] if ui203 else []
     with runtime.engine.begin() as connection:
         connection.execute(
             insert(Subject),
@@ -182,7 +230,13 @@ def generate_dataset(data_root: Path, problem_count: int, note_count: int) -> No
             connection.execute(insert(Problem), problems[offset : offset + 500])
         if notes:
             connection.execute(insert(NoteDocument), notes)
-            connection.execute(insert(NoteBlock), blocks)
+            for offset in range(0, len(blocks), 500):
+                connection.execute(insert(NoteBlock), blocks[offset : offset + 500])
+        if waiting:
+            for offset in range(0, len(waiting), 500):
+                connection.execute(
+                    insert(ReviewWaitingItem), waiting[offset : offset + 500]
+                )
     SearchIndexService(runtime).rebuild()
     UnifiedSearchIndexService(runtime).rebuild_notes()
     runtime.engine.dispose()
@@ -310,6 +364,172 @@ def _memory_gib() -> float | None:
         return None
 
 
+def _process_rss_mib() -> float | None:
+    """Return this process's resident working set on Windows."""
+
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", ctypes.c_ulong),
+                ("page_fault_count", ctypes.c_ulong),
+                ("peak_working_set_size", ctypes.c_size_t),
+                ("working_set_size", ctypes.c_size_t),
+                ("quota_peak_paged_pool_usage", ctypes.c_size_t),
+                ("quota_paged_pool_usage", ctypes.c_size_t),
+                ("quota_peak_non_paged_pool_usage", ctypes.c_size_t),
+                ("quota_non_paged_pool_usage", ctypes.c_size_t),
+                ("pagefile_usage", ctypes.c_size_t),
+                ("peak_pagefile_usage", ctypes.c_size_t),
+            ]
+
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+        get_current_process.restype = ctypes.c_void_p
+        get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+        get_process_memory_info.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ProcessMemoryCounters),
+            ctypes.c_ulong,
+        ]
+        get_process_memory_info.restype = ctypes.c_int
+        if not get_process_memory_info(
+            get_current_process(), ctypes.byref(counters), counters.cb
+        ):
+            return None
+        return round(counters.working_set_size / 1024**2, 3)
+    except (AttributeError, OSError):
+        return None
+
+
+def _diagnostic_summary(samples: list[float]) -> dict[str, object]:
+    ordered = sorted(round(value, 3) for value in samples)
+    return {
+        "samples": ordered,
+        "median": round(statistics.median(ordered), 3),
+        "min": ordered[0],
+        "max": ordered[-1],
+    }
+
+
+def measure_ui203(data_root: Path, sample_count: int) -> dict[str, object]:
+    """Measure ten-thousand-row note and review-list UI behavior."""
+
+    _configure_imports()
+    _set_isolated_environment(data_root)
+    from PySide6.QtWidgets import QApplication
+
+    from yancuo_win.application.bootstrap import bootstrap_runtime
+    from yancuo_win.application.note_service import NoteService
+    from yancuo_win.application.services import AppServices
+    from yancuo_win.ui.note_page import NotePage
+    from yancuo_win.ui.review_plan_builder import ReviewPlanBuilder
+
+    runtime = bootstrap_runtime()
+    services = AppServices(runtime)
+    notes = NoteService(runtime)
+    app = QApplication.instance() or QApplication([])
+    timings: dict[str, list[float]] = {
+        "note_page_construction": [],
+        "note_list_refresh": [],
+        "note_list_scroll_round_trip": [],
+        "review_note_mode_switch": [],
+        "review_builder_refresh": [],
+        "review_source_scroll_round_trip": [],
+        "review_queue_scroll_round_trip": [],
+    }
+    note_widget_delta: list[float] = []
+    review_widget_delta: list[float] = []
+    note_rss_delta: list[float] = []
+    review_rss_delta: list[float] = []
+    counts: dict[str, int] = {}
+
+    def scroll_round_trip(widget) -> None:  # noqa: ANN001
+        widget.scrollToBottom()
+        app.processEvents()
+        widget.scrollToTop()
+        app.processEvents()
+
+    for _ in range(sample_count):
+        gc.collect()
+        widgets_before = len(app.allWidgets())
+        rss_before = _process_rss_mib()
+        started = perf_counter()
+        page = NotePage(notes)
+        app.processEvents()
+        timings["note_page_construction"].append(
+            (perf_counter() - started) * 1000
+        )
+        counts["note_list_rows"] = page.note_list.count()
+        timings["note_list_refresh"].extend(
+            _measure(lambda: (page.reload(), app.processEvents()), 1)
+        )
+        timings["note_list_scroll_round_trip"].extend(
+            _measure(lambda: scroll_round_trip(page.note_list), 1)
+        )
+        note_widget_delta.append(float(len(app.allWidgets()) - widgets_before))
+        rss_after = _process_rss_mib()
+        if rss_before is not None and rss_after is not None:
+            note_rss_delta.append(rss_after - rss_before)
+        page.close()
+        page.deleteLater()
+        app.processEvents()
+        gc.collect()
+
+        widgets_before = len(app.allWidgets())
+        rss_before = _process_rss_mib()
+        builder = ReviewPlanBuilder(services, notes)
+        app.processEvents()
+        started = perf_counter()
+        builder._set_content_type("note")
+        app.processEvents()
+        timings["review_note_mode_switch"].append(
+            (perf_counter() - started) * 1000
+        )
+        counts["review_source_rows"] = builder.source_list.count()
+        counts["review_queue_rows"] = builder.queue_list.count()
+        timings["review_builder_refresh"].extend(
+            _measure(lambda: (builder.reload(), app.processEvents()), 1)
+        )
+        timings["review_source_scroll_round_trip"].extend(
+            _measure(lambda: scroll_round_trip(builder.source_list), 1)
+        )
+        timings["review_queue_scroll_round_trip"].extend(
+            _measure(lambda: scroll_round_trip(builder.queue_list), 1)
+        )
+        review_widget_delta.append(float(len(app.allWidgets()) - widgets_before))
+        rss_after = _process_rss_mib()
+        if rss_before is not None and rss_after is not None:
+            review_rss_delta.append(rss_after - rss_before)
+        builder.close()
+        builder.deleteLater()
+        app.processEvents()
+        gc.collect()
+
+    runtime.engine.dispose()
+    diagnostics: dict[str, object] = {
+        "row_counts": counts,
+        "note_qwidget_delta": _diagnostic_summary(note_widget_delta),
+        "review_qwidget_delta": _diagnostic_summary(review_widget_delta),
+    }
+    if note_rss_delta:
+        diagnostics["note_process_rss_delta_mib"] = _diagnostic_summary(
+            note_rss_delta
+        )
+    if review_rss_delta:
+        diagnostics["review_process_rss_delta_mib"] = _diagnostic_summary(
+            review_rss_delta
+        )
+    return {
+        "metrics_ms": {name: summarize(values) for name, values in timings.items()},
+        "diagnostics": diagnostics,
+    }
+
+
 def environment_metadata() -> dict[str, object]:
     _configure_imports()
     import PySide6
@@ -343,14 +563,21 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     with isolated_data_root() as data_root:
         _set_isolated_environment(data_root)
         generation_started = perf_counter()
-        generate_dataset(data_root, args.problems, args.notes)
+        generate_dataset(
+            data_root,
+            args.problems,
+            args.notes,
+            ui203=args.ui203,
+        )
         generation_ms = (perf_counter() - generation_started) * 1000
+        ui203 = measure_ui203(data_root, args.samples) if args.ui203 else None
         metrics = measure_runtime(data_root, args.samples)
         report = {
             "environment": environment_metadata(),
             "dataset": {
                 "problems": args.problems,
                 "notes": args.notes,
+                "ui203_mixed_content": args.ui203,
                 "generation_ms": round(generation_ms, 3),
                 "location": "temporary isolated directory (cleaned)",
             },
@@ -364,6 +591,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "outliers": "Tukey 1.5×IQR; fewer than four samples report none",
             },
             "metrics_ms": metrics,
+            "ui203": ui203,
             "cleanup": "completed after this report is serialized",
         }
         return report
@@ -374,6 +602,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--problems", type=int, default=DEFAULT_PROBLEMS)
     parser.add_argument("--notes", type=int, default=DEFAULT_NOTES)
+    parser.add_argument(
+        "--ui203",
+        action="store_true",
+        help="measure isolated ten-thousand-row note and review-list UI behavior",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--startup-probe", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -384,6 +617,8 @@ def _parse_args() -> argparse.Namespace:
             f"baseline requires at least {DEFAULT_PROBLEMS} problems and "
             f"{DEFAULT_NOTES} notes"
         )
+    if args.ui203 and args.notes < UI203_MIN_NOTES:
+        parser.error(f"--ui203 requires at least {UI203_MIN_NOTES} notes")
     return args
 
 

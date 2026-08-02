@@ -19,6 +19,17 @@ python tools/performance_baseline.py --samples 5
 样本数、中位数、范围与 Tukey 异常值。冷启动表示新解释器内的第一次
 `bootstrap_runtime`，不会尝试清空操作系统文件缓存。
 
+UI-203 的万级笔记/复习列表专项采样使用：
+
+```powershell
+python tools/performance_baseline.py --ui203 --notes 10000 --samples 3 --output "$env:TEMP\yancuo-ui203-performance.json"
+```
+
+专项模式生成文本、公式、概念、提示、Markdown 表格和原图裁切引用混合笔记，
+并创建同规模复习草稿队列；额外测量笔记页与复习计划构建器的加载、刷新、
+滚动、进程工作集增量和 QWidget 数量。`--ui203` 拒绝少于 10000 篇笔记，
+隔离和清理规则与普通基线相同。
+
 ## `sync_release_matrix.py`
 
 发布前从仓库根目录运行：
