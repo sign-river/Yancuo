@@ -23,6 +23,7 @@
 | `GATEWAY_PUBLIC_URL` | 是 | 函数最终 HTTPS 地址，用于生成一次性上传 URL。 |
 | `PG_SSL` | 否 | 默认为 `verify`，启用 TLS 并校验证书；仅受控调试可显式设为 `no-verify`，仅本地开发可设为 `disable`。 |
 | `PG_SSL_CA` | 否 | `PG_SSL=verify` 时可提供 PEM CA 证书；支持用 `\\n` 表示环境变量中的换行，最大 1 MiB。 |
+| `PG_CONNECT_TIMEOUT_MS` | 否 | PostgreSQL 新连接与连接池取连接等待上限，默认 10000 ms，可设 1000–60000。 |
 | `USER_STORAGE_BYTES` | 否 | 单用户已提交对象与有效上传预留的合计预算，默认 512 MiB。 |
 | `USER_REPOSITORIES` | 否 | 单用户逻辑资料库数量，默认 5。 |
 | `MAX_RELEASES_PER_REPOSITORY` | 否 | 单资料库 Release 数量，默认 10000，硬上限 100000。 |

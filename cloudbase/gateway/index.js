@@ -69,6 +69,13 @@ const RATE_PER_MINUTE = integerSetting(
   1_000_000,
 );
 const PG_POOL_SIZE = integerSetting(process.env.PG_POOL_SIZE, "PG_POOL_SIZE", 5, 1, 100);
+const PG_CONNECT_TIMEOUT_MS = integerSetting(
+  process.env.PG_CONNECT_TIMEOUT_MS,
+  "PG_CONNECT_TIMEOUT_MS",
+  10_000,
+  1_000,
+  60_000,
+);
 
 if (!DATABASE_URL) {
   throw new Error("DATABASE_URL is required");
@@ -83,8 +90,12 @@ const postgresSecurity = postgresConnectionSecurity(
 const pool = new Pool({
   ...postgresSecurity,
   max: PG_POOL_SIZE,
+  connectionTimeoutMillis: PG_CONNECT_TIMEOUT_MS,
   idleTimeoutMillis: 20_000,
   statement_timeout: 30_000,
+});
+pool.on("error", (error) => {
+  console.error("postgres idle client error", { type: error.name });
 });
 const cloud = tcb.init({ env: ENV_ID });
 
