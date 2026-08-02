@@ -61,6 +61,8 @@ Content-Type: application/json
 
 对象路径必须由函数生成，例如 `yancuo/{sha256(subject)}/{repository}/uploads/{upload_id}/{asset_name}`，不能接受客户端传入的任意路径，也不能暴露原始用户标识。每次上传使用独立对象路径；`assets/commit` 是唯一提交点，同一发布标签下的同名附件一经提交不得覆盖。在它成功前，`manifest/write` 不得指向该快照。
 
+一次性上传地址只允许一个正在执行的 PUT：网关先在 PostgreSQL 中原子认领会话，失败时释放认领以供安全重试。过期对象删除失败时保留会话记录，后续清理继续重试，不能先丢失对象索引。
+
 ## 安全与边界
 
 - Cloud Storage 设为私有，下载只经函数签发短期 URL。

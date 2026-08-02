@@ -135,12 +135,21 @@ async function lockSubjectQuota(client, subject) {
 
 async function cleanupExpiredUploads(subject) {
   const expired = await pool.query(
-    "delete from yancuo.upload_sessions where subject_id=$1 and expires_at < now() returning file_id",
+    "select upload_id,file_id from yancuo.upload_sessions where subject_id=$1 and expires_at < now() and (claimed_at is null or claimed_at < now()-interval '1 hour')",
     [subject],
   );
-  const fileList = expired.rows.map((row) => row.file_id).filter(Boolean);
-  if (fileList.length) {
-    await cloud.deleteFile({ fileList }).catch(() => undefined);
+  for (const row of expired.rows) {
+    if (row.file_id) {
+      try {
+        await cloud.deleteFile({ fileList: [row.file_id] });
+      } catch (_error) {
+        continue;
+      }
+    }
+    await pool.query(
+      "delete from yancuo.upload_sessions where upload_id=$1 and subject_id=$2 and expires_at < now() and (claimed_at is null or claimed_at < now()-interval '1 hour')",
+      [row.upload_id, subject],
+    );
   }
 }
 
@@ -373,12 +382,18 @@ function cryptoRandomId() {
 async function upload(req, res, url) {
   const uploadId = url.pathname.split("/").pop();
   const token = String(url.searchParams.get("token") || "");
-  const result = await pool.query(
+  const found = await pool.query(
     "select * from yancuo.upload_sessions where upload_id=$1 and expires_at>=now() and uploaded_at is null",
     [uploadId],
   );
-  const row = result.rows[0];
-  if (!row || !safeTokenEqual(token, row.token_hash)) fail("上传凭据无效或已过期", 403);
+  const candidate = found.rows[0];
+  if (!candidate || !safeTokenEqual(token, candidate.token_hash)) fail("上传凭据无效或已过期", 403);
+  const claimed = await pool.query(
+    "update yancuo.upload_sessions set claimed_at=now(),expires_at=now()+interval '1 hour' where upload_id=$1 and token_hash=$2 and expires_at>=now() and uploaded_at is null and claimed_at is null returning *",
+    [uploadId, tokenHash(token)],
+  );
+  const row = claimed.rows[0];
+  if (!row) fail("上传已在进行或凭据已使用", 409);
   let actual = 0;
   const counter = new Transform({
     transform(chunk, _encoding, callback) {
@@ -390,16 +405,25 @@ async function upload(req, res, url) {
       }
     },
   });
-  req.pipe(counter);
-  const stored = await cloud.uploadFile({ cloudPath: row.storage_path, fileContent: counter });
-  if (actual !== Number(row.expected_size)) {
-    if (stored.fileID) await cloud.deleteFile({ fileList: [stored.fileID] }).catch(() => undefined);
-    fail("上传内容大小与声明不一致", 409);
+  let stored;
+  try {
+    req.pipe(counter);
+    stored = await cloud.uploadFile({ cloudPath: row.storage_path, fileContent: counter });
+    if (actual !== Number(row.expected_size)) {
+      if (stored.fileID) await cloud.deleteFile({ fileList: [stored.fileID] });
+      fail("上传内容大小与声明不一致", 409);
+    }
+    await pool.query(
+      "update yancuo.upload_sessions set file_id=$2,actual_size=$3,uploaded_at=now(),claimed_at=null where upload_id=$1 and claimed_at is not null",
+      [uploadId, stored.fileID, actual],
+    );
+  } catch (error) {
+    await pool.query(
+      "update yancuo.upload_sessions set claimed_at=null where upload_id=$1 and uploaded_at is null",
+      [uploadId],
+    ).catch(() => undefined);
+    throw error;
   }
-  await pool.query(
-    "update yancuo.upload_sessions set file_id=$2,actual_size=$3,uploaded_at=now() where upload_id=$1",
-    [uploadId, stored.fileID, actual],
-  );
   response(res, 200, { ok: true, data: { uploaded: true } });
 }
 

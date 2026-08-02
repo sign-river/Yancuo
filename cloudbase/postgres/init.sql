@@ -74,11 +74,14 @@ create table if not exists yancuo.upload_sessions (
     actual_size bigint,
     token_hash text not null,
     expires_at timestamptz not null,
+    claimed_at timestamptz,
     uploaded_at timestamptz,
     created_at timestamptz not null default now(),
     foreign key (repository_id, release_tag)
         references yancuo.releases(repository_id, tag) on delete cascade
 );
+
+alter table yancuo.upload_sessions add column if not exists claimed_at timestamptz;
 
 create table if not exists yancuo.write_locks (
     repository_id uuid primary key references yancuo.repositories(repository_id) on delete cascade,
