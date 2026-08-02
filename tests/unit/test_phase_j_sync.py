@@ -677,6 +677,25 @@ def test_github_batch_upload_failure_keeps_index_and_operations_unpushed(
     assert sync.list_unpushed()
 
 
+def test_github_batch_rejects_oversized_outgoing_payload_before_release(
+    runtime, monkeypatch
+) -> None:
+    provider = GitHubProvider(token="ghp_test")
+    released = False
+
+    def create_release(*_args, **_kwargs):
+        nonlocal released
+        released = True
+
+    provider.create_release = create_release  # type: ignore[method-assign]
+    monkeypatch.setattr(sync_module, "MAX_REMOTE_OPERATION_BATCH_BYTES", 4)
+
+    with pytest.raises(DomainError, match="批次文件过大"):
+        SyncService(runtime, provider)._push_github_batch(provider, [{"value": "12345"}])
+
+    assert released is False
+
+
 def test_github_batch_rejects_malformed_index(runtime) -> None:
     provider = GitHubProvider(token="ghp_test")
     provider.read_sync_manifest = lambda *_args: {"operation_batches": {}}  # type: ignore[method-assign]

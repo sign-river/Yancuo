@@ -255,16 +255,27 @@ class SyncService:
         return digest.hexdigest()
 
     def _push_github_batch(self, provider: CloudProvider, ops: list[dict[str, Any]]) -> None:
+        if len(ops) > MAX_REMOTE_OPERATIONS_PER_BATCH:
+            raise DomainError("待推送 Operation 批次记录过多")
         device_id = self.runtime.identity.device_id
         profile_id = self.runtime.identity.profile_id
         batch_id = f"batch_{uuid.uuid4().hex}"
         tag = f"yancuo-ops-v1-{profile_id[-8:]}-{device_id[-8:]}-{batch_id[-8:]}"
         with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
             payload = Path(temporary) / "operations.jsonl"
-            payload.write_text(
-                "".join(json.dumps(op, ensure_ascii=False) + "\n" for op in ops), encoding="utf-8"
-            )
-            sha = self._sha256(payload)
+            digest = hashlib.sha256()
+            total_bytes = 0
+            with payload.open("wb") as stream:
+                for op in ops:
+                    line_bytes = (json.dumps(op, ensure_ascii=False) + "\n").encode("utf-8")
+                    if len(line_bytes) > MAX_REMOTE_OPERATION_LINE_BYTES:
+                        raise DomainError("待推送 Operation 批次单行过大")
+                    total_bytes += len(line_bytes)
+                    if total_bytes > MAX_REMOTE_OPERATION_BATCH_BYTES:
+                        raise DomainError("待推送 Operation 批次文件过大")
+                    stream.write(line_bytes)
+                    digest.update(line_bytes)
+            sha = digest.hexdigest()
             body = json.dumps(
                 {
                     "format": "yancuo-operation-batch",
@@ -489,26 +500,34 @@ class SyncService:
                 raise DomainError("结构化题目引用的派生题图缺失：" + ", ".join(sorted(missing)))
             return result
 
-    def list_unpushed(self) -> list[dict[str, Any]]:
+    def list_unpushed(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         with self.runtime.session_factory() as s:
-            rows = s.scalars(
+            statement = (
                 select(SyncOperation).where(
                     SyncOperation.origin == "local",
                     SyncOperation.pushed_at.is_(None),
                 )
-            ).all()
+            )
+            if limit is not None:
+                statement = statement.limit(limit)
+            rows = s.scalars(statement).all()
             return [json.loads(r.payload_json) for r in rows]
 
     def push_operations(self) -> dict[str, Any]:
         provider = self._require_ops_provider()
-        ops = self.list_unpushed()
+        github_batch = not isinstance(provider, LocalFolderProvider)
+        ops = self.list_unpushed(
+            limit=MAX_REMOTE_OPERATIONS_PER_BATCH + 1 if github_batch else None
+        )
         if not ops:
             return {"pushed": 0}
+        if github_batch and len(ops) > MAX_REMOTE_OPERATIONS_PER_BATCH:
+            raise DomainError("待推送 Operation 批次记录过多")
         device_id = self.runtime.identity.device_id
         if not provider.acquire_lock(self.owner, self.repo, device_id):
             raise DomainError("无法获取同步锁")
         try:
-            if not isinstance(provider, LocalFolderProvider):
+            if github_batch:
                 self._push_github_batch(provider, ops)
                 now = _utcnow()
                 with self.runtime.session_factory() as s:
