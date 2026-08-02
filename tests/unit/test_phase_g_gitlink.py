@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from yancuo_win.cloud.gitlink import GitLinkProvider, _find_attachment_id
+from yancuo_win.cloud.base import RemoteRelease
 from yancuo_win.domain.rules import DomainError
 
 
@@ -95,3 +97,81 @@ def test_incremental_lock_is_explicitly_unsupported() -> None:
 
     with pytest.raises(DomainError, match="不能用于增量同步锁"):
         provider.acquire_lock("owner", "repo", "device")
+
+
+def test_upload_rejects_path_like_asset_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = GitLinkProvider(token="unit-test-token")
+    source = tmp_path / "snapshot.ebpack"
+    source.write_bytes(b"snapshot")
+    monkeypatch.setattr(
+        provider,
+        "upload_attachment",
+        lambda *_args, **_kwargs: pytest.fail("unsafe name reached upload"),
+    )
+
+    with pytest.raises(DomainError, match="不安全路径"):
+        provider.upload_release_asset(
+            "owner",
+            "repo",
+            tag="backup",
+            file_path=source,
+            asset_name="../outside.ebpack",
+        )
+    assert not (tmp_path.parent / "outside.ebpack").exists()
+
+
+def test_public_release_response_size_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = GitLinkProvider(token="unit-test-token")
+    monkeypatch.setattr(
+        provider, "_json_request", lambda *_args, **_kwargs: {"releases": []}
+    )
+    monkeypatch.setattr("yancuo_win.cloud.gitlink._MAX_PUBLIC_RESPONSE_BYTES", 16)
+    monkeypatch.setattr(
+        "yancuo_win.cloud.gitlink.safe_urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(b"{" + b"x" * 32 + b"}"),
+    )
+
+    with pytest.raises(DomainError, match="响应过大"):
+        provider.list_releases("owner", "repo")
+
+
+def test_download_enforces_actual_asset_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = GitLinkProvider(token="unit-test-token")
+    monkeypatch.setattr("yancuo_win.cloud.gitlink._MAX_ASSET_BYTES", 4)
+    monkeypatch.setattr(
+        provider,
+        "list_releases",
+        lambda *_args: [
+            RemoteRelease(
+                tag="backup",
+                name="backup",
+                assets=[
+                    {
+                        "name": "snapshot.ebpack",
+                        "url": "https://www.gitlink.org.cn/attachments/1",
+                    }
+                ],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "yancuo_win.cloud.gitlink.safe_urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(b"oversized"),
+    )
+    destination = tmp_path / "download.ebpack"
+
+    with pytest.raises(DomainError, match="实际下载大小超限"):
+        provider.download_release_asset(
+            "owner",
+            "repo",
+            tag="backup",
+            asset_name="snapshot.ebpack",
+            dest=destination,
+        )
+    assert not destination.exists()

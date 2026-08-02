@@ -15,11 +15,10 @@ import mimetypes
 import os
 import re
 import secrets
-import shutil
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from yancuo_win.cloud.base import (
     CloudCapabilities,
@@ -29,11 +28,14 @@ from yancuo_win.cloud.base import (
 )
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import get_secret
+from yancuo_win.infrastructure.safe_http import safe_urlopen
 
 logger = logging.getLogger("yancuo.cloud.gitlink")
 
 _SAFE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _LATEST_TAG = "yancuo-latest"
+_MAX_PUBLIC_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_ASSET_BYTES = 512 * 1024 * 1024
 
 
 class GitLinkProvider(CloudProvider):
@@ -63,7 +65,7 @@ class GitLinkProvider(CloudProvider):
             oauth=False,
             large_file_upload=True,
             delete_release=False,
-            max_asset_bytes=None,
+            max_asset_bytes=_MAX_ASSET_BYTES,
             assets_first=True,
         )
 
@@ -145,6 +147,8 @@ class GitLinkProvider(CloudProvider):
         path = Path(file_path).resolve()
         if not path.is_file():
             raise DomainError(f"待上传文件不存在：{path}")
+        if path.stat().st_size > _MAX_ASSET_BYTES:
+            raise DomainError("GitLink 上传文件超过 512 MiB 上限")
         name = _safe_filename(filename or path.name)
         boundary = "----Yancuo" + secrets.token_hex(16)
         content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
@@ -312,8 +316,11 @@ class GitLinkProvider(CloudProvider):
             headers={"Accept": "application/json", "User-Agent": "Yancuo-Windows"},
         )
         try:
-            with urlopen(req, timeout=60) as resp:
-                payload = json.loads(resp.read().decode("utf-8", "replace"))
+            with safe_urlopen(req, timeout=60) as resp:
+                raw = resp.read(_MAX_PUBLIC_RESPONSE_BYTES + 1)
+                if len(raw) > _MAX_PUBLIC_RESPONSE_BYTES:
+                    raise DomainError("GitLink 公开 Release 响应过大")
+                payload = json.loads(raw.decode("utf-8", "replace"))
         except Exception as exc:  # noqa: BLE001
             raise DomainError(f"无法列出 Release：{exc}") from exc
         if not isinstance(payload, dict):
@@ -368,25 +375,16 @@ class GitLinkProvider(CloudProvider):
     ) -> dict[str, Any]:
         """先上传附件并暂存 id；随后 create_release 会挂载。"""
         self._check_owner_repo(owner, repo)
+        safe_asset_name = _safe_filename(asset_name)
         # 若文件名与目标资源名不同，复制到临时同名文件再传
         src = Path(file_path)
-        temp: Path | None = None
-        try:
-            if src.name != asset_name:
-                temp = src.parent / asset_name
-                if temp.resolve() != src.resolve():
-                    shutil.copy2(src, temp)
-                    upload_path = temp
-                else:
-                    upload_path = src
-            else:
-                upload_path = src
-            aid = self.upload_attachment(upload_path, filename=asset_name)
-        finally:
-            if temp is not None and temp.is_file() and temp.resolve() != src.resolve():
-                temp.unlink(missing_ok=True)
+        if not src.is_file():
+            raise DomainError(f"待上传文件不存在：{src}")
+        if src.stat().st_size > _MAX_ASSET_BYTES:
+            raise DomainError("GitLink 上传文件超过 512 MiB 上限")
+        aid = self.upload_attachment(src, filename=safe_asset_name)
         self._staged.setdefault(tag, []).append(aid)
-        return {"id": aid, "name": asset_name, "attachment_id": aid}
+        return {"id": aid, "name": safe_asset_name, "attachment_id": aid}
 
     def download_release_asset(
         self, owner: str, repo: str, *, tag: str, asset_name: str, dest: Path
@@ -405,6 +403,16 @@ class GitLinkProvider(CloudProvider):
         )
         if not asset:
             raise DomainError(f"未找到附件：{asset_name}")
+        try:
+            declared_size = (
+                int(asset.get("size")) if asset.get("size") is not None else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise DomainError("GitLink 附件大小字段无效") from exc
+        if declared_size is not None and (
+            declared_size < 0 or declared_size > _MAX_ASSET_BYTES
+        ):
+            raise DomainError("GitLink 附件超过 512 MiB 下载上限")
         url = asset.get("download_url") or asset.get("url")
         if not isinstance(url, str) or not url:
             raise DomainError("附件缺少下载地址")
@@ -419,8 +427,15 @@ class GitLinkProvider(CloudProvider):
             headers={"User-Agent": "Yancuo-Windows", "Accept": "*/*"},
         )
         try:
-            with urlopen(req, timeout=600) as resp, dest.open("wb") as out:
-                shutil.copyfileobj(resp, out)
+            with safe_urlopen(
+                req, timeout=600, allow_cross_origin=True
+            ) as resp, dest.open("wb") as out:
+                received = 0
+                while chunk := resp.read(1024 * 1024):
+                    received += len(chunk)
+                    if received > _MAX_ASSET_BYTES:
+                        raise DomainError("GitLink 附件实际下载大小超限")
+                    out.write(chunk)
         except Exception as exc:  # noqa: BLE001
             dest.unlink(missing_ok=True)
             raise DomainError(f"下载附件失败：{exc}") from exc
@@ -492,13 +507,15 @@ class GitLinkProvider(CloudProvider):
 
 
 def _safe_filename(name: str) -> str:
-    return (
-        name.replace("\\", "_")
-        .replace("/", "_")
-        .replace('"', "_")
-        .replace("\r", "_")
-        .replace("\n", "_")
-    )
+    value = str(name)
+    if (
+        not value
+        or value in {".", ".."}
+        or any(ord(char) < 32 for char in value)
+        or any(char in value for char in "/\\:")
+    ):
+        raise DomainError("GitLink 附件名包含不安全路径字符")
+    return value.replace('"', "_")
 
 
 def _find_attachment_id(value: object) -> str | None:
