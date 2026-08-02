@@ -16,6 +16,8 @@ OP_FORMAT_VERSION = 1
 ALLOWED_OPS = frozenset({"create", "update", "delete", "undelete"})
 ALLOWED_ENTITIES = frozenset({"problem", "tag", "asset", "review"})
 MAX_OPERATION_ATTACHMENT_BYTES = 32 * 1024 * 1024
+MAX_OPERATION_ID_CHARS = 64
+MAX_OPERATION_TIMESTAMP_CHARS = 64
 
 
 def utc_now_iso() -> str:
@@ -72,11 +74,33 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
     if format_version != OP_FORMAT_VERSION:
         raise DomainError("operation format_version 不受支持")
     operation_id = raw.get("operation_id")
-    if not isinstance(operation_id, str) or not operation_id.startswith("op_"):
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id.startswith("op_")
+        or len(operation_id) > MAX_OPERATION_ID_CHARS
+    ):
         raise DomainError("operation_id 格式不正确")
-    for field in ("device_id", "database_id", "timestamp", "entity_id"):
-        if not isinstance(raw.get(field), str) or not raw[field].strip():
+    for field in ("device_id", "database_id", "entity_id"):
+        if (
+            not isinstance(raw.get(field), str)
+            or not raw[field].strip()
+            or len(raw[field]) > MAX_OPERATION_ID_CHARS
+        ):
             raise DomainError(f"operation 缺少有效 {field}")
+    timestamp = raw.get("timestamp")
+    if (
+        not isinstance(timestamp, str)
+        or not timestamp.strip()
+        or len(timestamp) > MAX_OPERATION_TIMESTAMP_CHARS
+    ):
+        raise DomainError("operation 缺少有效 timestamp")
+    try:
+        parsed_timestamp = datetime.fromisoformat(timestamp.strip().replace("Z", "+00:00"))
+        if parsed_timestamp.tzinfo is None or parsed_timestamp.utcoffset() is None:
+            raise ValueError("timestamp must include a timezone")
+        normalized_timestamp = parsed_timestamp.astimezone(timezone.utc).isoformat()
+    except (ValueError, OverflowError) as exc:
+        raise DomainError("operation timestamp 格式不正确") from exc
     if raw.get("operation") not in ALLOWED_OPS:
         raise DomainError("operation 非法")
     if raw.get("entity_type") not in ALLOWED_ENTITIES:
@@ -140,4 +164,5 @@ def validate_operation(raw: dict[str, Any]) -> dict[str, Any]:
         normalized[field] = value
     normalized["format_version"] = format_version
     normalized["tombstone"] = bool(raw.get("tombstone", False))
+    normalized["timestamp"] = normalized_timestamp
     return normalized

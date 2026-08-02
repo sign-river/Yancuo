@@ -712,7 +712,15 @@ class SyncService:
 
         # 按实体分组
         by_entity: dict[str, list[dict[str, Any]]] = {}
-        for operation_id, op in incoming.items():
+        ordered_incoming = sorted(
+            incoming.items(),
+            key=lambda item: (
+                item[1]["timestamp"],
+                int(item[1].get("new_revision") or 0),
+                item[0],
+            ),
+        )
+        for operation_id, op in ordered_incoming:
             if operation_id in known:
                 continue
             by_entity.setdefault(op["entity_id"], []).append(op)

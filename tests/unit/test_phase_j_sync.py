@@ -89,12 +89,19 @@ def test_operation_validation_rejects_missing_identity_and_bad_revision() -> Non
     for patch in (
         {"entity_id": ""},
         {"database_id": None},
+        {"device_id": "d" * 65},
+        {"operation_id": "op_" + "x" * 62},
+        {"timestamp": "2026-07-22T00:00:00"},
+        {"timestamp": "not-a-time"},
         {"base_revision": -1},
         {"new_revision": "not-an-int"},
         {"base_fields": []},
     ):
         with pytest.raises(DomainError):
             validate_operation({**base, **patch})
+
+    normalized = validate_operation({**base, "timestamp": "2026-07-22T08:00:00+08:00"})
+    assert normalized["timestamp"] == "2026-07-22T00:00:00+00:00"
 
 
 def test_operation_validation_rejects_cumulative_attachment_budget(
@@ -233,6 +240,49 @@ def test_pull_deduplicates_identical_operation_ids_and_rejects_conflicting_conte
     with pytest.raises(DomainError, match="已应用 Operation ID 内容冲突"):
         SyncService(runtime, conflicting_provider).pull_and_merge()
     assert services.get_problem(problem_id).solution_markdown == "唯一远端解析"
+
+
+def test_pull_orders_remote_operations_by_normalized_timestamp(
+    runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime.settings.sync.create_snapshot_before_merge = False
+    services = AppServices(runtime)
+    problem_id = services.create_problem(title="乱序同步题").id
+    base = {
+        "format": "yancuo-operation",
+        "format_version": 1,
+        "device_id": "dev_remote",
+        "database_id": "db_remote",
+        "entity_type": "problem",
+        "entity_id": problem_id,
+        "operation": "update",
+        "base_revision": 1,
+        "changed_fields": {"solution_markdown": ""},
+        "base_fields": {"solution_markdown": ""},
+        "tombstone": False,
+    }
+    older = {
+        **base,
+        "operation_id": "op_timestamp_older",
+        "timestamp": "2026-07-22T08:00:00+08:00",
+        "new_revision": 2,
+        "changed_fields": {"solution_markdown": "较早解析"},
+    }
+    newer = {
+        **base,
+        "operation_id": "op_timestamp_newer",
+        "timestamp": "2026-07-22T00:01:00Z",
+        "new_revision": 3,
+        "changed_fields": {"solution_markdown": "最新解析"},
+    }
+    provider = GitHubProvider(token="ghp_test")
+    sync = SyncService(runtime, provider)
+    monkeypatch.setattr(sync, "_github_remote_operations", lambda _provider: [newer, older])
+
+    result = sync.pull_and_merge()
+
+    assert result["applied"] == 2
+    assert services.get_problem(problem_id).solution_markdown == "最新解析"
 
 
 def test_pull_same_field_creates_review(runtime, tmp_path: Path):
