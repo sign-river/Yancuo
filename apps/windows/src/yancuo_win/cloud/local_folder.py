@@ -24,6 +24,7 @@ class LocalFolderProvider(CloudProvider):
     MAX_METADATA_FILE_BYTES = 8 * 1024 * 1024
     MAX_RELEASES = 10_000
     MAX_RELEASE_ASSETS = 10_000
+    MAX_ASSET_BYTES = 512 * 1024 * 1024
     MAX_DEVICES = 10_000
     MAX_OPERATION_FILE_BYTES = 64 * 1024 * 1024
     MAX_REMOTE_OPERATIONS = 100_000
@@ -254,10 +255,20 @@ class LocalFolderProvider(CloudProvider):
         if not d.is_dir():
             raise DomainError("Release 不存在")
         dest = d / asset_name
-        # 先写临时名再改名
-        tmp = d / f".{asset_name}.uploading"
-        shutil.copy2(file_path, tmp)
-        tmp.replace(dest)
+        if dest.is_symlink():
+            raise DomainError("Release asset target must not be a symlink")
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=".up-", suffix=".tmp", dir=d
+        )
+        os.close(fd)
+        temporary = Path(temporary_name)
+        try:
+            self._copy_asset_bounded(Path(file_path), temporary)
+            if dest.is_symlink():
+                raise DomainError("Release asset target must not be a symlink")
+            os.replace(temporary, dest)
+        finally:
+            temporary.unlink(missing_ok=True)
         return {"name": asset_name, "path": str(dest), "size": dest.stat().st_size}
 
     def download_release_asset(
@@ -266,11 +277,52 @@ class LocalFolderProvider(CloudProvider):
         tag = self._safe_component(tag, "release tag")
         asset_name = self._safe_component(asset_name, "asset name")
         src = self._repo_dir(owner, repo) / "releases" / tag / asset_name
+        if src.is_symlink():
+            raise DomainError("Release asset source must not be a symlink")
         if not src.is_file():
             raise DomainError(f"附件不存在：{asset_name}")
+        dest = Path(dest)
+        if dest.is_symlink():
+            raise DomainError("Download target must not be a symlink")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=".down-", suffix=".tmp", dir=dest.parent
+        )
+        os.close(fd)
+        temporary = Path(temporary_name)
+        try:
+            self._copy_asset_bounded(src, temporary)
+            if dest.is_symlink():
+                raise DomainError("Download target must not be a symlink")
+            os.replace(temporary, dest)
+        finally:
+            temporary.unlink(missing_ok=True)
         return dest
+
+    @classmethod
+    def _copy_asset_bounded(cls, source: Path, destination: Path) -> None:
+        source = Path(source)
+        if source.is_symlink() or not source.is_file():
+            raise DomainError("Release asset source must be a regular file")
+        size = source.stat().st_size
+        if size <= 0 or size > cls.MAX_ASSET_BYTES:
+            raise DomainError("Release asset must be between 1 byte and 512 MiB")
+        written = 0
+        try:
+            with source.open("rb") as incoming, destination.open("wb") as outgoing:
+                while chunk := incoming.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > cls.MAX_ASSET_BYTES:
+                        raise DomainError("Release asset actual size exceeds 512 MiB")
+                    outgoing.write(chunk)
+                outgoing.flush()
+                os.fsync(outgoing.fileno())
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        if written != size:
+            destination.unlink(missing_ok=True)
+            raise DomainError("Release asset changed while being copied")
 
     def delete_release(self, owner: str, repo: str, *, tag: str) -> None:
         tag = self._safe_component(tag, "release tag")
@@ -406,7 +458,7 @@ class LocalFolderProvider(CloudProvider):
             oauth=False,
             large_file_upload=True,
             delete_release=True,
-            max_asset_bytes=None,
+            max_asset_bytes=self.MAX_ASSET_BYTES,
             assets_first=False,
         )
 

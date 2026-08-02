@@ -163,6 +163,62 @@ def test_local_folder_rejects_unsafe_release_and_operation_components(
         )
 
 
+def test_local_folder_asset_copy_is_bounded_and_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.create_release("local", "repo", tag="backup", name="backup")
+    source = tmp_path / "asset.bin"
+    source.write_bytes(b"asset")
+
+    uploaded = provider.upload_release_asset(
+        "local", "repo", tag="backup", file_path=source, asset_name="asset.bin"
+    )
+    destination = tmp_path / "download.bin"
+    provider.download_release_asset(
+        "local", "repo", tag="backup", asset_name="asset.bin", dest=destination
+    )
+
+    assert Path(uploaded["path"]).read_bytes() == b"asset"
+    assert destination.read_bytes() == b"asset"
+    assert list(Path(uploaded["path"]).parent.glob(".up-*.tmp")) == []
+    assert list(destination.parent.glob(".down-*.tmp")) == []
+
+    monkeypatch.setattr(LocalFolderProvider, "MAX_ASSET_BYTES", 4)
+    oversized = tmp_path / "oversized.bin"
+    oversized.write_bytes(b"12345")
+    with pytest.raises(DomainError, match="512 MiB"):
+        provider.upload_release_asset(
+            "local",
+            "repo",
+            tag="backup",
+            file_path=oversized,
+            asset_name="oversized.bin",
+        )
+
+
+def test_local_folder_download_rejects_symlink_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.create_release("local", "repo", tag="backup", name="backup")
+    linked = root / "local" / "repo" / "releases" / "backup" / "linked.bin"
+    linked.write_bytes(b"link-placeholder")
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda self: self == linked or original_is_symlink(self),
+    )
+
+    with pytest.raises(DomainError, match="symlink"):
+        provider.download_release_asset(
+            "local", "repo", tag="backup", asset_name="linked.bin", dest=tmp_path / "out.bin"
+        )
+
+
 def test_local_folder_skips_non_object_operation_lines(tmp_path: Path) -> None:
     root = tmp_path / "cloud"
     provider = LocalFolderProvider(root)
