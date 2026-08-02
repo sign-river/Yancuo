@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import random
@@ -78,7 +79,40 @@ from yancuo_win.infrastructure.archive import (
 )
 from yancuo_win.domain.identity import read_identity
 
-MAX_BACKUP_METADATA_BYTES = 1024 * 1024
+MAX_BACKUP_METADATA_BYTES = 4 * 1024 * 1024
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_local_backup_checksums(root: Path, manifest: dict[str, Any]) -> None:
+    if int(manifest.get("version") or 0) < 2:
+        return
+    declared = manifest.get("checksums")
+    if not isinstance(declared, dict):
+        raise DomainError("备份 manifest 缺少 checksums 对象")
+    actual_files = {
+        path.relative_to(root).as_posix(): path
+        for path in iter_regular_files(root)
+        if path.relative_to(root).as_posix() != "manifest.json"
+    }
+    if set(declared) != set(actual_files):
+        raise DomainError("备份 checksums 与归档载荷不一致")
+    for relative_path, path in actual_files.items():
+        expected = declared.get(relative_path)
+        if (
+            not isinstance(expected, str)
+            or len(expected) != 64
+            or any(character not in "0123456789abcdef" for character in expected)
+        ):
+            raise DomainError(f"备份 checksum 无效：{relative_path}")
+        if _sha256_file(path) != expected:
+            raise DomainError(f"备份 checksum 不匹配：{relative_path}")
 
 
 @dataclass
@@ -2185,7 +2219,7 @@ class AppServices:
 
         manifest = {
             "format": "yancuo-local-backup",
-            "version": 1,
+            "version": 2,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "database_id": self.runtime.identity.database_id,
             "schema_version": self.runtime.schema_version,
@@ -2211,6 +2245,24 @@ class AppServices:
                 backup_identity_payload = json.dumps(
                     self.runtime.identity.to_dict(), ensure_ascii=False, indent=2
                 )
+            asset_files: list[tuple[Path, str]] = []
+            if asset_dir.is_dir():
+                try:
+                    asset_files = [
+                        (file, f"assets/{file.relative_to(asset_dir).as_posix()}")
+                        for file in iter_regular_files(asset_dir)
+                    ]
+                except ArchiveSecurityError as exc:
+                    raise DomainError(f"备份失败，资源目录不安全：{exc}") from exc
+            checksums = {"database/error_book.db": _sha256_file(snapshot)}
+            if backup_identity_payload is not None:
+                checksums["identity.json"] = hashlib.sha256(
+                    backup_identity_payload.encode("utf-8")
+                ).hexdigest()
+            checksums.update(
+                {archive_name: _sha256_file(file) for file, archive_name in asset_files}
+            )
+            manifest["checksums"] = checksums
             descriptor, archive_temp_name = tempfile.mkstemp(
                 prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent
             )
@@ -2221,15 +2273,8 @@ class AppServices:
                 zf.write(snapshot, arcname="database/error_book.db")
                 if backup_identity_payload is not None:
                     zf.writestr("identity.json", backup_identity_payload)
-                if asset_dir.is_dir():
-                    try:
-                        for file in iter_regular_files(asset_dir):
-                            zf.write(
-                                file,
-                                arcname=f"assets/{file.relative_to(asset_dir).as_posix()}",
-                            )
-                    except ArchiveSecurityError as exc:
-                        raise DomainError(f"备份失败，资源目录不安全：{exc}") from exc
+                for file, archive_name in asset_files:
+                    zf.write(file, arcname=archive_name)
             with archive_temp.open("r+b") as stream:
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -2248,9 +2293,7 @@ class AppServices:
             raise DomainError("备份文件不存在")
         target_root.mkdir(parents=True, exist_ok=True)
         tmp = Path(tempfile.mkdtemp(prefix=".restore-extract-", dir=target_root))
-        final_staging = Path(
-            tempfile.mkdtemp(prefix=".restore-final-", dir=target_root)
-        )
+        final_staging = Path(tempfile.mkdtemp(prefix=".restore-final-", dir=target_root))
         previous = Path(tempfile.mkdtemp(prefix=".restore-previous-", dir=target_root))
 
         try:
@@ -2286,7 +2329,7 @@ class AppServices:
                     package_schema = int(manifest.get("schema_version") or 0)
                 except (TypeError, ValueError) as exc:
                     raise DomainError("备份 manifest 版本字段无效") from exc
-                if backup_version != 1:
+                if backup_version not in {1, 2}:
                     raise DomainError("备份版本不受支持")
                 from yancuo_win.domain.identity import SCHEMA_VERSION
 
@@ -2298,6 +2341,11 @@ class AppServices:
                     safe_extract_zip(zf, tmp)
                 except ArchiveSecurityError as exc:
                     raise DomainError(f"备份 ZIP 解压被拒绝：{exc}") from exc
+
+            try:
+                _verify_local_backup_checksums(tmp, manifest)
+            except ArchiveSecurityError as exc:
+                raise DomainError(f"备份 checksum 校验失败：{exc}") from exc
 
             db_src = tmp / "database" / "error_book.db"
             assets_src = tmp / "assets"

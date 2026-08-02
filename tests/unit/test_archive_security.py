@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -110,25 +111,62 @@ def test_restore_rejects_identity_that_disagrees_with_manifest(
 ) -> None:
     original = AppServices(runtime).create_backup(tmp_path / "identity.zip")
     mismatched = tmp_path / "identity-mismatch.zip"
-    with (
-        zipfile.ZipFile(original, "r") as source,
-        zipfile.ZipFile(
-            mismatched, "w", compression=zipfile.ZIP_DEFLATED
-        ) as target_archive,
-    ):
-        for info in source.infolist():
-            payload = source.read(info.filename)
-            if info.filename == "identity.json":
-                identity = json.loads(payload)
-                identity["database_id"] = "db_other"
-                payload = json.dumps(identity).encode()
-            target_archive.writestr(info.filename, payload)
+    with zipfile.ZipFile(original, "r") as source:
+        entries = {
+            info.filename: source.read(info.filename) for info in source.infolist()
+        }
+    identity = json.loads(entries["identity.json"])
+    identity["database_id"] = "db_other"
+    entries["identity.json"] = json.dumps(identity).encode()
+    manifest = json.loads(entries["manifest.json"])
+    manifest["checksums"]["identity.json"] = hashlib.sha256(
+        entries["identity.json"]
+    ).hexdigest()
+    entries["manifest.json"] = json.dumps(manifest).encode()
+    with zipfile.ZipFile(
+        mismatched, "w", compression=zipfile.ZIP_DEFLATED
+    ) as target_archive:
+        for name, payload in entries.items():
+            target_archive.writestr(name, payload)
     target = tmp_path / "identity-target"
 
     with pytest.raises(DomainError, match="manifest.*不匹配"):
         AppServices(runtime).restore_backup(mismatched, target)
 
     assert list(target.glob(".restore-*-*")) == []
+
+
+def test_restore_rejects_corrupted_asset_before_replacing_target(
+    runtime, tmp_path: Path
+) -> None:
+    source_image = tmp_path / "source.png"
+    source_image.write_bytes(b"\x89PNG\r\n\x1a\noriginal")
+    services = AppServices(runtime)
+    services.import_images([source_image])
+    original = services.create_backup(tmp_path / "asset.zip")
+    corrupted = tmp_path / "asset-corrupted.zip"
+    changed = False
+    with (
+        zipfile.ZipFile(original, "r") as source,
+        zipfile.ZipFile(
+            corrupted, "w", compression=zipfile.ZIP_DEFLATED
+        ) as target_archive,
+    ):
+        for info in source.infolist():
+            payload = source.read(info.filename)
+            if info.filename.startswith("assets/") and not changed:
+                payload += b"corruption"
+                changed = True
+            target_archive.writestr(info.filename, payload)
+    assert changed
+    target = tmp_path / "corrupt-target"
+    target.mkdir()
+    (target / "error_book.db").write_bytes(b"existing database")
+
+    with pytest.raises(DomainError, match="checksum 不匹配"):
+        services.restore_backup(corrupted, target)
+
+    assert (target / "error_book.db").read_bytes() == b"existing database"
 
 
 def test_local_folder_lock_is_released_and_expired(tmp_path: Path) -> None:
