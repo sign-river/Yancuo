@@ -187,6 +187,52 @@ def test_local_folder_push_pull_auto_merge(
         assert sync_version is not None
 
 
+def test_pull_deduplicates_identical_operation_ids_and_rejects_conflicting_content(
+    runtime, tmp_path: Path
+) -> None:
+    provider = LocalFolderProvider(tmp_path / "duplicate-operations")
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "duplicate-operation-repo"
+    runtime.settings.sync.create_snapshot_before_merge = False
+    services = AppServices(runtime)
+    problem_id = services.create_problem(title="Operation 去重题").id
+    operation = {
+        "format": "yancuo-operation",
+        "format_version": 1,
+        "operation_id": "op_duplicate_remote",
+        "device_id": "dev_remote",
+        "database_id": "db_remote",
+        "timestamp": "2026-07-22T00:00:00+00:00",
+        "entity_type": "problem",
+        "entity_id": problem_id,
+        "operation": "update",
+        "base_revision": 1,
+        "new_revision": 2,
+        "changed_fields": {"solution_markdown": "唯一远端解析"},
+        "base_fields": {"solution_markdown": ""},
+        "tombstone": False,
+    }
+    provider.append_operations("local", "duplicate-operation-repo", "dev-a", [operation])
+    provider.append_operations("local", "duplicate-operation-repo", "dev-b", [operation])
+
+    result = SyncService(runtime, provider).pull_and_merge()
+
+    assert result["applied"] == 1
+    assert services.get_problem(problem_id).solution_markdown == "唯一远端解析"
+    with runtime.session_factory() as session:
+        assert session.get(SyncOperation, operation["operation_id"]) is not None
+
+    conflicting = dict(operation)
+    conflicting["changed_fields"] = {"solution_markdown": "冲突载荷"}
+    provider.append_operations(
+        "local", "duplicate-operation-repo", "dev-c", [conflicting]
+    )
+
+    with pytest.raises(DomainError, match="Operation ID 内容冲突"):
+        SyncService(runtime, provider).pull_and_merge()
+    assert services.get_problem(problem_id).solution_markdown == "唯一远端解析"
+
+
 def test_pull_same_field_creates_review(runtime, tmp_path: Path):
     cloud_root = tmp_path / "cloud2"
     provider = LocalFolderProvider(cloud_root)

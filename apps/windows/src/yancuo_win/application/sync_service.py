@@ -47,6 +47,7 @@ MAX_REMOTE_OPERATION_LINE_BYTES = 48 * 1024 * 1024
 MAX_REMOTE_OPERATIONS_PER_BATCH = 100_000
 MAX_REMOTE_OPERATION_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_REMOTE_OPERATIONS_TOTAL = 250_000
+SYNC_OPERATION_ID_QUERY_BATCH = 500
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -586,6 +587,26 @@ class SyncService:
         dest = self.runtime.paths.backup_dir / f"pre-sync-{stamp}.ebpack"
         return self.ebpack.export_ebpack(dest)
 
+    def _known_applied_operation_ids(self, operation_ids: set[str]) -> set[str]:
+        """只查询本次拉取涉及的已应用 Operation，避免扫描完整历史表。"""
+
+        if not operation_ids:
+            return set()
+        ordered = sorted(operation_ids)
+        known: set[str] = set()
+        with self.runtime.session_factory() as session:
+            for offset in range(0, len(ordered), SYNC_OPERATION_ID_QUERY_BATCH):
+                batch = ordered[offset : offset + SYNC_OPERATION_ID_QUERY_BATCH]
+                known.update(
+                    session.scalars(
+                        select(SyncOperation.id).where(
+                            SyncOperation.id.in_(batch),
+                            SyncOperation.applied_at.is_not(None),
+                        )
+                    ).all()
+                )
+        return known
+
     def pull_and_merge(self) -> dict[str, Any]:
         provider = self._require_ops_provider()
         snapshot = self._local_snapshot_before_merge()
@@ -601,17 +622,9 @@ class SyncService:
         conflict_items = 0
         session_id: str | None = None
 
-        # 幂等：已应用的跳过
-        with self.runtime.session_factory() as s:
-            known = {
-                r.id
-                for r in s.scalars(
-                    select(SyncOperation).where(SyncOperation.applied_at.is_not(None))
-                ).all()
-            }
-
-        # 按实体分组
-        by_entity: dict[str, list[dict[str, Any]]] = {}
+        # 先按 Operation ID 去重。相同 ID 必须代表完全相同的不可变内容；
+        # 否则远端来源存在歧义，不能静默选择其中一份继续合并。
+        incoming: dict[str, dict[str, Any]] = {}
         for raw in remote_ops:
             try:
                 op = validate_operation(raw)
@@ -621,7 +634,20 @@ class SyncService:
                 # v1 的本地持久化模型预留了其他实体类型，但当前合并器只
                 # 实现题目；不能把 asset/tag/review 补丁误套到 Problem。
                 continue
-            if op["operation_id"] in known:
+            operation_id = op["operation_id"]
+            previous = incoming.get(operation_id)
+            if previous is not None:
+                if previous != op:
+                    raise DomainError(f"远端 Operation ID 内容冲突：{operation_id}")
+                continue
+            incoming[operation_id] = op
+
+        known = self._known_applied_operation_ids(set(incoming))
+
+        # 按实体分组
+        by_entity: dict[str, list[dict[str, Any]]] = {}
+        for operation_id, op in incoming.items():
+            if operation_id in known:
                 continue
             by_entity.setdefault(op["entity_id"], []).append(op)
 
