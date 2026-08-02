@@ -587,24 +587,32 @@ class SyncService:
         dest = self.runtime.paths.backup_dir / f"pre-sync-{stamp}.ebpack"
         return self.ebpack.export_ebpack(dest)
 
-    def _known_applied_operation_ids(self, operation_ids: set[str]) -> set[str]:
-        """只查询本次拉取涉及的已应用 Operation，避免扫描完整历史表。"""
+    def _known_applied_operations(
+        self, operation_ids: set[str]
+    ) -> dict[str, dict[str, Any]]:
+        """查询本次拉取涉及的已应用 Operation，并返回其不可变载荷。"""
 
         if not operation_ids:
-            return set()
+            return {}
         ordered = sorted(operation_ids)
-        known: set[str] = set()
+        known: dict[str, dict[str, Any]] = {}
         with self.runtime.session_factory() as session:
             for offset in range(0, len(ordered), SYNC_OPERATION_ID_QUERY_BATCH):
                 batch = ordered[offset : offset + SYNC_OPERATION_ID_QUERY_BATCH]
-                known.update(
-                    session.scalars(
-                        select(SyncOperation.id).where(
-                            SyncOperation.id.in_(batch),
-                            SyncOperation.applied_at.is_not(None),
-                        )
-                    ).all()
-                )
+                rows = session.execute(
+                    select(SyncOperation.id, SyncOperation.payload_json).where(
+                        SyncOperation.id.in_(batch),
+                        SyncOperation.applied_at.is_not(None),
+                    )
+                ).all()
+                for operation_id, payload_json in rows:
+                    try:
+                        payload = json.loads(payload_json)
+                        known[operation_id] = validate_operation(payload)
+                    except (json.JSONDecodeError, DomainError) as exc:
+                        raise DomainError(
+                            f"本地已应用 Operation 载荷损坏：{operation_id}"
+                        ) from exc
         return known
 
     def pull_and_merge(self) -> dict[str, Any]:
@@ -642,7 +650,10 @@ class SyncService:
                 continue
             incoming[operation_id] = op
 
-        known = self._known_applied_operation_ids(set(incoming))
+        known = self._known_applied_operations(set(incoming))
+        for operation_id, stored in known.items():
+            if incoming[operation_id] != stored:
+                raise DomainError(f"已应用 Operation ID 内容冲突：{operation_id}")
 
         # 按实体分组
         by_entity: dict[str, list[dict[str, Any]]] = {}

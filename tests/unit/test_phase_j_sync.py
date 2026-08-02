@@ -222,14 +222,15 @@ def test_pull_deduplicates_identical_operation_ids_and_rejects_conflicting_conte
     with runtime.session_factory() as session:
         assert session.get(SyncOperation, operation["operation_id"]) is not None
 
+    conflicting_provider = LocalFolderProvider(tmp_path / "conflicting-operation-history")
     conflicting = dict(operation)
     conflicting["changed_fields"] = {"solution_markdown": "冲突载荷"}
-    provider.append_operations(
+    conflicting_provider.append_operations(
         "local", "duplicate-operation-repo", "dev-c", [conflicting]
     )
 
-    with pytest.raises(DomainError, match="Operation ID 内容冲突"):
-        SyncService(runtime, provider).pull_and_merge()
+    with pytest.raises(DomainError, match="已应用 Operation ID 内容冲突"):
+        SyncService(runtime, conflicting_provider).pull_and_merge()
     assert services.get_problem(problem_id).solution_markdown == "唯一远端解析"
 
 
