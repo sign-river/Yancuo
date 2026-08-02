@@ -7,6 +7,7 @@
 - Android 本地核心数据库与兼容范围内的未加密 `.ebpack` 校验导入。
 - 导入过程包含校验和、SQLite 完整性、外键和 staging/previous 恢复保护。
 - 本地身份包含 `profile_id/last_snapshot_id`；跨设备恢复继承资料身份但保留本机 `dev_android_*`，为未来 CloudBase 同步避免设备写入身份冲突。
+- CloudBase 用户 Token 仅进入加密偏好，设置页默认掩码；空值、内嵌空白/控制字符及超过 16 KiB 的异常值不会落盘。
 - Android 当前不读写 Windows 专用的笔记录入、AI 审核和部分高版本业务表。
 - Android 图片采集在具备“临时原图 → 审核/裁剪 → 仅派生题图入库”的完整链路前保持关闭；不得用直存整张原图的占位实现替代。
 

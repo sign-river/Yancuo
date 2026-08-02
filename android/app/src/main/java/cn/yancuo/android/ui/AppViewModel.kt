@@ -156,15 +156,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveToken(cloudBase: String) {
-        if (cloudBase.isNotBlank()) app.tokenStore.saveCloudBaseToken(cloudBase)
+        val outcome = runCatching { app.tokenStore.saveCloudBaseToken(cloudBase) }
         refreshSettings()
-        _settings.update { it.copy(message = "Token 已保存（加密存储）") }
+        _settings.update {
+            it.copy(
+                message = outcome.fold(
+                    onSuccess = { "Token 已保存（加密存储）" },
+                    onFailure = { error -> "Token 保存失败：${error.message}" },
+                ),
+            )
+        }
     }
 
     fun clearTokens() {
-        app.tokenStore.clearAll()
+        val outcome = runCatching { app.tokenStore.clearAll() }
         refreshSettings()
-        _settings.update { it.copy(message = "Token 已清除") }
+        _settings.update {
+            it.copy(
+                message = outcome.fold(
+                    onSuccess = { "Token 已清除" },
+                    onFailure = { error -> "Token 清除失败：${error.message}" },
+                ),
+            )
+        }
     }
 
     fun importEbpack(uri: Uri) {
