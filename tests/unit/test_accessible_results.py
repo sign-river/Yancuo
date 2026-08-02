@@ -164,7 +164,7 @@ def test_problem_detail_keyboard_path_and_accessible_names(
     assert "Alt+Left" in page.back_button.accessibleDescription()
     assert page.reader.accessibleName() == "题目正文与解析"
     assert page.chat_input.accessibleName() == "AI 讨论问题"
-    assert page.back_button.nextInFocusChain() is page.view_image_button
+    assert page.back_button.nextInFocusChain() is page.chat_button
 
     spy = QSignalSpy(page.back_requested)
     QTest.keyClick(page, Qt.Key.Key_Left, Qt.KeyboardModifier.AltModifier)

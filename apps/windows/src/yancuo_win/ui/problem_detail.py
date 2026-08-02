@@ -11,7 +11,6 @@ from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, 
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QCheckBox,
     QBoxLayout,
     QFileDialog,
     QFrame,
@@ -408,7 +407,6 @@ class ProblemDetailPage(QWidget):
         super().__init__(parent)
         self.chat = chat
         self.problem_id: str | None = None
-        self._image_path: Path | None = None
         self._chat_worker: ProblemChatWorker | None = None
         self._conversation_by_problem: dict[str, str] = {}
         self._reader_scroll_by_problem: dict[str, int] = {}
@@ -427,8 +425,6 @@ class ProblemDetailPage(QWidget):
         self.back_button.setToolTip("返回题库 (Alt+Left)")
         self.edit_button = primary_button("编辑题目")
         self.edit_button.clicked.connect(self._request_edit)
-        self.view_image_button = QPushButton("查看原图")
-        self.view_image_button.clicked.connect(self._view_original_image)
         self.chat_button = QPushButton("AI 讨论")
         self.chat_button.clicked.connect(self._toggle_chat)
         self.chat_button.setEnabled(chat is not None)
@@ -460,8 +456,6 @@ class ProblemDetailPage(QWidget):
         self.switch_group.layout().addWidget(self.next_button)
 
         self.learning_group = self._toolbar_group()
-        bind_icon(self.view_image_button, "camera")
-        self.learning_group.layout().addWidget(self.view_image_button)
         self.learning_group.layout().addWidget(self.chat_button)
         self.review_button = QPushButton("加入复习计划")
         self.review_button.clicked.connect(self._request_review)
@@ -536,8 +530,6 @@ class ProblemDetailPage(QWidget):
         export_chat.clicked.connect(self._export_conversation)
         delete_chat = QPushButton("删除")
         delete_chat.clicked.connect(self._delete_conversation)
-        self.include_original_checkbox = QCheckBox("授权附带原图")
-        self.include_original_checkbox.setToolTip("仅在新建对话时发送一次原图授权")
         conversation_row = QHBoxLayout()
         conversation_row.setSpacing(6)
         conversation_row.addWidget(self.conversation_combo, stretch=1)
@@ -548,7 +540,6 @@ class ProblemDetailPage(QWidget):
         management_row.setSpacing(6)
         management_row.addWidget(export_chat)
         management_row.addWidget(delete_chat)
-        management_row.addWidget(self.include_original_checkbox)
         management_row.addStretch(1)
         chat_toolbar.addLayout(conversation_row)
         chat_toolbar.addLayout(management_row)
@@ -564,7 +555,7 @@ class ProblemDetailPage(QWidget):
             self.chat_history.render_completed.connect(self.chat_history.scroll_to_bottom)
         self.chat_card.body.addWidget(self.chat_history)
         reference_row = QHBoxLayout()
-        self.add_reference_button = QPushButton("添加框选")
+        self.add_reference_button = QPushButton("框选题图")
         self.add_reference_button.clicked.connect(self._enable_reference_mode)
         self.clear_references_button = ghost_button("清除全部")
         self.clear_references_button.clicked.connect(self._clear_references)
@@ -615,7 +606,6 @@ class ProblemDetailPage(QWidget):
         self.back_shortcut.activated.connect(self.back_requested.emit)
         set_tab_order_chain(
             self.back_button,
-            self.view_image_button,
             self.chat_button,
             self.edit_button,
             self.previous_button,
@@ -625,7 +615,6 @@ class ProblemDetailPage(QWidget):
             self.more_button,
             self.reader,
             self.conversation_combo,
-            self.include_original_checkbox,
             self.chat_input,
             self.send_chat_button,
         )
@@ -686,13 +675,6 @@ class ProblemDetailPage(QWidget):
             include_answers=True,
             show_header=False,
         )
-        # Keep original media out of the reading layout and avoid decoding it
-        # until the user explicitly opens the viewer.
-        self._image_path = image_path if image_path and image_path.is_file() else None
-        self.view_image_button.setEnabled(self._image_path is not None)
-        self.view_image_button.setToolTip(
-            "打开可缩放原图" if self._image_path else "原始图片不存在或不可读取"
-        )
         self.chat_card.setVisible(False)
         self.reader_stack.setCurrentWidget(self.reader)
         self.reader_stack.setVisible(True)
@@ -702,16 +684,6 @@ class ProblemDetailPage(QWidget):
         self.chat_button.setText("AI 讨论")
         self._configure_reference_source()
         self._refresh_conversations()
-
-    def _view_original_image(self) -> None:
-        if self._image_path is None:
-            return
-        source = QPixmap(str(self._image_path))
-        if source.isNull():
-            self.view_image_button.setEnabled(False)
-            self.view_image_button.setToolTip("原始图片格式无法读取")
-            return
-        ImageViewerDialog(source, self).exec()
 
     def _toggle_chat(self) -> None:
         if self.width() < 860 and self.chat_card.isVisible():
@@ -771,7 +743,7 @@ class ProblemDetailPage(QWidget):
         self.reference_source_combo.blockSignals(True)
         self.reference_source_combo.clear()
         for source in self._reference_sources:
-            self.reference_source_combo.addItem(f"原图 {int(source['page_index']) + 1}", source)
+            self.reference_source_combo.addItem(f"题图 {int(source['page_index']) + 1}", source)
         self.reference_source_combo.blockSignals(False)
         self._set_reference_source()
         enabled = bool(self._reference_sources)
@@ -802,17 +774,17 @@ class ProblemDetailPage(QWidget):
             self.chat_button.setText("返回讨论")
         self.reference_canvas.begin_selection()
         self.finish_reference_button.setVisible(True)
-        self.add_reference_button.setText("请在原图上拖拽框选")
+        self.add_reference_button.setText("请在题图上拖拽框选")
 
     def _reference_selection_finished(self) -> None:
-        self.add_reference_button.setText("添加框选")
+        self.add_reference_button.setText("框选题图")
 
     def _finish_reference_mode(self) -> None:
         self.reference_canvas.cancel_selection()
         self.reader_stack.setCurrentWidget(self.reader)
         self.reader.setVisible(True)
         self.finish_reference_button.setVisible(False)
-        self.add_reference_button.setText("添加框选")
+        self.add_reference_button.setText("框选题图")
 
     def _activate_reference_preview(self, item: QListWidgetItem) -> None:
         index = item.data(Qt.ItemDataRole.UserRole)
@@ -852,7 +824,7 @@ class ProblemDetailPage(QWidget):
             preview = self._reference_preview(reference)
             if not preview.isNull():
                 item.setIcon(QIcon(preview))
-            item.setToolTip(f"引用区域 {index + 1} · 第 {reference.page_index + 1} 张原图")
+            item.setToolTip(f"引用区域 {index + 1} · 第 {reference.page_index + 1} 张题图")
             self.reference_previews.addItem(item)
         self.reference_previews.setVisible(bool(references))
         self.delete_reference_button.setEnabled(bool(references))
@@ -927,7 +899,7 @@ class ProblemDetailPage(QWidget):
             reference_note = ""
             if references:
                 labels = "、".join(
-                    f"{index}（原图 {int(value.get('page_index', 0)) + 1}）"
+                    f"{index}（题图 {int(value.get('page_index', 0)) + 1}）"
                     for index, value in enumerate(references, start=1)
                     if isinstance(value, dict)
                 )
@@ -941,10 +913,7 @@ class ProblemDetailPage(QWidget):
     def _new_conversation(self) -> None:
         if self.chat is None or not self.problem_id:
             return
-        conversation = self.chat.create_conversation(
-            self.problem_id,
-            include_original_image=self.include_original_checkbox.isChecked(),
-        )
+        conversation = self.chat.create_conversation(self.problem_id)
         self._refresh_conversations()
         self.conversation_combo.setCurrentIndex(self.conversation_combo.findData(conversation.id))
 

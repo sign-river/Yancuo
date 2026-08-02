@@ -23,9 +23,6 @@ from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.atomic_file import atomic_text_writer
 
 
-_MAX_CHAT_IMAGE_COUNT = 20
-_MAX_CHAT_IMAGE_BYTES = 32 * 1024 * 1024
-_MAX_CHAT_IMAGE_TOTAL_BYTES = 64 * 1024 * 1024
 _MAX_CHAT_REFERENCE_COUNT = 20
 _MAX_CHAT_REFERENCE_SOURCE_PIXELS = 25_000_000
 _MAX_CHAT_REFERENCE_TOTAL_BYTES = 32 * 1024 * 1024
@@ -33,7 +30,7 @@ _MAX_CHAT_REFERENCE_TOTAL_BYTES = 32 * 1024 * 1024
 
 @dataclass(frozen=True)
 class ProblemReference:
-    """A stable, normalized visual excerpt from an immutable original asset."""
+    """A stable, normalized visual excerpt from an immutable derived figure."""
 
     asset_id: str
     page_index: int
@@ -91,6 +88,7 @@ class ProblemChatService:
             "title": problem.title or "",
             "question_markdown": problem.question_markdown,
             "question_latex": problem.question_latex,
+            "question_content_json": problem.question_content_json,
             "correct_answer": problem.correct_answer,
             "solution_markdown": problem.solution_markdown,
             "error_analysis": problem.error_analysis,
@@ -119,7 +117,9 @@ class ProblemChatService:
                 model=model,
                 problem_revision=problem.revision,
                 context_snapshot_json=json.dumps(self._snapshot(problem), ensure_ascii=False),
-                include_original_image=include_original_image,
+                # Legacy column retained for schema compatibility. Formal
+                # conversations never receive discarded source originals.
+                include_original_image=False,
             )
             session.add(conversation)
             session.commit()
@@ -140,17 +140,40 @@ class ProblemChatService:
             return rows
 
     def list_reference_sources(self, problem_id: str) -> list[dict[str, Any]]:
-        """Return immutable originals in the same stable order used for consented sends."""
+        """Return formal derived figures in question-content order."""
 
         with self._session() as session:
-            assets = list(
-                session.scalars(
-                    select(Asset)
-                    .where(Asset.problem_id == problem_id, Asset.role == "original")
-                    .order_by(Asset.created_at.asc(), Asset.id.asc())
+            problem = session.get(Problem, problem_id)
+            if problem is None:
+                return []
+            try:
+                blocks = json.loads(problem.question_content_json or "[]")
+            except json.JSONDecodeError:
+                blocks = []
+            ordered_ids = list(
+                dict.fromkeys(
+                    str(block.get("derived_asset_id"))
+                    for block in blocks
+                    if isinstance(block, dict)
+                    and block.get("type") == "figure"
+                    and block.get("derived_asset_id")
                 )
             )
-            sources = [(asset.id, asset.relative_path) for asset in assets]
+            assets = {
+                asset.id: asset.relative_path
+                for asset in session.scalars(
+                    select(Asset).where(
+                        Asset.problem_id == problem_id,
+                        Asset.role == "derived_figure",
+                        Asset.id.in_(ordered_ids),
+                    )
+                )
+            }
+            sources = [
+                (asset_id, assets[asset_id])
+                for asset_id in ordered_ids
+                if asset_id in assets
+            ]
         store = ObjectStore(self.runtime.paths.asset_objects_dir)
         return [
             {"asset_id": asset_id, "page_index": index, "path": store.resolve(relative_path)}
@@ -207,21 +230,21 @@ class ProblemChatService:
         if len(references) > _MAX_CHAT_REFERENCE_COUNT:
             raise DomainError(f"单条消息最多包含 {_MAX_CHAT_REFERENCE_COUNT} 个视觉引用")
         parsed_references = [ProblemReference.from_value(value) for value in references]
+        with self._session() as lookup_session:
+            lookup_conversation = lookup_session.get(
+                ProblemConversation, conversation_id
+            )
+            if lookup_conversation is None:
+                raise DomainError("对话不存在")
+            reference_problem_id = lookup_conversation.problem_id
+        source_pages = {
+            str(source["asset_id"]): int(source["page_index"])
+            for source in self.list_reference_sources(reference_problem_id)
+        }
         with self._session() as session:
             conversation = session.get(ProblemConversation, conversation_id)
             if conversation is None:
                 raise DomainError("对话不存在")
-            originals = list(
-                session.scalars(
-                    select(Asset)
-                    .where(
-                        Asset.problem_id == conversation.problem_id,
-                        Asset.role == "original",
-                    )
-                    .order_by(Asset.created_at.asc(), Asset.id.asc())
-                )
-            )
-            source_pages = {asset.id: index for index, asset in enumerate(originals)}
             for reference in parsed_references:
                 if source_pages.get(reference.asset_id) != reference.page_index:
                     raise DomainError("引用区域不属于当前题目或页码已失效")
@@ -344,10 +367,6 @@ class ProblemChatService:
                         ),
                     }
                 )
-        if conversation.include_original_image and provider.capabilities.supports_chat_images:
-            image_content = self._original_image_context(conversation.problem_id)
-            if image_content:
-                messages.append({"role": "user", "content": image_content})
         return provider.complete_chat(
             messages=messages,
             model=conversation.model or self.runtime.settings.ai.default_text_model,
@@ -379,7 +398,7 @@ class ProblemChatService:
     def _reference_image_context(
         self, problem_id: str, references: Sequence[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Rebuild ordered crops from immutable originals without sending full images."""
+        """Rebuild ordered crops from immutable formal figure assets."""
 
         if len(references) > _MAX_CHAT_REFERENCE_COUNT:
             raise DomainError(f"单条消息最多包含 {_MAX_CHAT_REFERENCE_COUNT} 个视觉引用")
@@ -388,7 +407,10 @@ class ProblemChatService:
             sources = {
                 asset.id: asset.relative_path
                 for asset in session.scalars(
-                    select(Asset).where(Asset.problem_id == problem_id, Asset.role == "original")
+                    select(Asset).where(
+                        Asset.problem_id == problem_id,
+                        Asset.role == "derived_figure",
+                    )
                 )
             }
         store = ObjectStore(self.runtime.paths.asset_objects_dir)
@@ -404,7 +426,7 @@ class ProblemChatService:
             if not image_size.isValid():
                 continue
             if image_size.width() * image_size.height() > _MAX_CHAT_REFERENCE_SOURCE_PIXELS:
-                raise DomainError("视觉引用原图解码像素超过安全上限")
+                raise DomainError("视觉引用题图解码像素超过安全上限")
             image = reader.read()
             if image.isNull():
                 continue
@@ -439,56 +461,6 @@ class ProblemChatService:
                 ]
             )
         return content
-
-    def _original_image_context(self, problem_id: str) -> list[dict[str, Any]]:
-        """Read originals in a deterministic order after explicit consent."""
-
-        with self._session() as session:
-            assets = list(
-                session.scalars(
-                    select(Asset)
-                    .where(
-                        Asset.problem_id == problem_id,
-                        Asset.role == "original",
-                    )
-                    .order_by(Asset.created_at.asc(), Asset.id.asc())
-                ).all()
-            )
-            if not assets:
-                return []
-            sources = [(asset.relative_path, asset.mime_type or "image/jpeg") for asset in assets]
-        if len(sources) > _MAX_CHAT_IMAGE_COUNT:
-            raise DomainError(f"题目对话最多附带 {_MAX_CHAT_IMAGE_COUNT} 张原图")
-        store = ObjectStore(self.runtime.paths.asset_objects_dir)
-        content: list[dict[str, Any]] = [
-            {"type": "text", "text": "用户已明确授权附带当前题目的原图。"},
-        ]
-        total_bytes = 0
-        for relative_path, mime_type in sources:
-            path = store.resolve(relative_path)
-            if not path.is_file():
-                continue
-            size = path.stat().st_size
-            if size <= 0 or size > _MAX_CHAT_IMAGE_BYTES:
-                raise DomainError("题目对话单张原图必须在 1 字节到 32 MiB 之间")
-            total_bytes += size
-            if total_bytes > _MAX_CHAT_IMAGE_TOTAL_BYTES:
-                raise DomainError("题目对话附带原图总大小不能超过 64 MiB")
-            try:
-                with path.open("rb") as stream:
-                    payload = stream.read(_MAX_CHAT_IMAGE_BYTES + 1)
-            except OSError as exc:
-                raise DomainError("题目原图读取失败") from exc
-            if len(payload) != size or len(payload) > _MAX_CHAT_IMAGE_BYTES:
-                raise DomainError("题目原图在读取期间发生变化或超过大小上限")
-            encoded = base64.b64encode(payload).decode("ascii")
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
-                }
-            )
-        return content if len(content) > 1 else []
 
     def export_conversation_markdown(self, conversation_id: str, dest: Path) -> Path:
         conversation = self.get_conversation(conversation_id)

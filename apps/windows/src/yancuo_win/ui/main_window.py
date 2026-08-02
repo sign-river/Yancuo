@@ -3032,15 +3032,6 @@ class MainWindow(QMainWindow):
             self._show_status_toast("题目不存在或已被删除")
             return
 
-        image_path: Path | None = None
-        originals = [asset for asset in (problem.assets or []) if asset.role == "original"]
-        candidates = originals or list(problem.assets or [])
-        for asset in candidates:
-            resolved = self.services.store.resolve(asset.relative_path)
-            if resolved.is_file():
-                image_path = resolved
-                break
-
         subject_name: str | None = None
         chapter_name: str | None = None
         if problem.subject_id:
@@ -3079,7 +3070,6 @@ class MainWindow(QMainWindow):
         self._selected_problem_id = problem_id
         self.problem_detail_page.set_problem(
             problem,
-            image_path=image_path,
             content_blocks=content_blocks_with_images(
                 problem.question_content_json,
                 problem.assets or (),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Any
 
@@ -110,79 +110,68 @@ def test_failed_chat_keeps_pending_user_message_as_failed(
     assert reply.error_message
 
 
-def test_original_images_use_stable_created_order_and_ignore_other_roles(
+def test_reference_sources_follow_derived_figure_block_order(
     chat: tuple[AppServices, ProblemChatService],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     services, problem_chat = chat
     problem = services.create_problem(title="多图题", status="active")
     sources = []
     for name, payload in (
         ("later.png", b"later"),
-        ("processed.png", b"processed"),
+        ("original.png", b"original"),
         ("first.png", b"first"),
     ):
         source = tmp_path / name
         source.write_bytes(payload)
-        sources.append(services.store.store_copy(source, role="original"))
+        sources.append(services.store.store_copy(source, role="derived_figure"))
     with problem_chat._session() as session:
         session.add_all(
             [
                 Asset(
                     id="asset_later",
                     problem_id=problem.id,
-                    role="original",
+                    role="derived_figure",
                     sha256=sources[0].sha256,
                     relative_path=sources[0].relative_path,
                     mime_type="image/png",
-                    created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
                 ),
                 Asset(
-                    id="asset_processed",
+                    id="asset_original",
                     problem_id=problem.id,
-                    role="processed",
+                    role="original",
                     sha256=sources[1].sha256,
                     relative_path=sources[1].relative_path,
                     mime_type="image/png",
-                    created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
                 ),
                 Asset(
                     id="asset_first",
                     problem_id=problem.id,
-                    role="original",
+                    role="derived_figure",
                     sha256=sources[2].sha256,
                     relative_path=sources[2].relative_path,
                     mime_type="image/png",
-                    created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
                 ),
+            ]
+        )
+        stored_problem = session.get(type(problem), problem.id)
+        stored_problem.question_content_json = json.dumps(
+            [
+                {"type": "figure", "derived_asset_id": "asset_first"},
+                {"type": "figure", "derived_asset_id": "asset_later"},
             ]
         )
         session.commit()
 
-    provider = _CapturingChatProvider()
-    monkeypatch.setattr(chat_module, "get_provider", lambda *_args: provider)
-    conversation = problem_chat.create_conversation(
-        problem.id,
-        include_original_image=True,
-    )
-    reply = problem_chat.send_message(conversation.id, "按图片顺序解释")
+    sources_result = problem_chat.list_reference_sources(problem.id)
 
-    assert reply.status == "complete"
-    image_content = provider.requests[0][-1]["content"]
-    encoded_images = [
-        item["image_url"]["url"].split(",", 1)[1]
-        for item in image_content
-        if item["type"] == "image_url"
+    assert [item["asset_id"] for item in sources_result] == [
+        "asset_first",
+        "asset_later",
     ]
-    assert [base64.b64decode(value) for value in encoded_images] == [
-        b"first",
-        b"later",
-    ]
-    assert problem_chat._original_image_context(problem.id) == image_content
 
 
-def test_missing_original_image_safely_falls_back_to_text_chat(
+def test_legacy_include_original_flag_is_ignored(
     chat: tuple[AppServices, ProblemChatService],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -196,10 +185,11 @@ def test_missing_original_image_safely_falls_back_to_text_chat(
     )
 
     assert problem_chat.send_message(conversation.id, "解释题目").status == "complete"
+    assert conversation.include_original_image is False
     assert all(isinstance(message["content"], str) for message in provider.requests[0])
 
 
-def test_original_image_context_rejects_oversized_asset_before_ai(
+def test_legacy_original_asset_is_never_sent_to_ai(
     chat: tuple[AppServices, ProblemChatService],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,18 +211,16 @@ def test_original_image_context_rejects_oversized_asset_before_ai(
             )
         )
         session.commit()
-    monkeypatch.setattr(chat_module, "_MAX_CHAT_IMAGE_BYTES", 4)
     provider = _CapturingChatProvider()
     monkeypatch.setattr(chat_module, "get_provider", lambda *_args: provider)
     conversation = problem_chat.create_conversation(
         problem.id, include_original_image=True
     )
 
-    failed = problem_chat.send_message(conversation.id, "解释大图")
+    reply = problem_chat.send_message(conversation.id, "解释大图")
 
-    assert failed.status == "failed"
-    assert "32 MiB" in failed.error_message
-    assert provider.requests == []
+    assert reply.status == "complete"
+    assert all(isinstance(message["content"], str) for message in provider.requests[0])
 
 
 def test_retry_reuses_failed_user_message_without_duplicate_prompt(
@@ -279,17 +267,21 @@ def test_visual_reference_snapshot_is_ordered_and_immutable(
     image = QImage(40, 20, QImage.Format.Format_RGB32)
     image.fill(QColor("#FF0000"))
     assert image.save(str(image_path), "PNG")
-    stored = services.store.store_copy(image_path, role="original")
+    stored = services.store.store_copy(image_path, role="derived_figure")
     with problem_chat._session() as session:
         session.add(
             Asset(
                 id="asset_reference",
                 problem_id=problem.id,
-                role="original",
+                role="derived_figure",
                 sha256=stored.sha256,
                 relative_path=stored.relative_path,
                 mime_type="image/png",
             )
+        )
+        stored_problem = session.get(type(problem), problem.id)
+        stored_problem.question_content_json = json.dumps(
+            [{"type": "figure", "derived_asset_id": "asset_reference"}]
         )
         session.commit()
     provider = _CapturingChatProvider()
@@ -356,17 +348,21 @@ def test_visual_reference_rejects_decompression_bomb_before_ai(
     image = QImage(40, 20, QImage.Format.Format_RGB32)
     image.fill(QColor("#FF0000"))
     assert image.save(str(image_path), "PNG")
-    stored = services.store.store_copy(image_path, role="original")
+    stored = services.store.store_copy(image_path, role="derived_figure")
     with problem_chat._session() as session:
         session.add(
             Asset(
                 id="asset_large_pixels",
                 problem_id=problem.id,
-                role="original",
+                role="derived_figure",
                 sha256=stored.sha256,
                 relative_path=stored.relative_path,
                 mime_type="image/png",
             )
+        )
+        stored_problem = session.get(type(problem), problem.id)
+        stored_problem.question_content_json = json.dumps(
+            [{"type": "figure", "derived_asset_id": "asset_large_pixels"}]
         )
         session.commit()
     monkeypatch.setattr(chat_module, "_MAX_CHAT_REFERENCE_SOURCE_PIXELS", 100)
