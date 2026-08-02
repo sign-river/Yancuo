@@ -73,6 +73,29 @@ def test_gmshare_excludes_private_fields(runtime, tmp_path: Path) -> None:
         assert "identity.json" not in zf.namelist()
 
 
+def test_gmshare_export_failure_preserves_existing_destination(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    problem_id = AppServices(runtime).create_problem(title="atomic share").id
+    destination = tmp_path / "existing.gmshare"
+    destination.write_bytes(b"previous-share")
+
+    def fail_write(
+        self, filename, arcname=None, compress_type=None, compresslevel=None
+    ):
+        del self, filename, arcname, compress_type, compresslevel
+        raise OSError("simulated gmshare write failure")
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", fail_write)
+
+    with pytest.raises(OSError, match="simulated"):
+        GmshareService(runtime).export_share([problem_id], dest=destination)
+
+    assert destination.read_bytes() == b"previous-share"
+    assert list(tmp_path.glob(".existing.gmshare.*.tmp")) == []
+    assert list(runtime.paths.cache_dir.glob("gmshare-export-*")) == []
+
+
 def test_gmshare_import_dedup(
     runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -127,10 +129,8 @@ class GmshareService:
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         package_id = new_id("share")
-        staging = self.runtime.paths.cache_dir / f"gmshare-export-{stamp}"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True)
+        self.runtime.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="gmshare-export-", dir=self.runtime.paths.cache_dir))
         assets_root = staging / "assets"
         objects_dst = assets_root / "objects"
         objects_dst.mkdir(parents=True)
@@ -263,10 +263,8 @@ class GmshareService:
         pack = Path(pack)
         if not pack.is_file():
             raise DomainError("分享包不存在")
-        staging = self.runtime.paths.cache_dir / f"gmshare-import-{pack.stem}"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True)
+        self.runtime.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="gmshare-import-", dir=self.runtime.paths.cache_dir))
         try:
             with zipfile.ZipFile(pack, "r") as zf:
                 try:
@@ -549,9 +547,19 @@ class GmshareService:
         (root / "checksums.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _zip_staging(self, staging: Path, dest: Path) -> None:
-        if dest.exists():
-            dest.unlink()
-        with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for path in staging.rglob("*"):
-                if path.is_file():
-                    zf.write(path, path.relative_to(staging).as_posix())
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for path in staging.rglob("*"):
+                    if path.is_file():
+                        zf.write(path, path.relative_to(staging).as_posix())
+            with temporary.open("r+b") as stream:
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, dest)
+        finally:
+            temporary.unlink(missing_ok=True)
