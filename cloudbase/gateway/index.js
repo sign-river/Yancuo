@@ -161,6 +161,28 @@ async function cleanupExpiredUploads(subject) {
   }
 }
 
+async function cleanupPendingDeletions(subject) {
+  const pending = await pool.query(
+    "select file_id from yancuo.object_deletions where subject_id=$1 order by queued_at limit 100",
+    [subject],
+  );
+  for (const row of pending.rows) {
+    try {
+      await cloud.deleteFile({ fileList: [row.file_id] });
+    } catch (_error) {
+      await pool.query(
+        "update yancuo.object_deletions set attempts=attempts+1,last_attempt_at=now() where file_id=$1 and subject_id=$2",
+        [row.file_id, subject],
+      );
+      continue;
+    }
+    await pool.query(
+      "delete from yancuo.object_deletions where file_id=$1 and subject_id=$2",
+      [row.file_id, subject],
+    );
+  }
+}
+
 async function action(name, payload, identity, req) {
   if (String(req.headers["x-cloudbase-environment-id"] || "") !== ENV_ID) {
     fail("CloudBase 环境不匹配", 403);
@@ -241,6 +263,7 @@ async function action(name, payload, identity, req) {
       return { written: true };
     }
     if (name === "releases/list") {
+      await cleanupPendingDeletions(subject);
       const releases = await client.query(
         "select tag,name,body,created_at from yancuo.releases where repository_id=$1 order by created_at desc limit 500",
         [repo.repository_id],
@@ -377,13 +400,20 @@ async function action(name, payload, identity, req) {
         "select file_id from yancuo.release_assets where repository_id=$1 and release_tag=$2",
         [repo.repository_id, tag],
       );
+      for (const row of files.rows) {
+        if (row.file_id) {
+          await client.query(
+            "insert into yancuo.object_deletions(file_id,subject_id) values($1,$2) on conflict(file_id) do nothing",
+            [row.file_id, subject],
+          );
+        }
+      }
       await client.query(
         "delete from yancuo.releases where repository_id=$1 and tag=$2",
         [repo.repository_id, tag],
       );
       await client.query("commit");
-      const fileList = files.rows.map((row) => row.file_id).filter(Boolean);
-      if (fileList.length) await cloud.deleteFile({ fileList }).catch(() => undefined);
+      await cleanupPendingDeletions(subject);
       return { deleted: true };
     }
     fail("不支持的操作", 404);

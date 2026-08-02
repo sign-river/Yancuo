@@ -96,6 +96,14 @@ create table if not exists yancuo.rate_limits (
     request_count integer not null check (request_count >= 0)
 );
 
+create table if not exists yancuo.object_deletions (
+    file_id text primary key,
+    subject_id text not null,
+    queued_at timestamptz not null default now(),
+    attempts integer not null default 0 check (attempts >= 0),
+    last_attempt_at timestamptz
+);
+
 create index if not exists releases_repository_created_idx
     on yancuo.releases (repository_id, created_at desc);
 create index if not exists write_locks_expiry_idx
@@ -104,6 +112,8 @@ create index if not exists repositories_subject_updated_idx
     on yancuo.repositories (subject_id, updated_at desc);
 create index if not exists upload_sessions_subject_expiry_idx
     on yancuo.upload_sessions (subject_id, expires_at);
+create index if not exists object_deletions_subject_queued_idx
+    on yancuo.object_deletions (subject_id, queued_at);
 
 -- The gateway may acquire a 15 minute lock only when it is expired or already
 -- held by this device. The conditional conflict clause is the atomic decision.
@@ -123,6 +133,7 @@ alter table yancuo.release_assets enable row level security;
 alter table yancuo.write_locks enable row level security;
 alter table yancuo.upload_sessions enable row level security;
 alter table yancuo.rate_limits enable row level security;
+alter table yancuo.object_deletions enable row level security;
 
 -- Deliberately no broad RLS policy: only the gateway's server-side role should
 -- access these tables. Add narrowly scoped policies after its DB role is known.

@@ -74,3 +74,4 @@ Content-Type: application/json
 - 完整快照与 Operation 批次共享同一原子 manifest 和仓库锁；LocalFolder 仅保留为离线测试通道。
 - 资料库数量与存储预算在 PostgreSQL 事务内按用户加 advisory lock；所有网关实例共享同一配额串行化边界，有效上传会话在提交前也占用预算。
 - 登录成功后的请求频率由 PostgreSQL 单行 UPSERT 原子计数；函数横向扩容不会把单用户额度按实例倍增，也不在 Node 进程中永久保留用户键。
+- Release 删除先在同一事务写入对象删除队列，再移除元数据；Cloud Storage 暂时失败时保留队列并在后续列表/删除操作重试，避免永久孤儿对象。
