@@ -16,7 +16,7 @@ GRANT USAGE ON SCHEMA yancuo TO yancuo_gateway;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA yancuo TO yancuo_gateway;
 ALTER DEFAULT PRIVILEGES IN SCHEMA yancuo GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO yancuo_gateway;
 ```
-5. 在 SQL 编辑器执行 [`postgres/rls-policies.sql`](postgres/rls-policies.sql)，为 `yancuo_gateway` 创建按身份作用域的窄策略（网关在每个事务内先 `SET LOCAL yancuo.subject_id`；一次性 PUT 上传流程使用 `SET LOCAL yancuo.upload_id`）。密码和环境变量不写入仓库。
+5. 在 SQL 编辑器执行 [`postgres/rls-policies.sql`](postgres/rls-policies.sql)，为 `yancuo_gateway` 创建按身份作用域的窄策略（网关在每个事务内先 `select set_config('yancuo.subject_id', $1, true)`；一次性 PUT 上传流程使用 `select set_config('yancuo.upload_id', $1, true)`）。密码和环境变量不写入仓库。
 6. 从 [`gateway`](gateway) 部署 Node.js 18+ HTTP 云函数。入口由 `scf_bootstrap` 启动，监听平台提供的 `PORT`。
 7. 只在函数服务端配置下列环境变量；数据库连接串和腾讯云密钥不得下发给客户端。
 6. Windows 设置中选择“腾讯云 CloudBase”，填写环境 ID、网关 HTTPS 地址和逻辑 repository，再用普通 CloudBase 账户登录。
@@ -80,11 +80,13 @@ Content-Type: application/json
 对象路径必须由函数生成，例如 `yancuo/{sha256(subject)}/{repository}/uploads/{upload_id}/{asset_name}`，不能接受客户端传入的任意路径，也不能暴露原始用户标识。每次上传使用独立对象路径；`assets/commit` 是唯一提交点，同一发布标签下的同名附件一经提交不得覆盖。在它成功前，`manifest/write` 不得指向该快照。
 
 一次性上传地址只允许一个正在执行的 PUT：网关先在 PostgreSQL 中原子认领会话，失败时释放认领以供安全重试。对象完整落盘后若首次数据库完成态写入瞬断，错误路径会先幂等补写文件 ID、大小与上传时间，补写成功即返回成功；客户端未收到响应时，同一凭据重试也会幂等返回成功，不会覆盖已上传对象。过期会话按到期时间每次最多清理 100 条；对象删除失败时保留会话记录，后续清理继续重试，不能先丢失对象索引。
+上传 PUT 实现先把请求体写入函数临时目录（`os.tmpdir()`）并计数校验大小，再以 `fs.createReadStream` 作为 `fileContent` 调用 `cloud.uploadFile`（CloudBase Node SDK 只接受 `fs.ReadStream` 或 `Buffer`，不接受通用 Transform 流），完成后删除临时文件；大小不符时在写云存储前返回 409，不产生孤儿对象。
+
 
 ## 安全与边界
 
 - Cloud Storage 设为私有，下载只经函数签发短期 URL。
-- PostgreSQL 表启用 RLS；函数使用受控服务端角色 `yancuo_gateway`，桌面端没有数据库账号。RLS 策略按 `yancuo.subject_id` 会话变量隔离，网关在每个事务内先 `SET LOCAL`；一次性上传 PUT 流程按 `yancuo.upload_id` 会话变量仅开放对应会话行。策略见 [postgres/rls-policies.sql](postgres/rls-policies.sql)。
+- PostgreSQL 表启用 RLS；函数使用受控服务端角色 `yancuo_gateway`，桌面端没有数据库账号。RLS 策略按 `yancuo.subject_id` 会话变量隔离，网关在每个事务内先 `select set_config('yancuo.subject_id', $1, true)`；一次性上传 PUT 流程按 `select set_config('yancuo.upload_id', $1, true)` 会话变量仅开放对应会话行。策略见 [postgres/rls-policies.sql](postgres/rls-policies.sql)。
 - 普通用户 Access Token/refresh token 只进系统凭据；CloudBase SecretId/SecretKey、数据库密码均不得写入 TOML、日志或 Git。
 - 邮箱注册、找回密码和验证码发送依赖邮件服务配置；没有配置前只允许管理员在控制台创建测试用户，不应开放公开注册入口。
 - `locks/acquire` 需采用 [`postgres/init.sql`](postgres/init.sql) 中的 `INSERT ... ON CONFLICT ... WHERE` 事务语义；每次调用由客户端生成随机 `lease_id`，同一设备的不同任务也不能共享租约。

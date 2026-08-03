@@ -10,13 +10,13 @@ const init = fs.readFileSync(path.join(__dirname, "..", "..", "postgres", "init.
 const policies = fs.readFileSync(path.join(__dirname, "..", "..", "postgres", "rls-policies.sql"), "utf8");
 
 test("gateway sets a transaction-local subject before data queries", () => {
-  assert.match(gateway, /set local yancuo\.subject_id = \$1/);
+  assert.match(gateway, /set_config\('yancuo\.subject_id', \$1, true\)/);
   assert.match(gateway, /async function beginScoped\(client, subject\)/);
   assert.match(gateway, /async function queryScoped\(subject, text, params\)/);
 });
 
 test("one-time upload flow is scoped by upload id instead of subject", () => {
-  assert.match(gateway, /set local yancuo\.upload_id = \$1/);
+  assert.match(gateway, /set_config\('yancuo\.upload_id', \$1, true\)/);
   assert.match(gateway, /async function beginUploadScoped\(client, uploadId\)/);
   assert.match(gateway, /async function queryUploadScoped\(uploadId, text, params\)/);
 });

@@ -2,6 +2,9 @@
 
 const http = require("node:http");
 const { Transform } = require("node:stream");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { Pool } = require("pg");
 const tcb = require("@cloudbase/node-sdk");
 const {
@@ -101,12 +104,12 @@ pool.on("error", (error) => {
 
 async function beginScoped(client, subject) {
   await client.query("begin");
-  await client.query("set local yancuo.subject_id = $1", [subject]);
+  await client.query("select set_config('yancuo.subject_id', $1, true)", [subject]);
 }
 
 async function beginUploadScoped(client, uploadId) {
   await client.query("begin");
-  await client.query("set local yancuo.upload_id = $1", [uploadId]);
+  await client.query("select set_config('yancuo.upload_id', $1, true)", [uploadId]);
 }
 
 async function queryScoped(subject, text, params) {
@@ -646,29 +649,33 @@ async function upload(req, res, url) {
   );
   const row = claimed.rows[0];
   if (!row) fail("上传已在进行或凭据已使用", 409);
+  const tempPath = path.join(os.tmpdir(), `yancuo-upload-${uploadId}`);
   let actual = 0;
-  const counter = new Transform({
-    transform(chunk, _encoding, callback) {
-      actual += chunk.length;
-      if (actual > Number(row.expected_size) || actual > MAX_ASSET_BYTES) {
-        callback(Object.assign(new Error("上传内容超过声明大小"), { statusCode: 413 }));
-      } else {
-        callback(null, chunk);
-      }
-    },
-  });
   let stored;
   try {
-    req.pipe(counter);
-    stored = await cloud.uploadFile({ cloudPath: row.storage_path, fileContent: counter });
-    if (!stored?.fileID) fail("云存储未返回文件标识", 502);
+    await new Promise((resolve, reject) => {
+      const counter = new Transform({
+        transform(chunk, _encoding, callback) {
+          actual += chunk.length;
+          if (actual > Number(row.expected_size) || actual > MAX_ASSET_BYTES) {
+            callback(Object.assign(new Error("上传内容超过声明大小"), { statusCode: 413 }));
+          } else {
+            callback(null, chunk);
+          }
+        },
+      });
+      const writeStream = fs.createWriteStream(tempPath, { flags: "wx" });
+      writeStream.on("error", reject);
+      req.on("error", reject);
+      counter.on("error", reject);
+      writeStream.on("finish", resolve);
+      req.pipe(counter).pipe(writeStream);
+    });
     if (actual !== Number(row.expected_size)) {
-      if (stored.fileID) {
-        await cloud.deleteFile({ fileList: [stored.fileID] });
-        stored = undefined;
-      }
       fail("上传内容大小与声明不一致", 409);
     }
+    stored = await cloud.uploadFile({ cloudPath: row.storage_path, fileContent: fs.createReadStream(tempPath) });
+    if (!stored?.fileID) fail("云存储未返回文件标识", 502);
     const completed = await queryUploadScoped(
       uploadId,
       "update yancuo.upload_sessions set file_id=$2,actual_size=$3,uploaded_at=now(),claimed_at=null where upload_id=$1 and claimed_at is not null",
@@ -693,6 +700,8 @@ async function upload(req, res, url) {
       [uploadId],
     ).catch(() => undefined);
     throw error;
+  } finally {
+    await fs.promises.unlink(tempPath).catch(() => undefined);
   }
   response(res, 200, { ok: true, data: { uploaded: true } });
 }

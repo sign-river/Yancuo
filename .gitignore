@@ -235,3 +235,7 @@ apps/windows/.yancuo_data_smoke/
 # IDE
 .idea/
 .vscode/
+
+# Node.js
+node_modules/
+
