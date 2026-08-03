@@ -98,6 +98,46 @@ const pool = new Pool({
 pool.on("error", (error) => {
   console.error("postgres idle client error", { type: error.name });
 });
+
+async function beginScoped(client, subject) {
+  await client.query("begin");
+  await client.query("set local yancuo.subject_id = $1", [subject]);
+}
+
+async function beginUploadScoped(client, uploadId) {
+  await client.query("begin");
+  await client.query("set local yancuo.upload_id = $1", [uploadId]);
+}
+
+async function queryScoped(subject, text, params) {
+  const client = await pool.connect();
+  try {
+    await beginScoped(client, subject);
+    const result = await client.query(text, params);
+    await client.query("commit");
+    return result;
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function queryUploadScoped(uploadId, text, params) {
+  const client = await pool.connect();
+  try {
+    await beginUploadScoped(client, uploadId);
+    const result = await client.query(text, params);
+    await client.query("commit");
+    return result;
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 const cloud = tcb.init({ env: ENV_ID });
 
 function fail(message, statusCode = 400) {
@@ -205,7 +245,8 @@ async function authenticate(req) {
 }
 
 async function enforceRate(subject) {
-  const result = await pool.query(
+  const result = await queryScoped(
+    subject,
     "insert into yancuo.rate_limits(subject_id,window_start,request_count) values($1,date_trunc('minute',now()),1) on conflict(subject_id) do update set window_start=case when yancuo.rate_limits.window_start<date_trunc('minute',now()) then excluded.window_start else yancuo.rate_limits.window_start end,request_count=case when yancuo.rate_limits.window_start<date_trunc('minute',now()) then 1 else yancuo.rate_limits.request_count+1 end returning request_count",
     [subject],
   );
@@ -242,7 +283,8 @@ async function requireWriteLock(client, repositoryId, payload) {
 }
 
 async function cleanupExpiredUploads(subject) {
-  const expired = await pool.query(
+  const expired = await queryScoped(
+    subject,
     "select upload_id,file_id from yancuo.upload_sessions where subject_id=$1 and expires_at < now() and (claimed_at is null or claimed_at < now()-interval '1 hour') order by expires_at limit 100",
     [subject],
   );
@@ -254,7 +296,8 @@ async function cleanupExpiredUploads(subject) {
         continue;
       }
     }
-    await pool.query(
+    await queryScoped(
+      subject,
       "delete from yancuo.upload_sessions where upload_id=$1 and subject_id=$2 and expires_at < now() and (claimed_at is null or claimed_at < now()-interval '1 hour')",
       [row.upload_id, subject],
     );
@@ -262,7 +305,8 @@ async function cleanupExpiredUploads(subject) {
 }
 
 async function cleanupPendingDeletions(subject) {
-  const pending = await pool.query(
+  const pending = await queryScoped(
+    subject,
     "select file_id from yancuo.object_deletions where subject_id=$1 order by queued_at limit 100",
     [subject],
   );
@@ -270,13 +314,15 @@ async function cleanupPendingDeletions(subject) {
     try {
       await cloud.deleteFile({ fileList: [row.file_id] });
     } catch (_error) {
-      await pool.query(
+      await queryScoped(
+        subject,
         "update yancuo.object_deletions set attempts=attempts+1,last_attempt_at=now() where file_id=$1 and subject_id=$2",
         [row.file_id, subject],
       );
       continue;
     }
-    await pool.query(
+    await queryScoped(
+      subject,
       "delete from yancuo.object_deletions where file_id=$1 and subject_id=$2",
       [row.file_id, subject],
     );
@@ -296,7 +342,8 @@ async function action(name, payload, identity, req) {
     return { login: identity.login, display_name: identity.displayName, subject };
   }
   if (name === "repositories/list") {
-    const result = await pool.query(
+    const result = await queryScoped(
+      subject,
       "select name, created_at, updated_at from yancuo.repositories where subject_id=$1 order by updated_at desc",
       [subject],
     );
@@ -306,7 +353,7 @@ async function action(name, payload, identity, req) {
     const repositoryName = boundedName(payload.name, "资料库名称");
     const client = await pool.connect();
     try {
-      await client.query("begin");
+      await beginScoped(client, subject);
       await lockSubjectQuota(client, subject);
       const existing = await client.query(
         "select repository_id,name,created_at,updated_at from yancuo.repositories where subject_id=$1 and name=$2",
@@ -337,13 +384,18 @@ async function action(name, payload, identity, req) {
 
   const client = await pool.connect();
   try {
+    await beginScoped(client, subject);
     const repo = await repository(client, subject, payload);
-    if (name === "repositories/get") return { ...repo, owner: subject, private: true };
+    if (name === "repositories/get") {
+      await client.query("commit");
+      return { ...repo, owner: subject, private: true };
+    }
     if (name === "manifest/read") {
       const result = await client.query(
         "select document from yancuo.manifests where repository_id=$1",
         [repo.repository_id],
       );
+      await client.query("commit");
       return { manifest: result.rows[0]?.document || null };
     }
     if (name === "manifest/write") {
@@ -353,7 +405,6 @@ async function action(name, payload, identity, req) {
       if (Buffer.byteLength(JSON.stringify(payload.manifest), "utf8") > MAX_MANIFEST_BYTES) {
         fail("manifest 超过大小限制", 413);
       }
-      await client.query("begin");
       await requireWriteLock(client, repo.repository_id, payload);
       await client.query(
         "insert into yancuo.manifests(repository_id,document) values($1,$2::jsonb) on conflict(repository_id) do update set document=excluded.document,updated_at=now()",
@@ -380,6 +431,7 @@ async function action(name, payload, identity, req) {
         if (!byTag.has(row.release_tag)) byTag.set(row.release_tag, []);
         byTag.get(row.release_tag).push({ name: row.asset_name, size: Number(row.byte_size) });
       }
+      await client.query("commit");
       return { releases: releases.rows.map((row) => ({ ...row, assets: byTag.get(row.tag) || [] })) };
     }
     if (name === "releases/create") {
@@ -389,7 +441,6 @@ async function action(name, payload, identity, req) {
       if (Buffer.byteLength(JSON.stringify(body), "utf8") > MAX_RELEASE_BODY_BYTES) {
         fail("发布说明 JSON 编码后超过大小限制", 413);
       }
-      await client.query("begin");
       await requireWriteLock(client, repo.repository_id, payload);
       const existing = await client.query(
         "select tag,name,body,created_at from yancuo.releases where repository_id=$1 and tag=$2",
@@ -422,7 +473,6 @@ async function action(name, payload, identity, req) {
       const assetName = boundedName(payload.asset_name, "资源名称");
       const size = Number(payload.size);
       if (!Number.isSafeInteger(size) || size < 0 || size > MAX_ASSET_BYTES) fail("资源大小无效", 413);
-      await client.query("begin");
       await lockSubjectQuota(client, subject);
       await requireWriteLock(client, repo.repository_id, payload);
       const release = await client.query(
@@ -466,7 +516,6 @@ async function action(name, payload, identity, req) {
     }
     if (name === "assets/commit") {
       const uploadId = uuidV4(payload.upload_id, "上传 ID");
-      await client.query("begin");
       await requireWriteLock(client, repo.repository_id, payload);
       const claimed = await client.query(
         "delete from yancuo.upload_sessions where upload_id=$1 and subject_id=$2 and repository_id=$3 and uploaded_at is not null and expires_at>=now() returning *",
@@ -497,6 +546,7 @@ async function action(name, payload, identity, req) {
       const urls = await cloud.getTempFileURL({ fileList: [{ fileID: found.rows[0].file_id, maxAge: 600 }] });
       const url = urls.fileList?.[0]?.tempFileURL;
       if (!url) fail("无法生成临时下载地址", 502);
+      await client.query("commit");
       return { url };
     }
     if (name === "locks/acquire") {
@@ -506,6 +556,7 @@ async function action(name, payload, identity, req) {
         "insert into yancuo.write_locks(repository_id,device_id,lease_id,expires_at) values($1,$2,$3,now()+interval '15 minutes') on conflict(repository_id) do update set device_id=excluded.device_id,lease_id=excluded.lease_id,expires_at=excluded.expires_at,updated_at=now() where yancuo.write_locks.expires_at<=now() or (yancuo.write_locks.device_id=excluded.device_id and yancuo.write_locks.lease_id=excluded.lease_id) returning device_id,expires_at",
         [repo.repository_id, deviceId, leaseId],
       );
+      await client.query("commit");
       return { acquired: Boolean(locked.rowCount), expires_at: locked.rows[0]?.expires_at || null };
     }
     if (name === "locks/release") {
@@ -515,11 +566,11 @@ async function action(name, payload, identity, req) {
         "delete from yancuo.write_locks where repository_id=$1 and device_id=$2 and lease_id=$3",
         [repo.repository_id, deviceId, leaseId],
       );
+      await client.query("commit");
       return { released: true };
     }
     if (name === "releases/delete") {
       const tag = boundedName(payload.tag, "发布标签");
-      await client.query("begin");
       await requireWriteLock(client, repo.repository_id, payload);
       const targetRelease = await client.query(
         "select 1 from yancuo.releases where repository_id=$1 and tag=$2 for update",
@@ -574,7 +625,8 @@ async function upload(req, res, url) {
   const uploadId = uuidV4(url.pathname.split("/").pop(), "上传 ID");
   if (url.searchParams.has("token")) fail("上传凭据不得放在 URL 中", 400);
   const token = String(req.headers["x-yancuo-upload-token"] || "");
-  const found = await pool.query(
+  const found = await queryUploadScoped(
+    uploadId,
     "select * from yancuo.upload_sessions where upload_id=$1 and expires_at>=now()",
     [uploadId],
   );
@@ -587,7 +639,8 @@ async function upload(req, res, url) {
     response(res, 200, { ok: true, data: { uploaded: true } });
     return;
   }
-  const claimed = await pool.query(
+  const claimed = await queryUploadScoped(
+    uploadId,
     "update yancuo.upload_sessions set claimed_at=now(),expires_at=now()+interval '1 hour' where upload_id=$1 and token_hash=$2 and expires_at>=now() and uploaded_at is null and claimed_at is null returning *",
     [uploadId, tokenHash(token)],
   );
@@ -616,14 +669,16 @@ async function upload(req, res, url) {
       }
       fail("上传内容大小与声明不一致", 409);
     }
-    const completed = await pool.query(
+    const completed = await queryUploadScoped(
+      uploadId,
       "update yancuo.upload_sessions set file_id=$2,actual_size=$3,uploaded_at=now(),claimed_at=null where upload_id=$1 and claimed_at is not null",
       [uploadId, stored.fileID, actual],
     );
     if (completed.rowCount !== 1) fail("上传会话已过期或被回收", 409);
   } catch (error) {
     if (stored?.fileID && actual === Number(row.expected_size)) {
-      const recovered = await pool.query(
+      const recovered = await queryUploadScoped(
+        uploadId,
         "update yancuo.upload_sessions set file_id=$2,actual_size=$3,uploaded_at=coalesce(uploaded_at,now()),claimed_at=null where upload_id=$1 returning upload_id",
         [uploadId, stored.fileID, actual],
       ).catch(() => null);
@@ -632,7 +687,8 @@ async function upload(req, res, url) {
         return;
       }
     }
-    await pool.query(
+    await queryUploadScoped(
+      uploadId,
       "update yancuo.upload_sessions set claimed_at=null where upload_id=$1 and uploaded_at is null",
       [uploadId],
     ).catch(() => undefined);

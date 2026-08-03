@@ -14,11 +14,11 @@ test("per-user quotas are serialized across gateway instances", () => {
   );
   assert.match(
     source,
-    /repositories\/create[\s\S]{0,500}begin[\s\S]{0,300}lockSubjectQuota/,
+    /repositories\/create[\s\S]{0,500}beginScoped[\s\S]{0,300}lockSubjectQuota/,
   );
   assert.match(
     source,
-    /assets\/upload-url[\s\S]{0,700}begin[\s\S]{0,300}lockSubjectQuota/,
+    /assets\/upload-url[\s\S]{0,700}lockSubjectQuota/, // quota serialization now runs inside the handler-scoped transaction opened by beginScoped
   );
 });
 

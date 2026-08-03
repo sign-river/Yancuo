@@ -9,8 +9,16 @@
 1. 在 CloudBase 控制台开启用户名密码认证并创建测试用户；邮箱可以作为用户名。正式开放注册前需另行配置邮箱验证码服务和反滥用策略。
 2. 确认环境 ID，并将云存储权限设为私有。`yancuo/` 对象前缀由网关首次上传时自动创建。
 3. 在 PostgreSQL 的 SQL 编辑器执行 [`postgres/init.sql`](postgres/init.sql)。该脚本不包含账户、密码或环境 ID。
-4. 从 [`gateway`](gateway) 部署 Node.js 18+ HTTP 云函数。入口由 `scf_bootstrap` 启动，监听平台提供的 `PORT`。
-5. 只在函数服务端配置下列环境变量；数据库连接串和腾讯云密钥不得下发给客户端。
+4. 在控制台“角色”页创建专用数据库角色（如 `yancuo_gateway`），只授予 `LOGIN`，**不要**勾选“绕过所有行级安全策略”；再在 SQL 编辑器为它设置密码并授予最小权限：
+```sql
+ALTER ROLE yancuo_gateway WITH LOGIN PASSWORD '<管理员自行设置的强密码>';
+GRANT USAGE ON SCHEMA yancuo TO yancuo_gateway;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA yancuo TO yancuo_gateway;
+ALTER DEFAULT PRIVILEGES IN SCHEMA yancuo GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO yancuo_gateway;
+```
+5. 在 SQL 编辑器执行 [`postgres/rls-policies.sql`](postgres/rls-policies.sql)，为 `yancuo_gateway` 创建按身份作用域的窄策略（网关在每个事务内先 `SET LOCAL yancuo.subject_id`；一次性 PUT 上传流程使用 `SET LOCAL yancuo.upload_id`）。密码和环境变量不写入仓库。
+6. 从 [`gateway`](gateway) 部署 Node.js 18+ HTTP 云函数。入口由 `scf_bootstrap` 启动，监听平台提供的 `PORT`。
+7. 只在函数服务端配置下列环境变量；数据库连接串和腾讯云密钥不得下发给客户端。
 6. Windows 设置中选择“腾讯云 CloudBase”，填写环境 ID、网关 HTTPS 地址和逻辑 repository，再用普通 CloudBase 账户登录。
 7. 测试连接，创建逻辑仓库后做一次小型 `.ebpack` 备份和下载恢复验证。
 
@@ -76,7 +84,7 @@ Content-Type: application/json
 ## 安全与边界
 
 - Cloud Storage 设为私有，下载只经函数签发短期 URL。
-- PostgreSQL 表启用 RLS；函数使用受控服务端角色，桌面端没有数据库账号。
+- PostgreSQL 表启用 RLS；函数使用受控服务端角色 `yancuo_gateway`，桌面端没有数据库账号。RLS 策略按 `yancuo.subject_id` 会话变量隔离，网关在每个事务内先 `SET LOCAL`；一次性上传 PUT 流程按 `yancuo.upload_id` 会话变量仅开放对应会话行。策略见 [postgres/rls-policies.sql](postgres/rls-policies.sql)。
 - 普通用户 Access Token/refresh token 只进系统凭据；CloudBase SecretId/SecretKey、数据库密码均不得写入 TOML、日志或 Git。
 - 邮箱注册、找回密码和验证码发送依赖邮件服务配置；没有配置前只允许管理员在控制台创建测试用户，不应开放公开注册入口。
 - `locks/acquire` 需采用 [`postgres/init.sql`](postgres/init.sql) 中的 `INSERT ... ON CONFLICT ... WHERE` 事务语义；每次调用由客户端生成随机 `lease_id`，同一设备的不同任务也不能共享租约。

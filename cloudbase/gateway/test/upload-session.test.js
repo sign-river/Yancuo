@@ -48,7 +48,7 @@ test("completed upload PUT retries return success without replacing the object",
 test("upload completion requires a file ID and one persisted session row", () => {
   const upload = gateway.slice(gateway.indexOf("async function upload"));
   assert.match(upload, /if \(!stored\?\.fileID\)/);
-  assert.match(upload, /const completed = await pool\.query/);
+  assert.match(upload, /const completed = await queryUploadScoped/);
   assert.match(upload, /completed\.rowCount !== 1/);
 });
 
