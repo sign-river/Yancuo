@@ -1047,18 +1047,22 @@ class MainWindow(QMainWindow):
 
         header = PageHeader("\u9898\u5e93 / \u5168\u90e8\u6b63\u5f0f\u9898\u76ee", "")
         self.library_page_title = header.title
-        manual = QPushButton("\u624b\u52a8\u5f55\u9898")
-        manual.clicked.connect(self._show_manual_intake)
-        ai_intake = primary_button("AI \u56fe\u7247\u5f55\u9898")
-        ai_intake.clicked.connect(self._show_ai_intake)
+        self.library_new_combo = QComboBox()
+        self.library_new_combo.setAccessibleName("\u65b0\u5efa\u9898\u76ee")
+        self.library_new_combo.addItem("\uff0b \u65b0\u5efa", None)
+        self.library_new_combo.addItem("AI \u56fe\u7247\u5f55\u9898", "image")
+        self.library_new_combo.addItem("\u624b\u52a8\u5f55\u9898", "manual")
+        self.library_new_combo.setMinimumWidth(120)
+        self.library_new_combo.currentIndexChanged.connect(
+            self._on_library_new_combo_changed
+        )
         imports = QPushButton("\u66f4\u591a")
         bind_icon(imports, "more-horizontal")
         imports.setToolTip("\u5bfc\u5165\u3001\u5bfc\u51fa\u548c\u6279\u91cf\u9898\u5e93\u64cd\u4f5c")
         imports.clicked.connect(self._library_more_menu)
-        for button in (ai_intake, manual, imports):
-            button.setMinimumHeight(36)
-            button.setMinimumWidth(button.sizeHint().width() + 12)
-            header.add_action(button)
+        imports.setMinimumHeight(36)
+        header.add_action(self.library_new_combo)
+        header.add_action(imports)
         outer.addWidget(header)
 
         search_bar = QFrame()
@@ -1078,8 +1082,17 @@ class MainWindow(QMainWindow):
             button.setFixedHeight(36)
             self.search_mode_group.addButton(button)
             button.clicked.connect(self._on_search_mode_changed)
-            search_row.addWidget(button)
         self.local_search_button.setChecked(True)
+        self.library_search_combo = QComboBox()
+        self.library_search_combo.setAccessibleName("\u9898\u5e93\u641c\u7d22\u65b9\u5f0f")
+        self.library_search_combo.addItem("\u666e\u901a\u641c\u7d22", "local")
+        self.library_search_combo.addItem("AI \u641c\u7d22", "ai")
+        self.library_search_combo.setMinimumWidth(120)
+        self.library_search_combo.setFixedHeight(36)
+        self.library_search_combo.currentIndexChanged.connect(
+            self._on_library_search_combo_changed
+        )
+        search_row.addWidget(self.library_search_combo)
         self.search_scope_combo = QComboBox()
         self.search_scope_combo.setObjectName("SearchScopeCombo")
         self.search_scope_combo.addItem("\u5f53\u524d\u8303\u56f4", "current")
@@ -1140,8 +1153,17 @@ class MainWindow(QMainWindow):
             button.setFixedHeight(34)
             button.clicked.connect(lambda _checked=False, target=view: self._set_library_view(target))
             self.library_view_group.addButton(button)
-            view_switch_layout.addWidget(button)
         self.library_browse_button.setChecked(True)
+        self.library_view_combo = QComboBox()
+        self.library_view_combo.setAccessibleName("\u9898\u5e93\u89c6\u56fe")
+        self.library_view_combo.addItem("\u6d4f\u89c8\u9898\u5e93", "browse")
+        self.library_view_combo.addItem("\u5904\u7406\u4e2d\u5fc3", "process")
+        self.library_view_combo.setMinimumWidth(130)
+        self.library_view_combo.setFixedHeight(36)
+        self.library_view_combo.currentIndexChanged.connect(
+            self._on_library_view_combo_changed
+        )
+        view_switch_layout.addWidget(self.library_view_combo)
         tabs.addWidget(view_switch)
         tabs.addWidget(search_bar, 1)
         outer.addLayout(tabs)
@@ -1354,6 +1376,52 @@ class MainWindow(QMainWindow):
         self.refresh_nav()
         self.refresh_problems()
         self.note_page.reload()
+        self._sync_library_view_combo()
+
+    def _sync_search_mode_combo(self) -> None:
+        combo = getattr(self, "library_search_combo", None)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.setCurrentIndex(1 if self._is_ai_search_mode() else 0)
+        combo.blockSignals(False)
+
+    def _sync_library_view_combo(self) -> None:
+        combo = getattr(self, "library_view_combo", None)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.setCurrentIndex(0 if self._library_view == "browse" else 1)
+        combo.blockSignals(False)
+
+    def _on_library_search_combo_changed(self, index: int) -> None:
+        mode = self.library_search_combo.itemData(index)
+        self.local_search_button.blockSignals(True)
+        self.ai_search_button.blockSignals(True)
+        self.local_search_button.setChecked(mode == "local")
+        self.ai_search_button.setChecked(mode == "ai")
+        self.local_search_button.blockSignals(False)
+        self.ai_search_button.blockSignals(False)
+        self._on_search_mode_changed()
+
+    def _on_library_view_combo_changed(self, index: int) -> None:
+        target = self.library_view_combo.itemData(index)
+        self.library_browse_button.blockSignals(True)
+        self.library_process_button.blockSignals(True)
+        self.library_browse_button.setChecked(target == "browse")
+        self.library_process_button.setChecked(target == "process")
+        self.library_browse_button.blockSignals(False)
+        self.library_process_button.blockSignals(False)
+        self._set_library_view(target)
+
+    def _on_library_new_combo_changed(self, index: int) -> None:
+        action = self.library_new_combo.itemData(index)
+        if action == "image":
+            self._show_ai_intake()
+        elif action == "manual":
+            self._show_manual_intake()
+        if index != 0:
+            self.library_new_combo.setCurrentIndex(0)
 
     def _library_more_menu(self) -> None:
         from PySide6.QtWidgets import QMenu
@@ -2365,6 +2433,7 @@ class MainWindow(QMainWindow):
             self.search_privacy_hint.setText(
                 "普通搜索完全离线，只查询本机索引，不产生 AI 请求或费用。"
             )
+        self._sync_search_mode_combo()
         self.refresh_problems()
 
     def _on_search_text_edited(self, _text: str) -> None:
