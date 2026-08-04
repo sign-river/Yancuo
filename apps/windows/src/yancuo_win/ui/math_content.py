@@ -977,24 +977,30 @@ class MathContentView(QWidget):
     def _apply_zoom_scale(self) -> None:
         if self._document is None:
             return
-        # 统一缩放路径：1.0 也走 Custom + zoomFactor，保证 0.99/1.0/1.01 连续
-        self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
         QTimer.singleShot(0, self._apply_scaled_zoom)
 
     def _apply_scaled_zoom(self) -> None:
-        if self._document is None:
+        if self._document is None or self._document.pageCount() < 1:
             return
-        zoom_factor = getattr(self._view, "zoomFactor", None)
-        if not callable(zoom_factor):
+        page = self._document.pagePointSize(0)
+        if page.width() <= 0:
             return
-        fit_factor = zoom_factor()
+        viewport_getter = getattr(self._view, "viewport", None)
+        view_width = (
+            viewport_getter().width()
+            if callable(viewport_getter) and viewport_getter() is not None
+            else 0
+        )
+        if view_width <= 0:
+            view_width = max(1, self._view.width())
+        fit_factor = view_width / page.width()
         _logger.debug(
             "pdf zoom apply scale=%.3f fit=%.3f view_w=%d doc_w=%.1f page_h=%.1f",
             self._zoom_scale,
             fit_factor,
-            self._view.width(),
-            self._document.pagePointSize(0).width() if self._document.pageCount() > 0 else 0.0,
-            self._document.pagePointSize(0).height() if self._document.pageCount() > 0 else 0.0,
+            view_width,
+            page.width(),
+            page.height(),
         )
         self._view.setZoomMode(QPdfView.ZoomMode.Custom)
         self._view.setZoomFactor(fit_factor * self._zoom_scale)

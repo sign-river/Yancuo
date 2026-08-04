@@ -47,6 +47,9 @@ class _DocumentStub(QObject):
     def pageCount(self) -> int:  # noqa: N802
         return 1 if self.loaded else 0
 
+    def pagePointSize(self, _page_number: int) -> QSizeF:  # noqa: N802
+        return QSizeF(794.0, 600.0)
+
 
 class _PdfViewStub(QWidget):
     class PageMode:
@@ -54,16 +57,23 @@ class _PdfViewStub(QWidget):
 
     class ZoomMode:
         FitToWidth = 1
+        Custom = 2
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.current_document = None
+
+    def viewport(self):
+        return self
 
     def setPageMode(self, _mode) -> None:  # noqa: ANN001, N802
         pass
 
     def setZoomMode(self, _mode) -> None:  # noqa: ANN001, N802
         pass
+
+    def setZoomFactor(self, factor) -> None:  # noqa: ANN001, N802
+        self.zoom_factor_value = factor
 
     def setPageSpacing(self, _spacing: int) -> None:  # noqa: N802
         pass
