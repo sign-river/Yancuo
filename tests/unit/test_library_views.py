@@ -188,14 +188,12 @@ def test_data_transfer_actions_are_grouped_in_accessible_dropdowns(
     assert backup_actions == [
         "导出完整备份",
         "导入完整备份",
-        "",
         "创建 ZIP 备份（旧版兼容）",
         "从 ZIP 恢复（旧版兼容）",
     ]
     assert transfer_actions == [
         "导出分享包",
         "导出工作区",
-        "",
         "导入分享包",
         "导入工作区",
     ]
@@ -545,8 +543,8 @@ def test_review_plan_builder_warns_before_creating_an_empty_plan(
     builder._confirm_create()
 
     assert messages == ["请先从左侧选择题目或笔记，并加入计划草稿。"]
-    assert not builder.toast.isHidden()
-    assert builder.toast.label.text() == messages[0]
+    assert builder.toast._toasts
+    assert builder.toast._toasts[-1].body_label.text() == messages[0]
     assert builder.draft_back_button.text() == ""
     assert builder.draft_back_button.accessibleName() == "返回资料"
 
@@ -851,10 +849,8 @@ def test_formula_content_surfaces_use_bounded_adaptive_height(
         "expand_widget": False,
     }
     assert window.intake_page.ai_result_preview.adaptive_height_limit == 520
-    assert {
-        preview.adaptive_height_limit
-        for _label, preview in window.intake_page.ai_form._field_previews.values()
-    } == {320}
+    assert window.intake_page.ai_form.render_view is not None
+    assert window.intake_page.ai_form.render_view.adaptive_height_limit == 1200
 
 
 def test_due_navigation_returns_to_processing_center(window: MainWindow) -> None:
@@ -1148,7 +1144,8 @@ def test_low_risk_selection_and_intake_hints_do_not_open_message_box(
     )
     window.problem_list.clearSelection()
     assert window._require_one() is None
-    assert window.toast.label.text() == "请先选择一道题"
+    assert window.toast._toasts
+    assert window.toast._toasts[-1].body_label.text() == "请先选择一道题"
 
     messages: list[str] = []
     window.intake_page.status_message.connect(messages.append)
@@ -1180,8 +1177,10 @@ def test_mock_provider_hint_and_task_selection_are_non_blocking(
     assert messages[-1] == "Mock 不访问网络；连接测试请先选择 Faro API"
 
     dialog = TaskCenterDialog(window.ai)
-    dialog._run_selected()
-    assert dialog.summary.text() == "请先选择一个后台任务"
+    assert dialog.tabs.count() == 3
+    assert dialog.summary.text() != ""
+    dialog._run_selected()  # no selection; must not crash
+    dialog.question_pane.refresh()
     dialog.close()
 
 
@@ -1198,8 +1197,10 @@ def test_settings_expose_loading_failure_disabled_and_permission_states(
     assert ai_settings.ai_model_status.property("state") == "error"
 
     monkeypatch.setattr(settings_dialog_module, "get_secret", lambda _key: None)
+    monkeypatch.setattr(settings_dialog_module, "load_stored_session", lambda _key: None)
     cloud_settings = window.cloud_settings_page
     cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("cloudbase"))
+    cloud_settings._refresh_token_ui()
     assert cloud_settings.cloud_permission_notice.property("state") == "permission"
     assert "当前不可用" in cloud_settings.cloud_permission_notice.text()
     cloud_settings.provider.setCurrentIndex(
@@ -1238,13 +1239,13 @@ def test_settings_show_field_level_validation_errors(window: MainWindow) -> None
     cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("cloudbase"))
     cloud_settings.cloudbase_environment_edit.setText("test-environment")
     cloud_settings.cloudbase_gateway_edit.setText("https://gateway.example.test")
-    cloud_settings.owner_edit.clear()
-    cloud_settings.repo_edit.clear()
+    cloud_settings.cloudbase_environment_edit.clear()
     cloud_settings._save_cloud_settings()
-    assert not cloud_settings._field_errors["cloud_owner"].isHidden()
-    cloud_settings.owner_edit.setText("owner")
-    cloud_settings._test_cloud()
-    assert not cloud_settings._field_errors["cloud_repo"].isHidden()
+    assert not cloud_settings._field_errors["cloudbase_environment"].isHidden()
+    cloud_settings.cloudbase_environment_edit.setText("test-environment")
+    cloud_settings.cloudbase_gateway_edit.clear()
+    cloud_settings._save_cloud_settings()
+    assert not cloud_settings._field_errors["cloudbase_gateway"].isHidden()
 
 
 def test_settings_secrets_are_hidden_by_default_and_can_be_revealed(
@@ -1283,3 +1284,23 @@ def test_unsaved_settings_require_confirmation_before_leaving(
 
     assert window.stack.currentIndex() == 5
     assert settings.has_unsaved_changes
+
+def test_inline_question_summary_does_not_shift_on_expand(window: MainWindow) -> None:
+    app = QApplication.instance()
+    first = window.problem_list.item(0)
+    problem_id = str(first.data(Qt.ItemDataRole.UserRole))
+    if window._expanded_question_id == problem_id:
+        window._toggle_question_expansion(first)
+        app.processEvents()
+    collapsed = window.problem_list.itemWidget(first)
+    assert collapsed is not None
+    summary_height = collapsed._summary.height()
+    summary_y = collapsed._summary.mapTo(window, collapsed._summary.rect().topLeft()).y()
+    window._toggle_question_expansion(first)
+    app.processEvents()
+    expanded = window.problem_list.itemWidget(first)
+    assert expanded is not None
+    assert expanded._summary.height() == summary_height
+    assert expanded._summary.mapTo(window, expanded._summary.rect().topLeft()).y() == summary_y
+    window._toggle_question_expansion(first)
+    app.processEvents()

@@ -7,47 +7,20 @@ const path = require("node:path");
 
 const gateway = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
 const init = fs.readFileSync(path.join(__dirname, "..", "..", "postgres", "init.sql"), "utf8");
-const policies = fs.readFileSync(path.join(__dirname, "..", "..", "postgres", "rls-policies.sql"), "utf8");
+const rpc = fs.readFileSync(path.join(__dirname, "..", "..", "postgres", "pgmode-rpc.sql"), "utf8");
 
-test("gateway sets a transaction-local subject before data queries", () => {
-  assert.match(gateway, /set_config\('yancuo\.subject_id', \$1, true\)/);
-  assert.match(gateway, /async function beginScoped\(client, subject\)/);
-  assert.match(gateway, /async function queryScoped\(subject, text, params\)/);
+test("every user database call passes the validated subject explicitly", () => {
+  const rpcCalls = gateway.match(/callRpc\(\"yancuo_[a-z_]+\"/g) || [];
+  assert.ok(rpcCalls.length >= 15, "expected a broad RPC surface");
+  assert.match(gateway, /p_subject: subject/);
+  assert.doesNotMatch(gateway, /client\.query\(/);
+  assert.doesNotMatch(gateway, /queryScoped\(/);
 });
 
-test("one-time upload flow is scoped by upload id instead of subject", () => {
-  assert.match(gateway, /set_config\('yancuo\.upload_id', \$1, true\)/);
-  assert.match(gateway, /async function beginUploadScoped\(client, uploadId\)/);
-  assert.match(gateway, /async function queryUploadScoped\(uploadId, text, params\)/);
-});
-
-test("every authenticated repository handler runs inside a scoped transaction", () => {
-  const action = gateway.slice(gateway.indexOf("async function action"));
-  const begins = (action.match(/beginScoped\(client, subject\)/g) || []).length;
-  assert.ok(begins >= 2, "expected scoped begins in repositories/create and the main handler");
-  assert.doesNotMatch(action, /await client\.query\("begin"\)/);
-  const commits = (action.match(/client\.query\("commit"\)/g) || []).length;
-  assert.ok(commits >= 10, "expected a commit for every returning branch");
-});
-
-test("rls-policies.sql scopes every table to the gateway identity", () => {
-  const tables = [
-    "repositories",
-    "manifests",
-    "releases",
-    "release_assets",
-    "upload_sessions",
-    "write_locks",
-    "rate_limits",
-    "object_deletions",
-  ];
-  for (const table of tables) {
-    assert.match(policies, new RegExp("on yancuo\\." + table + "\\b"), table + " policy");
-  }
-  assert.match(policies, /to yancuo_gateway/);
-  assert.match(policies, /current_setting\('yancuo\.subject_id', true\)/);
-  assert.match(policies, /current_setting\('yancuo\.upload_id', true\)/);
-  assert.doesNotMatch(policies, /using \(true\)/);
+test("RPC functions are server-side defined and never trust the client for schema", () => {
+  assert.match(rpc, /SECURITY DEFINER/);
+  assert.match(rpc, /RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER/);
+  assert.doesNotMatch(rpc, /to yancuo_gateway/);
 });
 
 test("init.sql still enables row level security on all eight tables", () => {
@@ -62,6 +35,12 @@ test("init.sql still enables row level security on all eight tables", () => {
     "object_deletions",
   ];
   for (const table of tables) {
-    assert.match(init, new RegExp("alter table yancuo\\." + table + " enable row level security"));
+    assert.match(init, new RegExp("alter table yancuo\." + table + " enable row level security"));
   }
+});
+
+test("the gateway requires a service API key and never embeds it in the repo", () => {
+  assert.match(gateway, /RDB_API_KEY/);
+  assert.match(gateway, /if \(!RDB_API_KEY\)/);
+  assert.doesNotMatch(gateway, /eyJhbGciOiJSUzI1NiIsImtpZCI6/);
 });

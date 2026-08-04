@@ -101,7 +101,7 @@ LIGHT_THEME = ThemeTokens(
     tag_bg="#EEF1F5",
     tag_text="#566074",
     hidden_bg="#FBFCFE",
-    fallback_bg="#FFF3D9",
+    fallback_bg="#FFF8E9",
     fallback_text="#744B00",
 )
 
@@ -208,18 +208,19 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 6px 8px;
     }}
     QMenu {{
-        background: {t.surface};
+        background: {t.card};
         color: {t.text};
         border: 1px solid {t.border_strong};
-        border-radius: {m.radius_surface}px;
-        padding: 8px;
+        border-radius: 10px;
+        padding: 6px;
     }}
     QMenu::item {{
         min-width: 144px;
-        min-height: 38px;
-        padding: 0 28px 0 16px;
-        margin: 2px 0;
-        border-radius: {m.radius_control}px;
+        min-height: 40px;
+        padding: 0 16px;
+        margin: 1px 2px;
+        border-radius: 8px;
+        text-align: left;
     }}
     QMenu::item:selected {{
         background: {t.list_hover};
@@ -442,6 +443,58 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
     QLabel#DangerLabel {{
         color: {t.danger};
+    }}
+    QLabel#FieldLabel {{
+        color: {t.text};
+        font-size: 14px;
+        font-weight: 600;
+    }}
+    QPushButton#HistoryLinkButton {{
+        background: transparent;
+        border: none;
+        color: {t.primary};
+        padding: 4px 8px;
+        font-size: 13px;
+    }}
+    QPushButton#HistoryLinkButton:hover {{
+        color: {t.primary_hover};
+    }}
+    QPushButton#PlanRefreshButton {{
+        min-height: 36px;
+        border-radius: 8px;
+        padding: 0 16px;
+    }}
+    QFrame#CompactEmptyState {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+    }}
+    QLabel#EmptyStateIcon {{
+        color: {t.muted};
+        font-size: 15px;
+    }}
+    QLabel#EmptyStateTitle {{
+        color: {t.muted};
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton#EmptyStateAction {{
+        min-height: 30px;
+        padding: 0 12px;
+        border-radius: 8px;
+    }}
+    QFrame#UncertainCard {{
+        background: {t.fallback_bg};
+        border: 1px solid {t.hover_border};
+        border-radius: 10px;
+    }}
+    QLabel#UncertainWarnIcon {{
+        color: {t.fallback_text};
+        font-size: 15px;
+    }}
+    QLabel#RegionStatusLabel {{
+        color: {t.muted};
+        font-size: 13px;
     }}
     QLabel#WarningLabel {{
         color: {t.fallback_text};
@@ -799,6 +852,26 @@ def app_stylesheet(theme: str = "light") -> str:
         color: {t.text};
         font-weight: 600;
     }}
+    QListWidget#CandidateSourceImages {{
+        background: transparent;
+        border: none;
+        outline: none;
+        padding: 2px;
+    }}
+    QListWidget#CandidateSourceImages::item {{
+        min-height: 38px;
+        padding: 0 10px;
+        margin: 1px 0;
+        border-radius: 8px;
+        color: {t.text};
+    }}
+    QListWidget#CandidateSourceImages::item:hover {{
+        background: {t.list_hover};
+    }}
+    QListWidget#CandidateSourceImages::item:selected {{
+        background: {t.list_selected};
+        color: {t.primary};
+    }}
     QListWidget#UploadFileList, QListWidget#AnswerImageList {{
         background: {t.upload_bg};
         border: 1px solid {t.border};
@@ -855,8 +928,35 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.list_hover};
     }}
     QComboBox:on {{
-        background: {t.surface_subtle};
-        border-color: {t.border_strong};
+        background: {t.list_selected};
+        border: 1px solid {t.primary};
+    }}
+    QComboBox QAbstractItemView {{
+        background: {t.card};
+        color: {t.text};
+        border: 1px solid {t.border_strong};
+        border-radius: 10px;
+        padding: 6px;
+        outline: none;
+        selection-background-color: {t.list_hover};
+        selection-color: {t.text};
+    }}
+    QComboBox QAbstractItemView::item {{
+        min-height: 40px;
+        padding: 0 14px;
+        border-radius: 8px;
+        margin: 1px 2px;
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background: {t.list_hover};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background: {t.list_selected};
+        color: {t.primary};
+    }}
+    QComboBox QAbstractItemView::item:disabled {{
+        color: {t.muted};
+        background: transparent;
     }}
     QComboBox:on::drop-down {{
         background: {t.list_hover};
@@ -1001,6 +1101,28 @@ def app_stylesheet(theme: str = "light") -> str:
     QPushButton#DangerButton:hover {{
         background: {t.danger_bg};
     }}
+    QPushButton#RegionOutlineButton {{
+        min-height: 36px;
+        border-radius: 8px;
+        padding: 0 14px;
+    }}
+    QPushButton#RegionAccentButton {{
+        background: {t.list_selected};
+        color: {t.primary};
+        border: 1px solid {t.primary};
+        min-height: 36px;
+        border-radius: 8px;
+        padding: 0 14px;
+        font-weight: 600;
+    }}
+    QPushButton#RegionAccentButton:hover {{
+        background: {t.list_hover};
+    }}
+    QPushButton#RegionAccentButton:disabled {{
+        color: {t.muted};
+        background: {t.input_disabled};
+        border: 1px solid {t.border};
+    }}
     QPushButton#GhostButton {{
         background: transparent;
         border: none;
@@ -1117,7 +1239,21 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.list_hover};
         color: {t.text};
     }}
-    QCheckBox::indicator, QRadioButton::indicator {{
+    QCheckBox::indicator {{
+        width: 18px;
+        height: 18px;
+        border: 1.5px solid {t.border_strong};
+        border-radius: 4px;
+        background: transparent;
+    }}
+    QCheckBox::indicator:hover {{
+        border-color: {t.muted};
+    }}
+    QCheckBox::indicator:checked {{
+        background: {t.muted};
+        border-color: {t.muted};
+    }}
+    QRadioButton::indicator {{
         width: 16px;
         height: 16px;
     }}
@@ -1160,10 +1296,44 @@ def app_stylesheet(theme: str = "light") -> str:
         background: transparent;
         border: none;
     }}
-    QFrame#ToastContent {{
+
+    QFrame#AppToastCard {{
         background: {t.card};
+        border: 1px solid {t.danger_border};
+        border-radius: 12px;
+    }}
+    QLabel#AppToastTitle {{
+        color: {t.text};
+        font-size: 14px;
+        font-weight: 600;
+    }}
+    QLabel#AppToastBody {{
+        color: {t.muted};
+        font-size: 12px;
+    }}
+    QProgressBar#AppToastProgress {{
+        background: transparent;
+        border: none;
+        min-height: 3px;
+        max-height: 3px;
+    }}
+    QProgressBar#AppToastProgress::chunk {{
+        background: {t.danger};
+        border-radius: 2px;
+    }}
+    QPushButton#AppToastClose {{
+        border: none;
+        background: transparent;
+        color: {t.muted};
+    }}
+    QPushButton#AppToastClose:hover {{
+        color: {t.text};
+    }}
+
+    QFrame#ToastContent {{
+        background: {t.fallback_bg};
         border: 1px solid {t.border_strong};
-        border-radius: {m.radius_item}px;
+        border-radius: {m.radius_floating}px;
     }}
     QFrame#ToastContent[tone="warning"] {{
         background: {t.fallback_bg};
@@ -1211,7 +1381,7 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
     QLabel#ToastText {{
         color: {t.text};
-        font-size: 13px;
+        font-size: 14px;
     }}
     QFrame#LoadingSkeleton {{
         background: {t.card};

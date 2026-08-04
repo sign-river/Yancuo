@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from PySide6.QtCore import QDateTime, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -28,7 +30,12 @@ from PySide6.QtWidgets import (
 from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.cloud.factory import get_cloud_provider
-from yancuo_win.cloud.cloudbase_auth import CloudBaseSession, sign_in_with_password
+from yancuo_win.cloud.cloudbase_auth import (
+    CloudBaseSession,
+    clear_stored_session,
+    load_stored_session,
+    sign_in_with_password,
+)
 from yancuo_win.config.settings import (
     ConfigError,
     save_ai_preferences,
@@ -46,6 +53,7 @@ from yancuo_win.infrastructure.credentials import (
 from yancuo_win.tasks.model_worker import AIModelListWorker
 from yancuo_win.tasks.worker import CallableWorker
 from yancuo_win.ui.widgets import (
+    friendly_cloud_error,
     CardFrame,
     ChevronComboBox,
     PageHeader,
@@ -56,6 +64,7 @@ from yancuo_win.ui.widgets import (
     set_tab_order_chain,
 )
 from yancuo_win.ui.theme import apply_app_theme, current_theme_name, get_theme_manager
+from yancuo_win.ui.icons import bind_icon
 from yancuo_win.ui.math_content import set_preview_zoom_scale
 
 
@@ -349,6 +358,8 @@ class ServiceSettingsPage(QWidget):
         self.provider.setCurrentIndex(max(0, idx))
         self.provider.currentIndexChanged.connect(self._on_provider_changed)
         cloud_form.addRow("云端提供商", self.provider)
+        # 正式通道统一为 CloudBase；本地文件夹仅供开发离线测试，后台维护
+        self.cloud_form.setRowVisible(self.provider, False)
 
         self.owner_edit = QLineEdit(s.cloud.repository.owner)
         self.repo_edit = QLineEdit(s.cloud.repository.name)
@@ -358,6 +369,9 @@ class ServiceSettingsPage(QWidget):
         self._add_field_error(cloud_form, "cloud_owner")
         cloud_form.addRow("仓库 name", self.repo_edit)
         self._add_field_error(cloud_form, "cloud_repo")
+        # 仓库 owner/name 由后台维护（默认 graduate-mistake-book-data），不展示给普通用户
+        self.cloud_form.setRowVisible(self.owner_edit, False)
+        self.cloud_form.setRowVisible(self.repo_edit, False)
 
         self.local_root = QLineEdit(_default_local_root(runtime))
         describe_field(self.local_root, "本地云目录")
@@ -371,6 +385,9 @@ class ServiceSettingsPage(QWidget):
         local_root_row.addWidget(self.browse_local_button)
         cloud_form.addRow("本地云目录", local_root_control)
         self._add_field_error(cloud_form, "cloud_root")
+        self.local_root_control = local_root_control
+        # 本地云目录由后台维护默认值，普通用户无需修改
+        self.cloud_form.setRowVisible(self.local_root_control, False)
 
         self.cloudbase_environment_edit = QLineEdit(s.cloud.cloudbase.environment_id)
         self.cloudbase_gateway_edit = QLineEdit(s.cloud.cloudbase.gateway_url)
@@ -390,7 +407,7 @@ class ServiceSettingsPage(QWidget):
         self.cloudbase_password_edit = QLineEdit()
         describe_field(self.cloudbase_password_edit, "CloudBase 登录密码")
         self.cloudbase_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.cloudbase_password_edit.setPlaceholderText("密码只用于本次登录，不会保存")
+        self.cloudbase_password_edit.setPlaceholderText("登录后可记住到本机系统凭据")
         self.cloudbase_login_button = QPushButton("登录 CloudBase")
         self.cloudbase_login_button.clicked.connect(self._login_cloudbase)
         password_control = QWidget()
@@ -398,12 +415,27 @@ class ServiceSettingsPage(QWidget):
         password_row.setContentsMargins(0, 0, 0, 0)
         password_row.setSpacing(6)
         password_row.addWidget(self.cloudbase_password_edit, stretch=1)
+        self.cloudbase_password_visibility_button = QPushButton()
+        self.cloudbase_password_visibility_button.setAccessibleName("显示或隐藏密码")
+        self.cloudbase_password_visibility_button.setToolTip("显示/隐藏密码")
+        self.cloudbase_password_visibility_button.setFixedWidth(40)
+        bind_icon(self.cloudbase_password_visibility_button, "eye", size=18)
+        self.cloudbase_password_visibility_button.clicked.connect(
+            lambda: self._toggle_secret_visibility(
+                self.cloudbase_password_edit, self.cloudbase_password_visibility_button
+            )
+        )
+        password_row.addWidget(self.cloudbase_password_visibility_button)
         password_row.addWidget(self.cloudbase_login_button)
         self.cloudbase_password_control = password_control
         cloud_form.addRow("登录密码", password_control)
         self._add_field_error(cloud_form, "cloudbase_login")
+        self.remember_login_check = QCheckBox("记住账号密码（仅保存在本机系统凭据）")
+        self.remember_login_check.toggled.connect(self._on_remember_login_toggled)
+        cloud_form.addRow("", self.remember_login_check)
+        self._load_saved_cloudbase_login()
 
-        self.token_label = QLabel("令牌")
+        self.token_label = QLabel("CloudBase 登录状态")
         self.token_status = QLabel("")
         cloud_form.addRow(self.token_label, self.token_status)
         self.token_edit = QLineEdit()
@@ -425,11 +457,13 @@ class ServiceSettingsPage(QWidget):
         token_row.addWidget(self.token_visibility_button)
         cloud_form.addRow("新令牌", self.token_control)
         self._add_field_error(cloud_form, "cloud_token")
+        # 兼容旧版手动粘贴令牌入口，普通用户使用上方账户登录，无需展示
+        self.cloud_form.setRowVisible(self.token_control, False)
         self.cloud_permission_notice = StateNotice()
         cloud_form.addRow("", self.cloud_permission_notice)
         cloud_card.body.addLayout(cloud_form)
 
-        self.clear_cloud_token_button = danger_button("清除云令牌")
+        self.clear_cloud_token_button = danger_button("退出登录")
         self.clear_cloud_token_button.clicked.connect(self._clear_token)
         self.test_cloud_button = QPushButton("测试云连接")
         self.test_cloud_button.clicked.connect(self._test_cloud)
@@ -463,7 +497,7 @@ class ServiceSettingsPage(QWidget):
 
         if section in {"ai", "cloud"}:
             tip = QLabel(
-                "密钥只进操作系统凭据管理器；TOML 仅保存 credential_key / api_key_env 名称。"
+                "你的账号与密钥只保存在本机系统凭据中，不会写入配置文件，也不会发送到别处。"
             )
             tip.setObjectName("MutedLabel")
             tip.setWordWrap(True)
@@ -551,19 +585,11 @@ class ServiceSettingsPage(QWidget):
                 self._set_field_error("cloudbase_gateway", "请填写已部署的 CloudBase 网关 HTTPS 地址。")
                 self.cloudbase_gateway_edit.setFocus(Qt.FocusReason.OtherFocusReason)
                 return False
-        for name, field, message in (
-            ("cloud_owner", self.owner_edit, "请填写仓库所有者。"),
-            ("cloud_repo", self.repo_edit, "请填写仓库名称。"),
-        ):
-            if not field.text().strip():
-                self._set_field_error(name, message)
-                field.setFocus(Qt.FocusReason.OtherFocusReason)
-                return False
         key = self._credential_key_for_provider()
         if require_token and not self.token_edit.text().strip() and not (
-            key and get_secret(key)
+            key and (load_stored_session(key) is not None or get_secret(key))
         ):
-            self._set_field_error("cloud_token", "测试连接前请粘贴访问令牌。")
+            self._set_field_error("cloud_token", "请先登录 CloudBase 账户。")
             self.token_edit.setFocus(Qt.FocusReason.OtherFocusReason)
             return False
         return True
@@ -574,7 +600,10 @@ class ServiceSettingsPage(QWidget):
         field.setEchoMode(
             QLineEdit.EchoMode.Password if showing else QLineEdit.EchoMode.Normal
         )
-        button.setText("显示" if showing else "隐藏")
+        if getattr(button, "_yancuo_icon_binding", None) is not None:
+            bind_icon(button, "eye-off" if showing else "eye", size=18)
+        else:
+            button.setText("显示" if showing else "隐藏")
 
     @property
     def has_unsaved_changes(self) -> bool:
@@ -839,12 +868,12 @@ class ServiceSettingsPage(QWidget):
         key = self._credential_key_for_provider()
         if name == "cloudbase":
             self.token_label.setText("CloudBase 登录状态")
-            raw_session = get_secret(key) if key else None
-            session = CloudBaseSession.from_json(raw_session) if raw_session else None
+            session = load_stored_session(key) if key else None
+            raw_legacy = get_secret(key) if key else None
             self.token_status.setText(
                 f"已登录（用户 {session.subject[:12]}…）"
                 if session and session.subject
-                else ("已登录" if session else mask_secret(raw_session))
+                else ("已登录" if session else mask_secret(raw_legacy))
             )
             self.token_edit.setEnabled(True)
             self.token_edit.setToolTip("仅兼容旧版手工令牌；正常使用上方账户登录")
@@ -859,7 +888,17 @@ class ServiceSettingsPage(QWidget):
                 "disabled",
             )
         remote = name == "cloudbase"
-        for field in (self.owner_edit, self.repo_edit, self.token_status, self.token_control, self.cloud_permission_notice):
+        # 内部/后台维护字段始终隐藏：提供商、仓库 owner/name、本地云目录、兼容旧版令牌
+        for field in (
+            self.provider,
+            self.owner_edit,
+            self.repo_edit,
+            getattr(self, "local_root_control", None),
+            self.token_control,
+        ):
+            if field is not None:
+                self.cloud_form.setRowVisible(field, False)
+        for field in (self.token_status, self.cloud_permission_notice):
             self.cloud_form.setRowVisible(field, remote)
         cloudbase = name == "cloudbase"
         for field in (
@@ -873,14 +912,14 @@ class ServiceSettingsPage(QWidget):
 
     def _set_cloud_permission_state(self, key: str | None) -> None:
         self.token_edit.setToolTip("")
-        if key and get_secret(key):
+        if key and (load_stored_session(key) is not None or get_secret(key)):
             self.cloud_permission_notice.set_state(
-                "云令牌已保存在操作系统凭据中。",
+                "已登录 CloudBase，可进行连接测试和远端操作。",
                 "success",
             )
         else:
             self.cloud_permission_notice.set_state(
-                "尚未保存云令牌；连接测试和远端操作当前不可用。",
+                "尚未登录 CloudBase；连接测试和远端操作当前不可用。",
                 "permission",
             )
 
@@ -898,6 +937,8 @@ class ServiceSettingsPage(QWidget):
             )
             return
         self._set_field_error("cloudbase_login", "")
+        # 只要点击登录就更新记住的账号密码（成功或失败都保留，便于重试）
+        self._remember_cloudbase_login(username, password)
         self.cloudbase_login_button.setEnabled(False)
         self.cloudbase_login_button.setText("正在登录…")
         self._cloudbase_login_worker = CallableWorker(
@@ -917,13 +958,48 @@ class ServiceSettingsPage(QWidget):
         )
         self._cloudbase_login_worker.start()
 
+    def _load_saved_cloudbase_login(self) -> None:
+        raw = get_secret(_CLOUDBASE_LOGIN_CREDENTIAL_KEY)
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+            username = str(data.get("username") or "")
+            password = str(data.get("password") or "")
+        except (TypeError, ValueError):
+            return
+        if username:
+            self.cloudbase_username_edit.setText(username)
+        if password:
+            self.cloudbase_password_edit.setText(password)
+        self.remember_login_check.setChecked(bool(username and password))
+
+    def _remember_cloudbase_login(self, username: str, password: str) -> None:
+        if self.remember_login_check.isChecked() and username and password:
+            set_secret(
+                _CLOUDBASE_LOGIN_CREDENTIAL_KEY,
+                json.dumps(
+                    {
+                        "username": username,
+                        "password": password,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        else:
+            delete_secret(_CLOUDBASE_LOGIN_CREDENTIAL_KEY)
+
+    def _on_remember_login_toggled(self, checked: bool) -> None:
+        if not checked:
+            delete_secret(_CLOUDBASE_LOGIN_CREDENTIAL_KEY)
+
     def _on_cloudbase_login_finished(self, _session: object) -> None:
-        self.cloudbase_password_edit.clear()
+        self._set_field_error("cloud_token", "")
+        self._set_field_error("cloudbase_login", "")
         self._refresh_token_ui()
         self.status_message.emit("CloudBase 登录成功，会话已保存到系统凭据")
 
     def _on_cloudbase_login_failed(self, error: str) -> None:
-        self.cloudbase_password_edit.clear()
         self._set_field_error("cloudbase_login", error)
         self.cloud_permission_notice.set_state(f"登录失败：{error}", "error")
 
@@ -962,7 +1038,7 @@ class ServiceSettingsPage(QWidget):
         key = self._credential_key_for_provider()
         if not key:
             return
-        delete_secret(key)
+        clear_stored_session(key)
         self.token_status.setText(mask_secret(None))
         self._set_cloud_permission_state(key)
         self.status_message.emit("云令牌已从系统凭据中清除")
@@ -986,7 +1062,7 @@ class ServiceSettingsPage(QWidget):
             save_cloud_preferences(
                 self.runtime.paths.root,
                 provider=str(self.provider.currentData()),
-                owner=self.owner_edit.text(),
+                owner=(self.owner_edit.text().strip() or self.runtime.settings.cloud.repository.owner),
                 repository=self.repo_edit.text(),
                 local_root=self.local_root.text(),
                 cloudbase_environment_id=self.cloudbase_environment_edit.text(),
@@ -1002,7 +1078,9 @@ class ServiceSettingsPage(QWidget):
     def _apply_session_provider(self, *, notify: bool = True) -> None:
         name = self.provider.currentData()
         self.runtime.settings.cloud.default_provider = name
-        self.runtime.settings.cloud.repository.owner = self.owner_edit.text().strip()
+        self.runtime.settings.cloud.repository.owner = (
+            self.owner_edit.text().strip() or self.runtime.settings.cloud.repository.owner
+        )
         self.runtime.settings.cloud.repository.name = (
             self.repo_edit.text().strip() or "graduate-mistake-book-data"
         )
@@ -1049,7 +1127,7 @@ class ServiceSettingsPage(QWidget):
             save_cloud_preferences(
                 self.runtime.paths.root,
                 provider=str(self.provider.currentData()),
-                owner=self.owner_edit.text(),
+                owner=(self.owner_edit.text().strip() or self.runtime.settings.cloud.repository.owner),
                 repository=self.repo_edit.text(),
                 local_root=self.local_root.text(),
                 cloudbase_environment_id=self.cloudbase_environment_edit.text(),
@@ -1067,12 +1145,13 @@ class ServiceSettingsPage(QWidget):
         self.status_message.emit("云端连接测试成功")
 
     def _on_cloud_connection_failed(self, error: str) -> None:
+        friendly = friendly_cloud_error(error)
         self._set_field_error(
             "cloud_root" if self.provider.currentData() == "local_folder" else "cloud_token",
-            error,
+            friendly,
         )
-        self.cloud_permission_notice.set_state(f"连接失败：{error}", "error")
-        QMessageBox.warning(self, "连接失败", error)
+        self.cloud_permission_notice.set_state(f"连接失败：{friendly}", "error")
+        QMessageBox.warning(self, "连接失败", friendly)
 
     def _on_cloud_connection_worker_finished(self) -> None:
         worker = self._connection_worker
@@ -1093,6 +1172,9 @@ class ServiceSettingsPage(QWidget):
                 subprocess.run(["xdg-open", str(path)], check=False)
         except OSError as exc:
             QMessageBox.warning(self, "无法打开", str(exc))
+
+
+_CLOUDBASE_LOGIN_CREDENTIAL_KEY = "yancuo_cloudbase_login"
 
 
 def _default_local_root(runtime: RuntimeContext) -> str:

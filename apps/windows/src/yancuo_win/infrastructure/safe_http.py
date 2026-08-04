@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
-from typing import Any
-from urllib.error import HTTPError
+from typing import Any, Iterator
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
 _SENSITIVE_HEADERS = frozenset(
@@ -18,6 +19,25 @@ _SENSITIVE_HEADERS = frozenset(
         "api-key",
     }
 )
+
+
+_LOCAL_PROXY_PORTS = (7897, 7890, 1080, 8888, 8080)
+
+
+def _local_proxy_candidates() -> Iterator[str]:
+    """Yield reachable local HTTP proxy URLs (Clash/mihomo and similar).
+
+    TUN/VPN clients often intercept all traffic at the network layer.  When a
+    direct connection fails, retrying through the local mixed port lets the
+    proxy apply its own routing rules (domestic DIRECT) without requiring the
+    user to disable their proxy/VPN.
+    """
+    for port in _LOCAL_PROXY_PORTS:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+                yield f"http://127.0.0.1:{port}"
+        except OSError:
+            continue
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -71,7 +91,26 @@ def safe_urlopen(
     opener = build_opener(
         SafeHTTPSRedirectHandler(allow_cross_origin=allow_cross_origin)
     )
-    return opener.open(target, timeout=timeout)
+    try:
+        return opener.open(target, timeout=timeout)
+    except HTTPError:
+        raise
+    except (URLError, OSError, TimeoutError) as direct_error:
+        # Local VPN/TUN (Clash/mihomo, ...) can break direct HTTPS at the
+        # network layer.  Fall back to the local mixed proxy port so users
+        # do not have to disable their proxy for this app.
+        for proxy in _local_proxy_candidates():
+            proxy_opener = build_opener(
+                SafeHTTPSRedirectHandler(allow_cross_origin=allow_cross_origin),
+                ProxyHandler({"http": proxy, "https": proxy}),
+            )
+            try:
+                return proxy_opener.open(target, timeout=timeout)
+            except HTTPError:
+                raise
+            except (URLError, OSError, TimeoutError):
+                continue
+        raise direct_error
 
 
 def iter_file_chunks(path: Path, *, chunk_size: int = 1024 * 1024):

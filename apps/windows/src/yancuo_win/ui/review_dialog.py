@@ -31,7 +31,7 @@ from yancuo_win.ui.widgets import (
     IconButton,
     PageHeader,
     SoftItemDelegate,
-    ToastMessage,
+    ToastStack,
     default_button,
     primary_button,
     set_tab_order_chain,
@@ -121,7 +121,7 @@ class ReviewDialog(QDialog):
         self.review_back_button.clicked.connect(self._go_back)
         self.stack.currentChanged.connect(self._sync_back_button)
         layout.addWidget(self.stack, 1)
-        self.toast = ToastMessage(self)
+        self.toast = ToastStack(self)
         self.refresh()
 
     def prepare_new(self, problem_ids: list[str], problem_labels: list[str]) -> None:

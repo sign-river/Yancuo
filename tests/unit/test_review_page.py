@@ -248,8 +248,8 @@ def test_legacy_today_review_grade_uses_non_blocking_feedback(monkeypatch) -> No
     app.processEvents()
 
     assert services.recorded == [("problem_review_ui", 3)]
-    assert not dialog.toast.isHidden()
-    assert "下次复习 2026-07-24" in dialog.toast.label.text()
+    assert dialog.toast._toasts
+    assert "下次复习 2026-07-24" in dialog.toast._toasts[-1].body_label.text()
     dialog.close()
 
 

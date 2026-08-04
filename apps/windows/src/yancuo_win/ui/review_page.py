@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPalette, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
+    QFrame,
     QCheckBox,
     QComboBox,
     QGridLayout,
@@ -56,6 +57,24 @@ _STUDY_STATUS_LABELS = {
     "abandoned": "已结束",
 }
 
+
+class _PlaceholderComboBox(QComboBox):
+    """QComboBox that paints placeholder text while nothing is selected."""
+
+    def __init__(self, placeholder: str, parent=None) -> None:
+        super().__init__(parent)
+        self._placeholder = placeholder
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().paintEvent(event)
+        if self.currentIndex() < 0 and self._placeholder:
+            painter = QPainter(self)
+            painter.setPen(self.palette().color(QPalette.ColorRole.PlaceholderText))
+            painter.drawText(
+                self.rect().adjusted(12, 0, -36, 0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                self._placeholder,
+            )
 
 class ReviewPage(QWidget):
     """A resumable review session that stays inside the main content area."""
@@ -277,40 +296,103 @@ class ReviewPage(QWidget):
         self.review_overview.setObjectName("ReviewOverview")
         root.addWidget(self.review_overview)
 
+        center_row = QHBoxLayout()
+        center_row.setContentsMargins(0, 0, 0, 0)
+        center_row.addStretch(1)
         plans = CardFrame()
         plans.setObjectName("ReviewPlanSurface")
+        plans.setMaximumWidth(1080)
+        plans.setMinimumWidth(640)
         self.plan_select_card = plans
         plans.add_title("选择复习计划")
         plans.add_hint("必须选择一个题目或笔记复习计划后，才能开始本轮复习。")
-        self.plan_combo = QComboBox()
+        body = plans.body
+        body.setSpacing(20)
+
+        plan_field_label = QLabel("复习计划")
+        plan_field_label.setObjectName("FieldLabel")
+        body.addWidget(plan_field_label)
+        self.plan_combo = _PlaceholderComboBox("请选择一个题目或笔记复习计划")
         describe_field(self.plan_combo, "复习计划")
+        self.plan_combo.setMinimumHeight(44)
         self.plan_combo.currentIndexChanged.connect(self._update_selected_plan_details)
-        plans.body.addWidget(self.plan_combo)
-        self.plan_summary = QLabel("请选择一个复习计划以查看内容。")
+        body.addWidget(self.plan_combo)
+
+        self.plan_summary = QLabel("")
         self.plan_summary.setObjectName("PageHint")
         self.plan_summary.setWordWrap(True)
-        plans.body.addWidget(self.plan_summary)
+        self.plan_summary.hide()
+        body.addWidget(self.plan_summary)
+
+        # 计划内容区：未选择 / 无计划 / 选中计划
+        self.plan_content_stack = QStackedWidget()
         self.plan_preview = QListWidget()
         self.plan_preview.setObjectName("ReviewPlanPreview")
         self.plan_preview.setAccessibleName("复习计划内容预览")
-        self.plan_preview.setMaximumHeight(144)
-        plans.body.addWidget(self.plan_preview)
+        self.plan_preview.setMaximumHeight(160)
+        self.plan_content_stack.addWidget(self.plan_preview)
+        self.plan_none_state = self._compact_empty_state(
+            "请选择一个复习计划以查看内容。",
+            hint="选择后这里会显示计划的基本信息与题目/笔记列表。",
+        )
+        self.plan_content_stack.addWidget(self.plan_none_state)
+        self.plan_empty_state = self._compact_empty_state(
+            "暂无可用复习计划",
+            hint="请先创建题目或笔记复习计划。",
+            button_text="前往创建计划",
+            on_click=self._go_create_plan,
+        )
+        self.plan_content_stack.addWidget(self.plan_empty_state)
+        self.plan_content_stack.setCurrentWidget(self.plan_none_state)
+        body.addWidget(self.plan_content_stack)
+
+        # 复习历史
+        history_header = QHBoxLayout()
+        history_title = QLabel("复习历史")
+        history_title.setObjectName("SectionTitle")
+        history_header.addWidget(history_title)
+        history_header.addStretch(1)
+        self.open_history_button = QPushButton("查看全部 >")
+        self.open_history_button.setObjectName("HistoryLinkButton")
+        self.open_history_button.setAccessibleName("查看当前复习计划的完整历史")
+        self.open_history_button.clicked.connect(self._open_plan_history)
+        self.open_history_button.hide()
+        history_header.addWidget(self.open_history_button)
+        body.addLayout(history_header)
         self.plan_history = QListWidget()
         self.plan_history.setObjectName("ReviewPlanHistory")
         self.plan_history.setAccessibleName("复习计划历史")
         self.plan_history.setMaximumHeight(120)
-        plans.body.addWidget(QLabel("复习历史"))
-        plans.body.addWidget(self.plan_history)
-        self.open_history_button = QPushButton("查看完整历史")
-        self.open_history_button.setAccessibleName("查看当前复习计划的完整历史")
-        self.open_history_button.clicked.connect(self._open_plan_history)
-        plans.body.addWidget(self.open_history_button)
-        refresh_plans = ghost_button("刷新计划")
+        self.plan_history.hide()
+        body.addWidget(self.plan_history)
+        self.history_empty_state = self._compact_empty_state(
+            "暂无复习记录",
+            hint="完成一次复习后，历史记录会显示在这里。",
+        )
+        body.addWidget(self.history_empty_state)
+
+        # 底部操作区
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        self.refresh_status_label = QLabel("上次刷新：刚刚")
+        self.refresh_status_label.setObjectName("MutedLabel")
+        footer.addWidget(self.refresh_status_label)
+        footer.addStretch(1)
+        refresh_plans = QPushButton("刷新计划")
+        refresh_plans.setObjectName("PlanRefreshButton")
+        refresh_plans.setAccessibleName("刷新复习计划")
         refresh_plans.clicked.connect(self.show_home)
         self.start_selected_button = primary_button("开始复习")
+        self.start_selected_button.setEnabled(False)
+        self.start_selected_button.setAccessibleName("开始复习")
         self.start_selected_button.clicked.connect(self.start_session)
-        plans.body.addLayout(self._actions(refresh_plans, self.start_selected_button))
+        footer.addWidget(refresh_plans)
+        footer.addWidget(self.start_selected_button)
+        body.addLayout(footer)
 
+        center_row.addWidget(plans, 0, Qt.AlignmentFlag.AlignTop)
+        center_row.addStretch(1)
+        root.addLayout(center_row, stretch=1)
         queue_card = CardFrame()
         self.plan_builder_card = queue_card
         queue_card.add_title("制定复习计划")
@@ -547,6 +629,7 @@ class ReviewPage(QWidget):
             self.type_row.insertWidget(self.type_row.count() - 1, check)
             self.type_checks.append(check)
         self.stack.setCurrentWidget(self.home_page)
+        self.refresh_status_label.setText("上次刷新：刚刚")
 
     def _update_selected_plan_details(self) -> None:
         """Selecting is read-only; session creation remains an explicit next action."""
@@ -554,22 +637,31 @@ class ReviewPage(QWidget):
         self.plan_preview.clear()
         self.plan_history.clear()
         plan_id = self.plan_combo.currentData()
+        has_plans = self.plan_combo.count() > 0
         if not plan_id:
-            self.plan_summary.setText("请选择一个复习计划以查看内容。")
+            self.plan_summary.hide()
+            self.plan_content_stack.setCurrentWidget(
+                self.plan_none_state if has_plans else self.plan_empty_state
+            )
+            self.plan_history.hide()
+            self.history_empty_state.show()
+            self.open_history_button.hide()
             self.start_selected_button.setText("开始复习")
             self.start_selected_button.setEnabled(False)
             self.start_selected_button.setToolTip("请先选择复习计划")
-            self.open_history_button.setEnabled(False)
             return
         plan = self.services.get_review_plan(str(plan_id))
         if plan is None:
-            self.plan_summary.setText("该复习计划已不存在。")
+            self.plan_summary.hide()
+            self.plan_content_stack.setCurrentWidget(self.plan_none_state)
+            self.plan_history.hide()
+            self.history_empty_state.show()
+            self.open_history_button.hide()
             self.start_selected_button.setEnabled(False)
-            self.open_history_button.setEnabled(False)
             return
-        self.open_history_button.setEnabled(True)
+        self.plan_summary.show()
         content_label = "题目" if plan.content_type == "problem" else "笔记"
-        self.plan_summary.setText(f"{plan.name}：{len(plan.items)} 项{content_label}。选择计划不会创建复习会话。")
+        self.plan_summary.setText(f"{plan.name} · {len(plan.items)} 项{content_label}")
         self.start_selected_button.setText(f"开始{content_label}复习")
         self.start_selected_button.setToolTip(f"开始当前选中的{content_label}复习计划")
         available_count = 0
@@ -581,7 +673,7 @@ class ReviewPage(QWidget):
                 self.plan_preview.addItem(label)
                 available_count += problem is not None
             sessions = self.services.review_plan_study_sessions(plan.id)
-            for study_session in sessions[:8]:
+            for study_session in sessions[:5]:
                 started = study_session.started_at.astimezone().strftime("%Y-%m-%d %H:%M")
                 status = _STUDY_STATUS_LABELS.get(study_session.status, "状态未知")
                 self.plan_history.addItem(f"{started} · {status} · {study_session.problem_count} 题")
@@ -591,14 +683,63 @@ class ReviewPage(QWidget):
                 label = note.title if note is not None else "已移除的笔记"
                 self.plan_preview.addItem(label)
                 available_count += note is not None and note.status == "active"
-            for record in self.services.review_plan_note_records(plan.id)[:8]:
+            for record in self.services.review_plan_note_records(plan.id)[:5]:
                 completed = record.completed_at.astimezone().strftime("%Y-%m-%d %H:%M")
                 self.plan_history.addItem(f"{completed} · 已完成笔记阅读")
-        if not self.plan_history.count():
-            self.plan_history.addItem("暂无复习历史")
+        self.plan_content_stack.setCurrentWidget(self.plan_preview)
+        if self.plan_history.count():
+            self.plan_history.show()
+            self.history_empty_state.hide()
+            self.open_history_button.show()
+            self.open_history_button.setEnabled(True)
+        else:
+            self.plan_history.hide()
+            self.history_empty_state.show()
+            self.open_history_button.hide()
         self.start_selected_button.setEnabled(bool(available_count))
         if not available_count:
             self.start_selected_button.setToolTip("计划没有可用内容，无法创建空会话")
+
+    def _compact_empty_state(
+        self,
+        title: str,
+        *,
+        hint: str = "",
+        button_text: str | None = None,
+        on_click: Callable[[], None] | None = None,
+    ) -> QWidget:
+        """Compact inline empty state used by the review plan home card."""
+        panel = QFrame()
+        panel.setObjectName("CompactEmptyState")
+        panel.setMinimumHeight(96)
+        panel.setMaximumHeight(120)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(4)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        icon = QLabel("·")
+        icon.setObjectName("EmptyStateIcon")
+        title_label = QLabel(title)
+        title_label.setObjectName("EmptyStateTitle")
+        row.addWidget(icon)
+        row.addWidget(title_label)
+        row.addStretch(1)
+        if button_text and on_click is not None:
+            action = QPushButton(button_text)
+            action.setObjectName("EmptyStateAction")
+            action.clicked.connect(on_click)
+            row.addWidget(action)
+        layout.addLayout(row)
+        if hint:
+            hint_label = QLabel(hint)
+            hint_label.setObjectName("MutedLabel")
+            layout.addWidget(hint_label)
+        return panel
+
+    def _go_create_plan(self) -> None:
+        self.status_message.emit("请在下方的「制定复习计划」区域创建计划。")
+        self.queue_type.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _open_plan_history(self) -> None:
         plan_id = self.plan_combo.currentData()

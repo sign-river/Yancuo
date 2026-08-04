@@ -5,7 +5,6 @@ const { Transform } = require("node:stream");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { Pool } = require("pg");
 const tcb = require("@cloudbase/node-sdk");
 const {
   boundedName,
@@ -13,7 +12,6 @@ const {
   environmentId,
   integerSetting,
   newUploadToken,
-  postgresConnectionSecurity,
   safeTokenEqual,
   subjectStorageKey,
   tokenHash,
@@ -23,7 +21,7 @@ const {
 const PORT = integerSetting(process.env.PORT, "PORT", 9000, 1, 65535);
 const ENV_ID = environmentId(process.env.CLOUDBASE_ENV_ID || process.env.TCB_ENV);
 const PUBLIC_URL = String(process.env.GATEWAY_PUBLIC_URL || "").replace(/\/$/, "");
-const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
+const RDB_API_KEY = String(process.env.RDB_API_KEY || "").trim();
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_AUTH_RESPONSE_BYTES = 64 * 1024;
@@ -72,75 +70,67 @@ const RATE_PER_MINUTE = integerSetting(
   1,
   1_000_000,
 );
-const PG_POOL_SIZE = integerSetting(process.env.PG_POOL_SIZE, "PG_POOL_SIZE", 5, 1, 100);
-const PG_CONNECT_TIMEOUT_MS = integerSetting(
-  process.env.PG_CONNECT_TIMEOUT_MS,
-  "PG_CONNECT_TIMEOUT_MS",
-  10_000,
-  1_000,
-  60_000,
-);
+const RDB_TIMEOUT_MS = integerSetting(process.env.RDB_TIMEOUT_MS, "RDB_TIMEOUT_MS", 15_000, 1_000, 60_000);
 
-if (!DATABASE_URL) {
-  throw new Error("DATABASE_URL is required");
+if (!RDB_API_KEY) {
+  throw new Error("RDB_API_KEY is required");
 }
 
-const postgresSecurity = postgresConnectionSecurity(
-  DATABASE_URL,
-  process.env.PG_SSL,
-  process.env.PG_SSL_CA,
-);
+const RDB_BASE = `https://${ENV_ID}.api.tcloudbasegateway.com/v1/rdb/rest`;
 
-const pool = new Pool({
-  ...postgresSecurity,
-  max: PG_POOL_SIZE,
-  connectionTimeoutMillis: PG_CONNECT_TIMEOUT_MS,
-  idleTimeoutMillis: 20_000,
-  statement_timeout: 30_000,
-});
-pool.on("error", (error) => {
-  console.error("postgres idle client error", { type: error.name });
-});
-
-async function beginScoped(client, subject) {
-  await client.query("begin");
-  await client.query("select set_config('yancuo.subject_id', $1, true)", [subject]);
-}
-
-async function beginUploadScoped(client, uploadId) {
-  await client.query("begin");
-  await client.query("select set_config('yancuo.upload_id', $1, true)", [uploadId]);
-}
-
-async function queryScoped(subject, text, params) {
-  const client = await pool.connect();
+async function callRpc(name, params = {}) {
+  const endpoint = `${RDB_BASE}/rpc/${name}`;
+  const rdbResponse = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${RDB_API_KEY}`,
+      Accept: "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(params),
+    signal: AbortSignal.timeout(RDB_TIMEOUT_MS),
+  });
+  const raw = await readResponseBytes(rdbResponse, MAX_RESPONSE_BYTES, "数据库服务");
+  let value;
   try {
-    await beginScoped(client, subject);
-    const result = await client.query(text, params);
-    await client.query("commit");
-    return result;
-  } catch (error) {
-    await client.query("rollback").catch(() => undefined);
-    throw error;
-  } finally {
-    client.release();
+    value = JSON.parse(raw.toString("utf8"));
+  } catch (_error) {
+    fail("数据库服务返回无效响应", 502);
   }
+  if (!rdbResponse.ok) {
+    const message = String(
+      value?.message || value?.code || value?.Error?.Message || value?.error || "数据库操作失败",
+    );
+    fail(message, 502);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    fail("数据库服务返回无效响应", 502);
+  }
+  if (value.ok !== true) {
+    const status = Number(value.status || 400);
+    fail(String(value.error || "数据库操作失败"), Number.isInteger(status) && status >= 400 && status <= 599 ? status : 400);
+  }
+  return value.data;
 }
 
-async function queryUploadScoped(uploadId, text, params) {
-  const client = await pool.connect();
-  try {
-    await beginUploadScoped(client, uploadId);
-    const result = await client.query(text, params);
-    await client.query("commit");
-    return result;
-  } catch (error) {
-    await client.query("rollback").catch(() => undefined);
-    throw error;
-  } finally {
-    client.release();
+async function readResponseBytes(response, maxBytes, label) {
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel();
+      fail(`${label}响应超过大小限制`, 502);
+    }
+    chunks.push(Buffer.from(value));
   }
+  return Buffer.concat(chunks, size);
 }
+
 const cloud = tcb.init({ env: ENV_ID });
 
 function fail(message, statusCode = 400) {
@@ -186,28 +176,10 @@ async function readJson(req) {
   }
 }
 
-async function readResponseBytes(upstream, maxBytes, label) {
-  if (!upstream.body) fail(`${label}没有响应体`, 502);
-  const reader = upstream.body.getReader();
-  const chunks = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > maxBytes) {
-      await reader.cancel();
-      fail(`${label}响应超过大小限制`, 502);
-    }
-    chunks.push(Buffer.from(value));
-  }
-  return Buffer.concat(chunks, size);
-}
-
 function bearer(req) {
   const value = String(req.headers.authorization || "");
   if (!value.startsWith("Bearer ") || value.length < 16 || value.length > 16 * 1024) {
-    fail("缺少有效登录凭据", 401);
+    fail("缺少有效登录凭证", 401);
   }
   return value.slice(7);
 }
@@ -248,50 +220,15 @@ async function authenticate(req) {
 }
 
 async function enforceRate(subject) {
-  const result = await queryScoped(
-    subject,
-    "insert into yancuo.rate_limits(subject_id,window_start,request_count) values($1,date_trunc('minute',now()),1) on conflict(subject_id) do update set window_start=case when yancuo.rate_limits.window_start<date_trunc('minute',now()) then excluded.window_start else yancuo.rate_limits.window_start end,request_count=case when yancuo.rate_limits.window_start<date_trunc('minute',now()) then 1 else yancuo.rate_limits.request_count+1 end returning request_count",
-    [subject],
-  );
-  if (Number(result.rows[0].request_count) > RATE_PER_MINUTE) {
+  const data = await callRpc("yancuo_rate_limit", { p_subject: subject });
+  if (Number(data.request_count) > RATE_PER_MINUTE) {
     fail("请求过于频繁，请稍后再试", 429);
   }
 }
 
-async function repository(client, subject, payload) {
-  const name = boundedName(payload.repository || payload.name, "资料库名称");
-  const result = await client.query(
-    "select repository_id, name, created_at, updated_at from yancuo.repositories where subject_id=$1 and name=$2",
-    [subject, name],
-  );
-  if (!result.rowCount) fail("资料库不存在", 404);
-  return result.rows[0];
-}
-
-async function lockSubjectQuota(client, subject) {
-  // Serialize quota reservations for one identity across all gateway instances.
-  // Hash collisions only cause harmless extra serialization.
-  await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [subject]);
-}
-
-async function requireWriteLock(client, repositoryId, payload) {
-  const deviceId = boundedName(payload.device_id, "设备 ID");
-  const leaseId = boundedName(payload.lease_id, "租约 ID");
-  const locked = await client.query(
-    "update yancuo.write_locks set expires_at=now()+interval '15 minutes',updated_at=now() where repository_id=$1 and device_id=$2 and lease_id=$3 and expires_at>now() returning device_id",
-    [repositoryId, deviceId, leaseId],
-  );
-  if (!locked.rowCount) fail("主写入锁不存在或已经过期", 409);
-  return deviceId;
-}
-
 async function cleanupExpiredUploads(subject) {
-  const expired = await queryScoped(
-    subject,
-    "select upload_id,file_id from yancuo.upload_sessions where subject_id=$1 and expires_at < now() and (claimed_at is null or claimed_at < now()-interval '1 hour') order by expires_at limit 100",
-    [subject],
-  );
-  for (const row of expired.rows) {
+  const rows = await callRpc("yancuo_cleanup_list", { p_subject: subject });
+  for (const row of rows) {
     if (row.file_id) {
       try {
         await cloud.deleteFile({ fileList: [row.file_id] });
@@ -299,36 +236,20 @@ async function cleanupExpiredUploads(subject) {
         continue;
       }
     }
-    await queryScoped(
-      subject,
-      "delete from yancuo.upload_sessions where upload_id=$1 and subject_id=$2 and expires_at < now() and (claimed_at is null or claimed_at < now()-interval '1 hour')",
-      [row.upload_id, subject],
-    );
+    await callRpc("yancuo_cleanup_delete", { p_subject: subject, p_upload_id: String(row.upload_id) });
   }
 }
 
 async function cleanupPendingDeletions(subject) {
-  const pending = await queryScoped(
-    subject,
-    "select file_id from yancuo.object_deletions where subject_id=$1 order by queued_at limit 100",
-    [subject],
-  );
-  for (const row of pending.rows) {
+  const rows = await callRpc("yancuo_deletions_list", { p_subject: subject });
+  for (const row of rows) {
     try {
       await cloud.deleteFile({ fileList: [row.file_id] });
     } catch (_error) {
-      await queryScoped(
-        subject,
-        "update yancuo.object_deletions set attempts=attempts+1,last_attempt_at=now() where file_id=$1 and subject_id=$2",
-        [row.file_id, subject],
-      );
+      await callRpc("yancuo_deletions_retry", { p_subject: subject, p_file_id: String(row.file_id) });
       continue;
     }
-    await queryScoped(
-      subject,
-      "delete from yancuo.object_deletions where file_id=$1 and subject_id=$2",
-      [row.file_id, subject],
-    );
+    await callRpc("yancuo_deletions_done", { p_subject: subject, p_file_id: String(row.file_id) });
   }
 }
 
@@ -338,286 +259,193 @@ async function action(name, payload, identity, req) {
   }
   const subject = identity.subject;
   if (name === "health") {
-    await pool.query("select 1");
+    await callRpc("yancuo_health", {});
     return { environment_id: ENV_ID, subject };
   }
   if (name === "users/me") {
     return { login: identity.login, display_name: identity.displayName, subject };
   }
   if (name === "repositories/list") {
-    const result = await queryScoped(
-      subject,
-      "select name, created_at, updated_at from yancuo.repositories where subject_id=$1 order by updated_at desc",
-      [subject],
-    );
-    return { repositories: result.rows.map((row) => ({ ...row, owner: subject, private: true })) };
+    const rows = await callRpc("yancuo_repositories_list", { p_subject: subject });
+    return { repositories: rows.map((row) => ({ ...row, owner: subject, private: true })) };
   }
   if (name === "repositories/create") {
     const repositoryName = boundedName(payload.name, "资料库名称");
-    const client = await pool.connect();
-    try {
-      await beginScoped(client, subject);
-      await lockSubjectQuota(client, subject);
-      const existing = await client.query(
-        "select repository_id,name,created_at,updated_at from yancuo.repositories where subject_id=$1 and name=$2",
-        [subject, repositoryName],
-      );
-      if (existing.rowCount) {
-        await client.query("commit");
-        return { ...existing.rows[0], owner: subject, private: true };
-      }
-      const count = await client.query(
-        "select count(*)::int as value from yancuo.repositories where subject_id=$1",
-        [subject],
-      );
-      if (count.rows[0].value >= USER_REPOSITORIES) fail("已达到个人资料库数量上限", 409);
-      const created = await client.query(
-        "insert into yancuo.repositories(subject_id, owner, name) values($1,$1,$2) returning repository_id,name,created_at,updated_at",
-        [subject, repositoryName],
-      );
-      await client.query("commit");
-      return { ...created.rows[0], owner: subject, private: true };
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
+    const data = await callRpc("yancuo_repositories_create", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_max_repos: USER_REPOSITORIES,
+    });
+    return { ...data.row, owner: subject, private: true };
   }
-
-  const client = await pool.connect();
-  try {
-    await beginScoped(client, subject);
-    const repo = await repository(client, subject, payload);
-    if (name === "repositories/get") {
-      await client.query("commit");
-      return { ...repo, owner: subject, private: true };
-    }
-    if (name === "manifest/read") {
-      const result = await client.query(
-        "select document from yancuo.manifests where repository_id=$1",
-        [repo.repository_id],
-      );
-      await client.query("commit");
-      return { manifest: result.rows[0]?.document || null };
-    }
-    if (name === "manifest/write") {
-      if (!payload.manifest || typeof payload.manifest !== "object" || Array.isArray(payload.manifest)) {
-        fail("manifest 必须是 JSON 对象");
-      }
-      if (Buffer.byteLength(JSON.stringify(payload.manifest), "utf8") > MAX_MANIFEST_BYTES) {
-        fail("manifest 超过大小限制", 413);
-      }
-      await requireWriteLock(client, repo.repository_id, payload);
-      await client.query(
-        "insert into yancuo.manifests(repository_id,document) values($1,$2::jsonb) on conflict(repository_id) do update set document=excluded.document,updated_at=now()",
-        [repo.repository_id, JSON.stringify(payload.manifest)],
-      );
-      await client.query("commit");
-      return { written: true };
-    }
-    if (name === "releases/list") {
-      await cleanupPendingDeletions(subject);
-      const releases = await client.query(
-        "select tag,name,case when octet_length(body)<=$2 then body else '' end as body,created_at from yancuo.releases where repository_id=$1 order by created_at desc limit $3",
-        [repo.repository_id, MAX_RELEASE_BODY_BYTES, RELEASE_LIST_LIMIT],
-      );
-      const tags = releases.rows.map((row) => row.tag);
-      const assets = tags.length
-        ? await client.query(
-          "select release_tag,asset_name,byte_size from yancuo.release_assets where repository_id=$1 and release_tag=any($2::text[])",
-          [repo.repository_id, tags],
-        )
-        : { rows: [] };
-      const byTag = new Map();
-      for (const row of assets.rows) {
-        if (!byTag.has(row.release_tag)) byTag.set(row.release_tag, []);
-        byTag.get(row.release_tag).push({ name: row.asset_name, size: Number(row.byte_size) });
-      }
-      await client.query("commit");
-      return { releases: releases.rows.map((row) => ({ ...row, assets: byTag.get(row.tag) || [] })) };
-    }
-    if (name === "releases/create") {
-      const tag = boundedName(payload.tag, "发布标签");
-      const releaseName = boundedText(payload.name || tag, "发布名称", 512);
-      const body = boundedText(payload.body, "发布说明", MAX_RELEASE_BODY_BYTES);
-      if (Buffer.byteLength(JSON.stringify(body), "utf8") > MAX_RELEASE_BODY_BYTES) {
-        fail("发布说明 JSON 编码后超过大小限制", 413);
-      }
-      await requireWriteLock(client, repo.repository_id, payload);
-      const existing = await client.query(
-        "select tag,name,body,created_at from yancuo.releases where repository_id=$1 and tag=$2",
-        [repo.repository_id, tag],
-      );
-      if (existing.rowCount) {
-        const row = existing.rows[0];
-        if (row.name !== releaseName || row.body !== body) fail("发布标签已被不同内容占用", 409);
-        await client.query("commit");
-        return row;
-      }
-      const releaseCount = await client.query(
-        "select count(*)::int as value from yancuo.releases where repository_id=$1",
-        [repo.repository_id],
-      );
-      if (releaseCount.rows[0].value >= MAX_RELEASES_PER_REPOSITORY) {
-        fail("资料库发布数量已达到上限", 409);
-      }
-      const inserted = await client.query(
-        "insert into yancuo.releases(repository_id,tag,name,body) values($1,$2,$3,$4) returning tag,name,body,created_at",
-        [repo.repository_id, tag, releaseName, body],
-      );
-      await client.query("commit");
-      return inserted.rows[0];
-    }
-    if (name === "assets/upload-url") {
-      await cleanupExpiredUploads(subject);
-      if (!PUBLIC_URL.startsWith("https://")) fail("网关未配置 HTTPS 公网地址", 503);
-      const tag = boundedName(payload.tag, "发布标签");
-      const assetName = boundedName(payload.asset_name, "资源名称");
-      const size = Number(payload.size);
-      if (!Number.isSafeInteger(size) || size < 0 || size > MAX_ASSET_BYTES) fail("资源大小无效", 413);
-      await lockSubjectQuota(client, subject);
-      await requireWriteLock(client, repo.repository_id, payload);
-      const release = await client.query(
-        "select 1 from yancuo.releases where repository_id=$1 and tag=$2",
-        [repo.repository_id, tag],
-      );
-      if (!release.rowCount) fail("发布不存在", 404);
-      const assetCount = await client.query(
-        "select ((select count(*) from yancuo.release_assets where repository_id=$1 and release_tag=$2) + (select count(*) from yancuo.upload_sessions where repository_id=$1 and release_tag=$2 and expires_at>=now()))::int as value",
-        [repo.repository_id, tag],
-      );
-      if (assetCount.rows[0].value >= MAX_ASSETS_PER_RELEASE) {
-        fail("发布附件数量已达到上限", 409);
-      }
-      const existingAsset = await client.query(
-        "select 1 from yancuo.release_assets where repository_id=$1 and release_tag=$2 and asset_name=$3",
-        [repo.repository_id, tag, assetName],
-      );
-      if (existingAsset.rowCount) fail("发布附件已经存在且不可替换", 409);
-      const usage = await client.query(
-        "select ((select coalesce(sum(a.byte_size),0) from yancuo.release_assets a join yancuo.repositories r on r.repository_id=a.repository_id where r.subject_id=$1) + (select coalesce(sum(u.expected_size),0) from yancuo.upload_sessions u where u.subject_id=$1 and u.expires_at>=now()))::bigint as bytes",
-        [subject],
-      );
-      if (Number(usage.rows[0].bytes) + size > USER_STORAGE_BYTES) fail("已达到个人云存储额度", 409);
-      const uploadId = cryptoRandomId();
-      const uploadToken = newUploadToken();
-      const storagePath = `yancuo/${subjectStorageKey(subject)}/${repo.repository_id}/uploads/${uploadId}/${assetName}`;
-      await client.query(
-        "insert into yancuo.upload_sessions(upload_id,subject_id,repository_id,release_tag,asset_name,storage_path,expected_size,token_hash,expires_at) values($1,$2,$3,$4,$5,$6,$7,$8,now()+interval '10 minutes')",
-        [uploadId, subject, repo.repository_id, tag, assetName, storagePath, size, tokenHash(uploadToken)],
-      );
-      await client.query("commit");
-      return {
-        url: `${PUBLIC_URL}/uploads/${uploadId}`,
-        headers: {
-          "Content-Type": "application/octet-stream",
-          "X-Yancuo-Upload-Token": uploadToken,
-        },
-        upload_id: uploadId,
-      };
-    }
-    if (name === "assets/commit") {
-      const uploadId = uuidV4(payload.upload_id, "上传 ID");
-      await requireWriteLock(client, repo.repository_id, payload);
-      const claimed = await client.query(
-        "delete from yancuo.upload_sessions where upload_id=$1 and subject_id=$2 and repository_id=$3 and uploaded_at is not null and expires_at>=now() returning *",
-        [uploadId, subject, repo.repository_id],
-      );
-      const upload = claimed.rows[0];
-      if (!upload || Number(upload.actual_size) !== Number(upload.expected_size)) {
-        fail("上传尚未完成、已提交或大小不匹配", 409);
-      }
-      if (upload.release_tag !== payload.tag || upload.asset_name !== payload.asset_name) {
-        fail("上传提交参数不匹配", 409);
-      }
-      await client.query(
-        "insert into yancuo.release_assets(repository_id,release_tag,asset_name,storage_path,file_id,byte_size) values($1,$2,$3,$4,$5,$6)",
-        [repo.repository_id, upload.release_tag, upload.asset_name, upload.storage_path, upload.file_id, upload.actual_size],
-      );
-      await client.query("commit");
-      return { name: upload.asset_name, size: Number(upload.actual_size) };
-    }
-    if (name === "assets/download-url") {
-      const tag = boundedName(payload.tag, "发布标签");
-      const assetName = boundedName(payload.asset_name, "资源名称");
-      const found = await client.query(
-        "select file_id from yancuo.release_assets where repository_id=$1 and release_tag=$2 and asset_name=$3",
-        [repo.repository_id, tag, assetName],
-      );
-      if (!found.rowCount) fail("资源不存在", 404);
-      const urls = await cloud.getTempFileURL({ fileList: [{ fileID: found.rows[0].file_id, maxAge: 600 }] });
-      const url = urls.fileList?.[0]?.tempFileURL;
-      if (!url) fail("无法生成临时下载地址", 502);
-      await client.query("commit");
-      return { url };
-    }
-    if (name === "locks/acquire") {
-      const deviceId = boundedName(payload.device_id, "设备 ID");
-      const leaseId = boundedName(payload.lease_id, "租约 ID");
-      const locked = await client.query(
-        "insert into yancuo.write_locks(repository_id,device_id,lease_id,expires_at) values($1,$2,$3,now()+interval '15 minutes') on conflict(repository_id) do update set device_id=excluded.device_id,lease_id=excluded.lease_id,expires_at=excluded.expires_at,updated_at=now() where yancuo.write_locks.expires_at<=now() or (yancuo.write_locks.device_id=excluded.device_id and yancuo.write_locks.lease_id=excluded.lease_id) returning device_id,expires_at",
-        [repo.repository_id, deviceId, leaseId],
-      );
-      await client.query("commit");
-      return { acquired: Boolean(locked.rowCount), expires_at: locked.rows[0]?.expires_at || null };
-    }
-    if (name === "locks/release") {
-      const deviceId = boundedName(payload.device_id, "设备 ID");
-      const leaseId = boundedName(payload.lease_id, "租约 ID");
-      await client.query(
-        "delete from yancuo.write_locks where repository_id=$1 and device_id=$2 and lease_id=$3",
-        [repo.repository_id, deviceId, leaseId],
-      );
-      await client.query("commit");
-      return { released: true };
-    }
-    if (name === "releases/delete") {
-      const tag = boundedName(payload.tag, "发布标签");
-      await requireWriteLock(client, repo.repository_id, payload);
-      const targetRelease = await client.query(
-        "select 1 from yancuo.releases where repository_id=$1 and tag=$2 for update",
-        [repo.repository_id, tag],
-      );
-      if (!targetRelease.rowCount) {
-        await client.query("commit");
-        return { deleted: true };
-      }
-      const uploads = await client.query(
-        "select file_id,claimed_at from yancuo.upload_sessions where repository_id=$1 and release_tag=$2 for update",
-        [repo.repository_id, tag],
-      );
-      if (uploads.rows.some((row) => row.claimed_at !== null)) {
-        fail("发布仍有正在执行的附件上传", 409);
-      }
-      const files = await client.query(
-        "select file_id from yancuo.release_assets where repository_id=$1 and release_tag=$2",
-        [repo.repository_id, tag],
-      );
-      const fileIds = new Set(
-        [...files.rows, ...uploads.rows].map((row) => row.file_id).filter(Boolean),
-      );
-      for (const fileId of fileIds) {
-        await client.query(
-          "insert into yancuo.object_deletions(file_id,subject_id) values($1,$2) on conflict(file_id) do nothing",
-          [fileId, subject],
-        );
-      }
-      await client.query(
-        "delete from yancuo.releases where repository_id=$1 and tag=$2",
-        [repo.repository_id, tag],
-      );
-      await client.query("commit");
-      await cleanupPendingDeletions(subject);
-      return { deleted: true };
-    }
-    fail("不支持的操作", 404);
-  } catch (error) {
-    await client.query("rollback").catch(() => undefined);
-    throw error;
-  } finally {
-    client.release();
+  if (name === "repositories/get") {
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    const data = await callRpc("yancuo_repository", { p_subject: subject, p_name: repositoryName });
+    return { ...data, owner: subject, private: true };
   }
+  if (name === "manifest/read") {
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    const data = await callRpc("yancuo_manifest_read", { p_subject: subject, p_name: repositoryName });
+    return { manifest: data.manifest || null };
+  }
+  if (name === "manifest/write") {
+    if (!payload.manifest || typeof payload.manifest !== "object" || Array.isArray(payload.manifest)) {
+      fail("manifest 必须是 JSON 对象");
+    }
+    if (Buffer.byteLength(JSON.stringify(payload.manifest), "utf8") > MAX_MANIFEST_BYTES) {
+      fail("manifest 超过大小限制", 413);
+    }
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    const deviceId = boundedName(payload.device_id, "设备 ID");
+    const leaseId = boundedName(payload.lease_id, "租赁 ID");
+    await callRpc("yancuo_manifest_write", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_device_id: deviceId,
+      p_lease_id: leaseId,
+      p_document: payload.manifest,
+    });
+    return { written: true };
+  }
+  if (name === "releases/list") {
+    await cleanupPendingDeletions(subject);
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    const rows = await callRpc("yancuo_releases_list", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_max_body_bytes: MAX_RELEASE_BODY_BYTES,
+      p_limit: RELEASE_LIST_LIMIT,
+    });
+    return { releases: rows };
+  }
+  if (name === "releases/create") {
+    const tag = boundedName(payload.tag, "发布标签");
+    const releaseName = boundedText(payload.name || tag, "发布名称", 512);
+    const body = boundedText(payload.body, "发布说明", MAX_RELEASE_BODY_BYTES);
+    if (Buffer.byteLength(JSON.stringify(body), "utf8") > MAX_RELEASE_BODY_BYTES) {
+      fail("发布说明 JSON 编码后超过大小限制", 413);
+    }
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    const deviceId = boundedName(payload.device_id, "设备 ID");
+    const leaseId = boundedName(payload.lease_id, "租赁 ID");
+    return await callRpc("yancuo_releases_create", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_device_id: deviceId,
+      p_lease_id: leaseId,
+      p_tag: tag,
+      p_release_name: releaseName,
+      p_body: body,
+      p_max_releases: MAX_RELEASES_PER_REPOSITORY,
+    });
+  }
+  if (name === "assets/upload-url") {
+    await cleanupExpiredUploads(subject);
+    if (!PUBLIC_URL.startsWith("https://")) fail("网关未配置 HTTPS 公网地址", 503);
+    const tag = boundedName(payload.tag, "发布标签");
+    const assetName = boundedName(payload.asset_name, "资源名称");
+    const size = Number(payload.size);
+    if (!Number.isSafeInteger(size) || size < 0 || size > MAX_ASSET_BYTES) fail("资源大小无效", 413);
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    const deviceId = boundedName(payload.device_id, "设备 ID");
+    const leaseId = boundedName(payload.lease_id, "租赁 ID");
+    const uploadId = cryptoRandomId();
+    const uploadToken = newUploadToken();
+    const storagePath = `yancuo/${subjectStorageKey(subject)}/${repositoryName}/uploads/${uploadId}/${assetName}`;
+    await callRpc("yancuo_upload_url", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_device_id: deviceId,
+      p_lease_id: leaseId,
+      p_tag: tag,
+      p_asset_name: assetName,
+      p_size: size,
+      p_upload_id: uploadId,
+      p_token_hash: tokenHash(uploadToken),
+      p_storage_path: storagePath,
+      p_max_assets: MAX_ASSETS_PER_RELEASE,
+      p_user_storage_bytes: USER_STORAGE_BYTES,
+    });
+    return {
+      url: `${PUBLIC_URL}/uploads/${uploadId}`,
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-Yancuo-Upload-Token": uploadToken,
+      },
+      upload_id: uploadId,
+    };
+  }
+  if (name === "assets/commit") {
+    const uploadId = uuidV4(payload.upload_id, "上传 ID");
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    const deviceId = boundedName(payload.device_id, "设备 ID");
+    const leaseId = boundedName(payload.lease_id, "租赁 ID");
+    const tag = boundedName(payload.tag, "发布标签");
+    const assetName = boundedName(payload.asset_name, "资源名称");
+    return await callRpc("yancuo_assets_commit", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_device_id: deviceId,
+      p_lease_id: leaseId,
+      p_tag: tag,
+      p_asset_name: assetName,
+      p_upload_id: uploadId,
+    });
+  }
+  if (name === "assets/download-url") {
+    const tag = boundedName(payload.tag, "发布标签");
+    const assetName = boundedName(payload.asset_name, "资源名称");
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    const data = await callRpc("yancuo_asset_file", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_tag: tag,
+      p_asset_name: assetName,
+    });
+    const urls = await cloud.getTempFileURL({ fileList: [{ fileID: data.file_id, maxAge: 600 }] });
+    const url = urls.fileList?.[0]?.tempFileURL;
+    if (!url) fail("无法生成临时下载地址", 502);
+    return { url };
+  }
+  if (name === "locks/acquire") {
+    const deviceId = boundedName(payload.device_id, "设备 ID");
+    const leaseId = boundedName(payload.lease_id, "租赁 ID");
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    return await callRpc("yancuo_locks_acquire", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_device_id: deviceId,
+      p_lease_id: leaseId,
+    });
+  }
+  if (name === "locks/release") {
+    const deviceId = boundedName(payload.device_id, "设备 ID");
+    const leaseId = boundedName(payload.lease_id, "租赁 ID");
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    await callRpc("yancuo_locks_release", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_device_id: deviceId,
+      p_lease_id: leaseId,
+    });
+    return { released: true };
+  }
+  if (name === "releases/delete") {
+    const tag = boundedName(payload.tag, "发布标签");
+    const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");
+    const deviceId = boundedName(payload.device_id, "设备 ID");
+    const leaseId = boundedName(payload.lease_id, "租赁 ID");
+    await callRpc("yancuo_releases_delete", {
+      p_subject: subject,
+      p_name: repositoryName,
+      p_device_id: deviceId,
+      p_lease_id: leaseId,
+      p_tag: tag,
+    });
+    await cleanupPendingDeletions(subject);
+    return { deleted: true };
+  }
+  fail("不支持的操作", 404);
 }
 
 function cryptoRandomId() {
@@ -626,15 +454,10 @@ function cryptoRandomId() {
 
 async function upload(req, res, url) {
   const uploadId = uuidV4(url.pathname.split("/").pop(), "上传 ID");
-  if (url.searchParams.has("token")) fail("上传凭据不得放在 URL 中", 400);
+  if (url.searchParams.has("token")) fail("上传凭证不得放在 URL 中", 400);
   const token = String(req.headers["x-yancuo-upload-token"] || "");
-  const found = await queryUploadScoped(
-    uploadId,
-    "select * from yancuo.upload_sessions where upload_id=$1 and expires_at>=now()",
-    [uploadId],
-  );
-  const candidate = found.rows[0];
-  if (!candidate || !safeTokenEqual(token, candidate.token_hash)) fail("上传凭据无效或已过期", 403);
+  const candidate = await callRpc("yancuo_upload_find", { p_upload_id: uploadId });
+  if (!candidate || !safeTokenEqual(token, candidate.token_hash)) fail("上传凭证无效或已过期", 403);
   if (candidate.uploaded_at) {
     if (!candidate.file_id || Number(candidate.actual_size) !== Number(candidate.expected_size)) {
       fail("上传会话状态损坏", 409);
@@ -642,13 +465,11 @@ async function upload(req, res, url) {
     response(res, 200, { ok: true, data: { uploaded: true } });
     return;
   }
-  const claimed = await queryUploadScoped(
-    uploadId,
-    "update yancuo.upload_sessions set claimed_at=now(),expires_at=now()+interval '1 hour' where upload_id=$1 and token_hash=$2 and expires_at>=now() and uploaded_at is null and claimed_at is null returning *",
-    [uploadId, tokenHash(token)],
-  );
-  const row = claimed.rows[0];
-  if (!row) fail("上传已在进行或凭据已使用", 409);
+  const row = await callRpc("yancuo_upload_claim", {
+    p_upload_id: uploadId,
+    p_token_hash: tokenHash(token),
+  });
+  if (!row) fail("上传正在进行或凭证已使用", 409);
   const tempPath = path.join(os.tmpdir(), `yancuo-upload-${uploadId}`);
   let actual = 0;
   let stored;
@@ -676,29 +497,24 @@ async function upload(req, res, url) {
     }
     stored = await cloud.uploadFile({ cloudPath: row.storage_path, fileContent: fs.createReadStream(tempPath) });
     if (!stored?.fileID) fail("云存储未返回文件标识", 502);
-    const completed = await queryUploadScoped(
-      uploadId,
-      "update yancuo.upload_sessions set file_id=$2,actual_size=$3,uploaded_at=now(),claimed_at=null where upload_id=$1 and claimed_at is not null",
-      [uploadId, stored.fileID, actual],
-    );
-    if (completed.rowCount !== 1) fail("上传会话已过期或被回收", 409);
+    await callRpc("yancuo_upload_complete", {
+      p_upload_id: uploadId,
+      p_file_id: stored.fileID,
+      p_actual_size: actual,
+    });
   } catch (error) {
     if (stored?.fileID && actual === Number(row.expected_size)) {
-      const recovered = await queryUploadScoped(
-        uploadId,
-        "update yancuo.upload_sessions set file_id=$2,actual_size=$3,uploaded_at=coalesce(uploaded_at,now()),claimed_at=null where upload_id=$1 returning upload_id",
-        [uploadId, stored.fileID, actual],
-      ).catch(() => null);
-      if (recovered?.rowCount === 1) {
+      const recovered = await callRpc("yancuo_upload_recover", {
+        p_upload_id: uploadId,
+        p_file_id: stored.fileID,
+        p_actual_size: actual,
+      }).catch(() => null);
+      if (recovered) {
         response(res, 200, { ok: true, data: { uploaded: true } });
         return;
       }
     }
-    await queryUploadScoped(
-      uploadId,
-      "update yancuo.upload_sessions set claimed_at=null where upload_id=$1 and uploaded_at is null",
-      [uploadId],
-    ).catch(() => undefined);
+    await callRpc("yancuo_upload_unclaim", { p_upload_id: uploadId }).catch(() => undefined);
     throw error;
   } finally {
     await fs.promises.unlink(tempPath).catch(() => undefined);
@@ -735,5 +551,4 @@ server.listen(PORT, "0.0.0.0", () => {
 
 process.on("SIGTERM", async () => {
   server.close();
-  await pool.end();
 });

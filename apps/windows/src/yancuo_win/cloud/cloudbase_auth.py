@@ -59,6 +59,70 @@ class CloudBaseSession:
         )
 
 
+def _session_storage_keys(credential_key: str) -> tuple[str, str]:
+    """Storage entry names for a session (split to fit Windows CredWrite).
+
+    Windows CredWrite rejects blobs larger than 2560 bytes (UTF-16), and a
+    full JWT session JSON can exceed that limit.  The access token and the
+    refresh metadata are therefore stored as two separate credentials.
+    """
+    return f"{credential_key}.access", f"{credential_key}.meta"
+
+
+def _save_session(credential_key: str, session: CloudBaseSession) -> None:
+    access_key, meta_key = _session_storage_keys(credential_key)
+    set_secret(access_key, session.access_token)
+    set_secret(
+        meta_key,
+        json.dumps(
+            {
+                "refresh_token": session.refresh_token,
+                "expires_at": session.expires_at,
+                "subject": session.subject,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _load_session(credential_key: str) -> CloudBaseSession | None:
+    """Read a split session, falling back to the legacy single-entry JSON."""
+    access_key, meta_key = _session_storage_keys(credential_key)
+    access_token = get_secret(access_key)
+    meta_raw = get_secret(meta_key)
+    if access_token and meta_raw:
+        try:
+            meta = json.loads(meta_raw)
+            return CloudBaseSession(
+                access_token=access_token,
+                refresh_token=str(meta.get("refresh_token") or ""),
+                expires_at=int(meta.get("expires_at") or 0),
+                subject=str(meta.get("subject") or ""),
+            )
+        except (TypeError, ValueError, OverflowError, json.JSONDecodeError):
+            return None
+    raw = get_secret(credential_key)
+    if raw:
+        return CloudBaseSession.from_json(raw)
+    return None
+
+
+def load_stored_session(credential_key: str) -> CloudBaseSession | None:
+    """Return the stored session (split entries or legacy JSON), or None."""
+    return _load_session(credential_key)
+
+
+def clear_stored_session(credential_key: str) -> None:
+    """Delete every stored entry for a session (split entries + legacy)."""
+    from yancuo_win.infrastructure.credentials import delete_secret
+
+    access_key, meta_key = _session_storage_keys(credential_key)
+    delete_secret(access_key)
+    delete_secret(meta_key)
+    delete_secret(credential_key)
+
+
 def _auth_url(environment_id: str, path: str) -> str:
     environment_id = environment_id.strip()
     if (
@@ -130,8 +194,34 @@ def sign_in_with_password(
             "password": password,
         },
     )
-    set_secret(credential_key, session.to_json())
+    _save_session(credential_key, session)
     return session
+
+
+def force_refresh_token(environment_id: str, credential_key: str) -> str:
+    """Rotate the stored session immediately after the gateway rejected it.
+
+    The gateway can report an expired access token before the local expiry
+    window; this forces one refresh round-trip so ordinary operations keep
+    working without making the user sign in again.
+    """
+    session = _load_session(credential_key)
+    if session is None or not session.refresh_token:
+        raise DomainError("登录已失效，请重新登录")
+    refreshed = _request_token(
+        environment_id,
+        {
+            "grant_type": "refresh_token",
+            "client_id": environment_id.strip(),
+            "refresh_token": session.refresh_token,
+        },
+    )
+    if not refreshed.refresh_token:
+        refreshed = replace(refreshed, refresh_token=session.refresh_token)
+    if not refreshed.subject:
+        refreshed = replace(refreshed, subject=session.subject)
+    _save_session(credential_key, refreshed)
+    return refreshed.access_token
 
 
 def get_access_token(environment_id: str, credential_key: str) -> str:
@@ -144,11 +234,11 @@ def get_access_token(environment_id: str, credential_key: str) -> str:
 def _get_access_token_locked(environment_id: str, credential_key: str) -> str:
     """Read and possibly rotate a session while holding the process refresh lock."""
 
-    raw = get_secret(credential_key)
-    if not raw:
-        raise DomainError("请先在设置中登录 CloudBase 账户")
-    session = CloudBaseSession.from_json(raw)
+    session = _load_session(credential_key)
     if session is None:
+        raw = get_secret(credential_key)
+        if not raw:
+            raise DomainError("请先在设置中登录 CloudBase 账户")
         # Compatibility with manually pasted access tokens from older builds.
         if raw.lstrip().startswith(("{", "[")):
             raise DomainError("CloudBase 登录凭据已损坏，请重新登录")
@@ -169,5 +259,5 @@ def _get_access_token_locked(environment_id: str, credential_key: str) -> str:
         refreshed = replace(refreshed, refresh_token=session.refresh_token)
     if not refreshed.subject:
         refreshed = replace(refreshed, subject=session.subject)
-    set_secret(credential_key, refreshed.to_json())
+    _save_session(credential_key, refreshed)
     return refreshed.access_token

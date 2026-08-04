@@ -255,7 +255,7 @@ class CloudBackupService:
             parent_snapshot_id = (
                 previous.get("snapshot_id") if isinstance(previous, dict) else None
             )
-            tag = f"data-v1-{profile_id}-{stamp}-{device_id[-8:]}-{snapshot_id[-8:]}"
+            tag = f"data-v1-{profile_id[-8:]}-{stamp}-{device_id[-8:]}-{snapshot_id[-8:]}"
             pack = self.ebpack.export_ebpack(
                 self.runtime.paths.cache_dir / f"{tag}.ebpack"
             )

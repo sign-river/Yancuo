@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QSpinBox,
     QStackedWidget,
     QTabWidget,
@@ -351,6 +352,15 @@ class ContentBlocksEditor(QWidget):
         self._refresh_list()
 
 
+def _ellipsize_middle(text: str, max_len: int = 30) -> str:
+    """Shorten a long file name while keeping both ends, e.g. abc…xyz.jpg."""
+    if len(text) <= max_len:
+        return text
+    keep = max(4, max_len - 1)
+    left = keep * 2 // 3
+    right = keep - left
+    return f"{text[:left]}…{text[-right:]}"
+
 class ImagePreviewLabel(QLabel):
     """Aspect-ratio-preserving preview that follows the available panel size."""
 
@@ -367,6 +377,7 @@ class ImagePreviewLabel(QLabel):
         self._region_before_drag: dict[str, float] = {}
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(QSize(360, 260))
+        self.padding = 12
         self.setObjectName("ImagePreview")
 
     def set_path(self, path: Path | None) -> bool:
@@ -640,7 +651,7 @@ class ImagePreviewLabel(QLabel):
             self.setPixmap(QPixmap())
             self.setText(self.empty_text)
             return
-        target = self.size() - QSize(24, 24)
+        target = self.size() - QSize(self.padding * 2, self.padding * 2)
         self.setText("")
         self.setPixmap(
             self.source.scaled(
@@ -787,6 +798,36 @@ class ProblemForm(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
+        self._form_target: QVBoxLayout = root
+        self.render_view: MathContentView | None = None
+        if self.show_render_previews:
+            # 左右分栏：左侧实时渲染，右侧专注文字修改
+            self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+            root.addWidget(self.splitter)
+
+            render_panel = QWidget()
+            render_panel.setObjectName("ProblemRenderPanel")
+            render_layout = QVBoxLayout(render_panel)
+            render_layout.setContentsMargins(0, 0, 12, 0)
+            render_layout.setSpacing(8)
+            self.render_view = MathContentView()
+            self.render_view.set_adaptive_content_height(1200)
+            render_layout.addWidget(self.render_view)
+            self.splitter.addWidget(render_panel)
+
+            editor_panel = QScrollArea()
+            editor_panel.setWidgetResizable(True)
+            editor_panel.setFrameShape(QScrollArea.Shape.NoFrame)
+            editor_host = QWidget()
+            self._form_target = QVBoxLayout(editor_host)
+            self._form_target.setContentsMargins(0, 0, 0, 0)
+            self._form_target.setSpacing(12)
+            editor_panel.setWidget(editor_host)
+            self.splitter.addWidget(editor_panel)
+            self.splitter.setStretchFactor(0, 1)
+            self.splitter.setStretchFactor(1, 1)
+            self.splitter.setSizes([520, 560])
+
         basic = CardFrame()
         basic.add_title("基本归属")
         form = QFormLayout()
@@ -834,7 +875,7 @@ class ProblemForm(QWidget):
         form.addRow("原题题号", self.original_number)
         form.addRow("标签", self.tags)
         basic.body.addLayout(form)
-        root.addWidget(basic)
+        self._form_target.addWidget(basic)
 
         content = CardFrame()
         content.add_title("题目内容")
@@ -851,9 +892,7 @@ class ProblemForm(QWidget):
             blocks_label.setObjectName("MutedLabel")
             content.body.addWidget(blocks_label)
             content.body.addWidget(self.content_blocks)
-        if self.show_render_previews:
-            self._add_field_preview(content.body, "question", "题目内容预览")
-        root.addWidget(content)
+        self._form_target.addWidget(content)
 
         answer = CardFrame()
         answer.add_title("作答与解析")
@@ -887,15 +926,8 @@ class ProblemForm(QWidget):
             else:
                 answer.body.addWidget(QLabel(label))
             answer.body.addWidget(editor)
-            if self.show_render_previews and label in {"我的作答", "正确答案", "解析"}:
-                key = {
-                    "我的作答": "user_answer",
-                    "正确答案": "correct_answer",
-                    "解析": "solution",
-                }[label]
-                self._add_field_preview(answer.body, key, f"{label}预览")
-        root.addWidget(answer)
-        root.addStretch(1)
+        self._form_target.addWidget(answer)
+        self._form_target.addStretch(1)
 
         self.subject.currentIndexChanged.connect(self._reload_chapters)
         self.chapter.currentIndexChanged.connect(
@@ -925,6 +957,7 @@ class ProblemForm(QWidget):
     def _connect_change_signals(self) -> None:
         def notify(*_args) -> None:
             self.changed.emit()
+            self.refresh_render_previews()
 
         for editor in (
             self.title_edit,
@@ -978,25 +1011,26 @@ class ProblemForm(QWidget):
         layout.addWidget(preview)
 
     def refresh_render_previews(self) -> None:
-        if not self.show_render_previews:
+        if not self.show_render_previews or self.render_view is None:
             return
         question = self.question.toPlainText()
         latex = self._question_latex.strip()
         if latex:
             question = f"{question}\n\n\\[{latex}\\]".strip()
-        values = {
-            "question": ("题目内容", question),
-            "user_answer": ("我的作答", self.user_answer.toPlainText()),
-            "correct_answer": ("正确答案", self.correct_answer.toPlainText()),
-            "solution": ("解析", self.solution.toPlainText()),
-        }
-        for key, (title, value) in values.items():
-            label, preview = self._field_previews[key]
-            visible = bool(value.strip())
-            label.setVisible(visible)
-            preview.setVisible(visible)
-            if visible:
-                preview.set_fragment(title, value)
+        blocks = self.content_blocks.blocks if self.content_blocks.isVisible() else []
+        tags = [tag.strip() for tag in self.tags.text().split(",") if tag.strip()]
+        self.render_view.set_problem(
+            {
+                "title": self.title_edit.text(),
+                "question": question,
+                "content_blocks": blocks,
+                "user_answer": self.user_answer.toPlainText(),
+                "correct_answer": self.correct_answer.toPlainText(),
+                "solution_markdown": self.solution.toPlainText(),
+                "notes": self.notes.toPlainText(),
+            },
+            tag_names=tags,
+        )
 
     def _resize_text_areas_to_content(self) -> None:
         for editor in (
@@ -1298,6 +1332,8 @@ class IntakePage(QWidget):
         self.ai_files: list[Path] = []
         self.ai_job_id: str | None = None
         self._cancelled_ai_jobs: set[str] = set()
+        self._pending_answer_job_id: str | None = None
+        self.coordinator.register_handler("user_answer", self._run_user_answer_job)
         self.region_worker: RegionRecognitionWorker | None = None
         self.answer_recognition_worker: UserAnswerRecognitionWorker | None = None
         self.answer_image: Path | None = None
@@ -1699,74 +1735,120 @@ class IntakePage(QWidget):
 
     def _build_image_tools_tab(self) -> QScrollArea:
         """Build the dedicated source-image and recognition adjustment tab."""
-        # The image tools can be taller than the available confirmation pane.
-        # Keep them in a single scrollable work area so controls never paint
-        # over the preview when the window height is constrained.
         image_tools = QWidget()
-        image_tools_layout = QVBoxLayout(image_tools)
-        image_tools_layout.setContentsMargins(12, 12, 12, 12)
-        image_tools_layout.setSpacing(12)
+        root = QVBoxLayout(image_tools)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(12)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal, image_tools)
+        root.addWidget(splitter, stretch=1)
+
+        # 左栏：原图与题目选区
+        left_panel = QWidget()
+        left_panel.setObjectName("ImageToolsPreviewPanel")
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 10, 0)
+        left_layout.setSpacing(8)
         self.image_preview = ImagePreviewLabel("无原图预览")
-        self.image_preview.setMinimumHeight(280)
-        self.image_preview.setMaximumHeight(360)
+        self.image_preview.padding = 28
+        self.image_preview.setMinimumHeight(380)
         self.image_preview.set_editable(True)
         self.image_preview.region_drawn.connect(self._save_drawn_region)
-        image_tools_layout.addWidget(self.image_preview)
+        left_layout.addWidget(self.image_preview, stretch=1)
+        splitter.addWidget(left_panel)
 
+        # 右栏：来源图片 / 题目区域 / AI 校对
+        right_panel = QWidget()
+        right_panel.setObjectName("ImageToolsSidePanel")
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(10, 0, 0, 0)
+        right_layout.setSpacing(24)
+        right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 7)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([720, 300])
+        self._image_tools_splitter = splitter
+
+        # —— 来源图片 ——
+        source_section = QVBoxLayout()
+        source_section.setSpacing(12)
         source_title = QLabel("来源图片")
         source_title.setObjectName("SectionTitle")
-        image_tools_layout.addWidget(source_title)
+        source_section.addWidget(source_title)
         self.source_image_list = QListWidget()
         self.source_image_list.setObjectName("CandidateSourceImages")
         self.source_image_list.setAccessibleName("候选题来源图片")
-        self.source_image_list.setFixedHeight(72)
-        image_tools_layout.addWidget(self.source_image_list)
+        self.source_image_list.setIconSize(QSize(24, 24))
+        self.source_image_list.setFixedHeight(132)
+        source_section.addWidget(self.source_image_list)
         source_actions = QHBoxLayout()
+        source_actions.setSpacing(8)
         source_up = QPushButton("来源图上移")
+        source_up.setObjectName("RegionOutlineButton")
         source_up.clicked.connect(lambda: self._move_source_image(-1))
         source_down = QPushButton("来源图下移")
+        source_down.setObjectName("RegionOutlineButton")
         source_down.clicked.connect(lambda: self._move_source_image(1))
         source_actions.addWidget(source_up)
         source_actions.addWidget(source_down)
         source_actions.addStretch(1)
-        image_tools_layout.addLayout(source_actions)
+        source_section.addLayout(source_actions)
+        right_layout.addLayout(source_section)
 
+        # —— 题目区域 ——
+        region_section = QVBoxLayout()
+        region_section.setSpacing(12)
         region_title = QLabel("题目区域")
         region_title.setObjectName("SectionTitle")
-        image_tools_layout.addWidget(region_title)
+        region_section.addWidget(region_title)
         self.region_label = QLabel("")
-        self.region_label.setObjectName("PageHint")
-        image_tools_layout.addWidget(self.region_label)
-        region_secondary_actions = QHBoxLayout()
+        self.region_label.setObjectName("RegionStatusLabel")
+        self.region_label.setWordWrap(True)
+        region_section.addWidget(self.region_label)
         reset_region = QPushButton("恢复整图")
+        reset_region.setObjectName("RegionOutlineButton")
         reset_region.clicked.connect(self._reset_candidate_region)
-        self.rerecognize_region = primary_button("按当前区域重新识别")
-        self.rerecognize_region.clicked.connect(
-            self._start_region_rerecognition
-        )
         self.undo_region_recognition = QPushButton("撤回上次重识别")
+        self.undo_region_recognition.setObjectName("RegionOutlineButton")
         self.undo_region_recognition.clicked.connect(
             self._undo_region_rerecognition
         )
-        region_secondary_actions.addWidget(reset_region)
-        region_secondary_actions.addWidget(self.undo_region_recognition)
-        region_secondary_actions.addWidget(self.rerecognize_region)
-        region_secondary_actions.addStretch(1)
-        image_tools_layout.addLayout(region_secondary_actions)
+        self.rerecognize_region = QPushButton("按当前区域重新识别")
+        self.rerecognize_region.setObjectName("RegionAccentButton")
+        self.rerecognize_region.clicked.connect(
+            self._start_region_rerecognition
+        )
+        region_section.addWidget(reset_region)
+        region_section.addWidget(self.undo_region_recognition)
+        region_section.addWidget(self.rerecognize_region)
+        right_layout.addLayout(region_section)
 
+        # —— AI 校对（紧凑状态卡）——
+        self.uncertain_card = QFrame()
+        self.uncertain_card.setObjectName("UncertainCard")
+        uncertain_card_layout = QVBoxLayout(self.uncertain_card)
+        uncertain_card_layout.setContentsMargins(14, 12, 14, 12)
+        uncertain_card_layout.setSpacing(10)
+        uncertain_header = QHBoxLayout()
+        uncertain_header.setSpacing(8)
+        warn_icon = QLabel("⚠")
+        warn_icon.setObjectName("UncertainWarnIcon")
         self.uncertain_title = QLabel("AI 核对")
         self.uncertain_title.setObjectName("SectionTitle")
-        self.uncertain_title.hide()
-        image_tools_layout.addWidget(self.uncertain_title)
+        uncertain_header.addWidget(warn_icon)
+        uncertain_header.addWidget(self.uncertain_title)
+        uncertain_header.addStretch(1)
+        uncertain_card_layout.addLayout(uncertain_header)
         self.uncertain_label = QLabel("")
         self.uncertain_label.setWordWrap(True)
         self.uncertain_label.setObjectName("PageHint")
-        self.uncertain_label.hide()
-        image_tools_layout.addWidget(self.uncertain_label)
+        uncertain_card_layout.addWidget(self.uncertain_label)
         self.uncertain_actions = QVBoxLayout()
-        self.uncertain_actions.setSpacing(4)
-        image_tools_layout.addLayout(self.uncertain_actions)
-        image_tools_layout.addStretch(1)
+        self.uncertain_actions.setSpacing(6)
+        uncertain_card_layout.addLayout(self.uncertain_actions)
+        right_layout.addWidget(self.uncertain_card)
+        right_layout.addStretch(1)
         return self._scroll(image_tools)
 
     def _build_answer_capture(self) -> QWidget:
@@ -1866,6 +1948,17 @@ class IntakePage(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
         self._apply_image_intake_layout()
+        self._update_image_tools_orientation()
+
+    def _update_image_tools_orientation(self) -> None:
+        splitter = getattr(self, "_image_tools_splitter", None)
+        if splitter is None:
+            return
+        splitter.setOrientation(
+            Qt.Orientation.Vertical
+            if self.width() < 900
+            else Qt.Orientation.Horizontal
+        )
 
     def _apply_image_intake_layout(self) -> None:
         narrow = self.width() < 860
@@ -1910,36 +2003,81 @@ class IntakePage(QWidget):
         self.answer_recognition_result.clear()
         self.answer_apply_button.setEnabled(False)
 
+    def _run_user_answer_job(
+        self, job_id: str, emit_progress, should_cancel
+    ) -> dict[str, str]:
+        """Background handler for the user_answer domain job."""
+        job = self.intake.ai.get_job(job_id)
+        if job is None:
+            raise DomainError("作答识别任务不存在")
+        try:
+            config = json.loads(job.config_json or "{}")
+        except (ValueError, TypeError):
+            config = {}
+        paths = [Path(str(value)) for value in config.get("image_paths") or []]
+        keywords = str(config.get("keywords") or "")
+        self.intake.ai.append_job_event(
+            job_id,
+            "status",
+            text_value="正在识别作答内容…",
+            payload={"stage": "started"},
+        )
+        answer = self.intake.recognize_user_answer_images(
+            paths, keywords=keywords
+        )
+        if should_cancel():
+            raise DomainError("作答识别任务已取消")
+        self.intake.ai.append_job_event(
+            job_id, "text_delta", text_value=answer, append_response=True
+        )
+        return {"user_answer": answer}
+
+    def _on_answer_job_done(self, job_id: str) -> None:
+        self._pending_answer_job_id = None
+        self.answer_recognize_button.setEnabled(True)
+        self.answer_recognize_button.setText("开始识别")
+        job = self.intake.ai.get_job(job_id)
+        answer = ""
+        if job is not None:
+            try:
+                result = json.loads(job.result_json or "{}")
+                answer = str(result.get("user_answer") or "")
+            except (ValueError, TypeError):
+                answer = job.response_text or ""
+        if answer:
+            self.answer_recognition_result.setPlainText(answer)
+            self.answer_recognition_status.setText("识别完成，请核对并修改结果。")
+        else:
+            self.answer_recognition_status.setText("AI 未识别出作答内容，请重试或手动填写。")
+
+    def _on_answer_job_failed(self, job_id: str, error: str) -> None:
+        self._pending_answer_job_id = None
+        self.answer_recognize_button.setEnabled(True)
+        self.answer_recognize_button.setText("开始识别")
+        self.answer_recognition_status.setText(f"识别失败：{error}")
+        self.status_message.emit(f"作答识别失败：{error}")
     def _start_answer_recognition(self) -> None:
         if not self.answer_images:
             self.answer_recognition_status.setText("请先选择包含作答的图片。")
             self.status_message.emit("请先选择包含作答的图片")
             return
-        if (
-            self.answer_recognition_worker
-            and self.answer_recognition_worker.isRunning()
-        ):
+        if self._pending_answer_job_id is not None:
             return
+        try:
+            job = self.intake.start_user_answer_job(
+                self.answer_images,
+                keywords=self.answer_keywords.toPlainText(),
+            )
+        except DomainError as exc:
+            self.answer_recognition_status.setText(str(exc))
+            return
+        self._pending_answer_job_id = job.id
         self.answer_recognize_button.setEnabled(False)
-        self.answer_recognize_button.setText("正在识别…")
-        self.answer_apply_button.setEnabled(False)
-        self.answer_recognition_status.setText("正在识别作答内容…")
-        self.answer_recognition_worker = UserAnswerRecognitionWorker(
-            self.intake,
-            [str(path) for path in self.answer_images],
-            self.answer_keywords.toPlainText(),
-            self,
+        self.answer_recognize_button.setText("已加入队列")
+        self.coordinator.enqueue(job.id)
+        self.answer_recognition_status.setText(
+            "已加入 AI 队列，正在识别作答内容，可到任务控制台查看进度。"
         )
-        self.answer_recognition_worker.finished_ok.connect(
-            self._on_answer_recognition_done
-        )
-        self.answer_recognition_worker.failed.connect(
-            self._on_answer_recognition_failed
-        )
-        self.answer_recognition_worker.finished.connect(
-            self._on_answer_recognition_finished
-        )
-        self.answer_recognition_worker.start()
 
     def _on_answer_recognition_done(self, answer: str) -> None:
         self.answer_recognition_result.setPlainText(answer)
@@ -2556,6 +2694,9 @@ class IntakePage(QWidget):
         self.status_message.emit("正在重新尝试失败的 AI 录题项")
 
     def _on_ai_done(self, job_id: str) -> None:
+        if job_id == self._pending_answer_job_id:
+            self._on_answer_job_done(job_id)
+            return
         if job_id in self._cancelled_ai_jobs:
             return
         if job_id != self.ai_job_id:
@@ -2604,6 +2745,9 @@ class IntakePage(QWidget):
         self.ai_review_ready.emit(job_id, len(self.ai_candidates))
 
     def _on_ai_failed(self, job_id: str, error: str) -> None:
+        if job_id == self._pending_answer_job_id:
+            self._on_answer_job_failed(job_id, error)
+            return
         if job_id in self._cancelled_ai_jobs:
             return
         if job_id != self.ai_job_id:
@@ -2626,9 +2770,21 @@ class IntakePage(QWidget):
         self.image_preview.set_path(candidate.original_image)
         self.source_image_list.clear()
         for path in candidate.source_images:
-            item = QListWidgetItem(path.name)
+            item = QListWidgetItem(_ellipsize_middle(path.name))
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             item.setToolTip(str(path))
+            thumbnail = QPixmap(str(path))
+            if not thumbnail.isNull():
+                item.setIcon(
+                    QIcon(
+                        thumbnail.scaled(
+                            28,
+                            28,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+                )
             self.source_image_list.addItem(item)
         if self.source_image_list.count():
             self.source_image_list.setCurrentRow(0)

@@ -326,13 +326,15 @@ def build_problem_html(
             raw_blocks = json.loads(str(fields.get("question_content_json") or "[]"))
         except json.JSONDecodeError:
             raw_blocks = []
-    block_html: list[str] = []
+    problem_parts: list[str] = []
     for block in raw_blocks:
         if not isinstance(block, Mapping):
             continue
         kind = block.get("type")
         if kind in {"text", "formula"}:
-            block_html.append(_section("题目" if kind == "text" else "公式", str(block.get("content") or "")))
+            problem_parts.append(
+                f'<div class="rich-text">{_render_markdown_tables(str(block.get("content") or ""), empty="", allow_bare_latex=True)}</div>'
+            )
         elif kind == "table" and isinstance(block.get("rows"), list):
             rendered_rows: list[str] = []
             for row in block["rows"]:
@@ -354,26 +356,37 @@ def build_problem_html(
                         f"<td{spans}>{render_math_text(content, empty='', allow_bare_latex=True)}</td>"
                     )
                 rendered_rows.append(f"<tr>{''.join(cells)}</tr>")
-            rows = "".join(rendered_rows)
-            block_html.append(f'<section class="content-card"><h2>表格</h2><table class="problem-table">{rows}</table></section>')
+            problem_parts.append(f'<table class="problem-table">{"".join(rendered_rows)}</table>')
         elif kind == "figure":
             source = str(block.get("image_data_uri") or block.get("image_src") or "")
             caption = str(block.get("content") or "题图")
             if source.startswith(("data:image/", "file:")):
-                block_html.append(
-                    '<section class="content-card figure-card"><h2>题图</h2>'
+                problem_parts.append(
+                    '<div class="figure-block">'
                     f'<img class="problem-figure" src="{html.escape(source, quote=True)}" '
                     f'alt="{html.escape(caption, quote=True)}">'
-                    f'<div class="figure-caption">{html.escape(caption)}</div></section>'
+                    f'<div class="figure-caption">{html.escape(caption)}</div></div>'
                 )
             else:
-                block_html.append(_section("题图", caption or "题图保留在可追溯原图区域中"))
-    body.extend(block_html or [_section("题目", question)])
-    if latex and not _contains_math(question, allow_bare_latex=True):
+                problem_parts.append(f'<div class="rich-text">{html.escape(caption)}</div>')
+    if problem_parts:
+        if latex and not _contains_math(question, allow_bare_latex=True):
+            problem_parts.append(
+                f'<div class="rich-text">{_formula_html(latex, display=True)}</div>'
+            )
         body.append(
-            '<section class="content-card formula-card"><h2>题目公式</h2>'
-            f'<div class="rich-text">{_formula_html(latex, display=True)}</div></section>'
+            '<section class="content-card">'
+            "<h2>题目</h2>"
+            f'<div class="problem-flow">{"".join(problem_parts)}</div>'
+            "</section>"
         )
+    else:
+        body.append(_section("题目", question))
+        if latex and not _contains_math(question, allow_bare_latex=True):
+            body.append(
+                '<section class="content-card formula-card"><h2>题目公式</h2>'
+                f'<div class="rich-text">{_formula_html(latex, display=True)}</div></section>'
+            )
 
     user_answer = str(fields.get("user_answer") or "")
     correct_answer = str(fields.get("correct_answer") or "")
@@ -420,6 +433,7 @@ def build_problem_html(
     border: 1px solid {colors.border}; border-radius: 12px;
   }}
   .rich-text {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
+  .problem-flow {{ display: flex; flex-direction: column; gap: 10px; }}
   .problem-table {{ width: 100%; border-collapse: collapse; }}
   .problem-table td {{ border: 1px solid {colors.border}; padding: 7px 9px; vertical-align: top; }}
   .problem-table th {{ border: 1px solid {colors.border}; padding: 7px 9px; text-align: left; background: {colors.chip_bg}; }}

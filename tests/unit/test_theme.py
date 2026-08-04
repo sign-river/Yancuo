@@ -233,8 +233,8 @@ def test_dropdown_surfaces_share_spacious_floating_panel_states(mode, tokens) ->
     rendered = app_stylesheet(mode)
 
     assert "QMenu::item" in rendered
-    assert "min-height: 38px" in rendered
-    assert "padding: 0 28px 0 16px" in rendered
+    assert "min-height: 40px" in rendered
+    assert "padding: 0 16px" in rendered
     assert "margin: 8px 10px" in rendered
     assert "QMenu::item:selected" in rendered
     assert "QComboBox:on" in rendered

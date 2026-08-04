@@ -19,7 +19,7 @@ from urllib.request import Request
 
 from yancuo_win.cloud.base import CloudCapabilities, CloudProvider, CloudUser, RemoteRelease
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.cloud.cloudbase_auth import get_access_token
+from yancuo_win.cloud.cloudbase_auth import force_refresh_token, get_access_token
 from yancuo_win.infrastructure.safe_http import iter_file_chunks, safe_urlopen
 
 
@@ -61,27 +61,51 @@ class CloudBaseGatewayProvider(CloudProvider):
     def _action(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         self._validate_configuration()
         body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
-        request = Request(
-            f"{self.gateway_url}/actions/{quote(action, safe='/')}",
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self._token()}",
-                "Content-Type": "application/json",
-                "X-CloudBase-Environment-ID": self.environment_id,
-            },
-        )
-        try:
-            with safe_urlopen(request, timeout=60) as response:
-                payload = response.read(_MAX_GATEWAY_RESPONSE_BYTES + 1)
-                if len(payload) > _MAX_GATEWAY_RESPONSE_BYTES:
+        endpoint = f"{self.gateway_url}/actions/{quote(action, safe='/')}"
+
+        def _build_request(access_token: str) -> Request:
+            return Request(
+                endpoint,
+                data=body,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "X-CloudBase-Environment-ID": self.environment_id,
+                },
+            )
+
+        def _open(access_token: str) -> str:
+            with safe_urlopen(_build_request(access_token), timeout=60) as response:
+                body_bytes = response.read(_MAX_GATEWAY_RESPONSE_BYTES + 1)
+                if len(body_bytes) > _MAX_GATEWAY_RESPONSE_BYTES:
                     raise DomainError("CloudBase 网关响应过大")
-                raw = payload.decode("utf-8")
+                return body_bytes.decode("utf-8")
+
+        try:
+            raw = _open(self._token())
         except HTTPError as exc:
             detail = exc.read(_MAX_ERROR_RESPONSE_BYTES).decode(
                 "utf-8", errors="replace"
             )[:300]
-            raise DomainError(f"CloudBase 网关请求失败（HTTP {exc.code}）：{detail}") from exc
+            if exc.code == 401 and "登录已失效" in detail:
+                try:
+                    fresh_token = force_refresh_token(
+                        self.environment_id, self.credential_key
+                    )
+                except DomainError:
+                    raise DomainError(f"CloudBase 网关请求失败（HTTP 401）：{detail}") from exc
+                try:
+                    raw = _open(fresh_token)
+                except HTTPError as retry_exc:
+                    retry_detail = retry_exc.read(_MAX_ERROR_RESPONSE_BYTES).decode(
+                        "utf-8", errors="replace"
+                    )[:300]
+                    raise DomainError(f"CloudBase 网关请求失败（HTTP {retry_exc.code}）：{retry_detail}") from retry_exc
+                except URLError as retry_exc:
+                    raise DomainError(f"无法连接 CloudBase 网关：{retry_exc.reason}") from retry_exc
+            else:
+                raise DomainError(f"CloudBase 网关请求失败（HTTP {exc.code}）：{detail}") from exc
         except URLError as exc:
             raise DomainError(f"无法连接 CloudBase 网关：{exc.reason}") from exc
         try:
@@ -96,7 +120,6 @@ class CloudBaseGatewayProvider(CloudProvider):
         if not isinstance(data, dict):
             raise DomainError("CloudBase 网关 data 格式无效")
         return data
-
     @staticmethod
     def _repo(owner: str, repo: str) -> dict[str, str]:
         return {"owner": owner, "repository": repo}
@@ -223,16 +246,28 @@ class CloudBaseGatewayProvider(CloudProvider):
 
     def acquire_lock(self, owner: str, repo: str, device_id: str) -> bool:
         lease_id = secrets.token_urlsafe(24)
-        acquired = bool(
-            self._action(
-                "locks/acquire",
-                {
-                    **self._repo(owner, repo),
-                    "device_id": device_id,
-                    "lease_id": lease_id,
-                },
-            ).get("acquired")
-        )
+
+        def _try_acquire() -> bool:
+            return bool(
+                self._action(
+                    "locks/acquire",
+                    {
+                        **self._repo(owner, repo),
+                        "device_id": device_id,
+                        "lease_id": lease_id,
+                    },
+                ).get("acquired")
+            )
+
+        try:
+            acquired = _try_acquire()
+        except DomainError as exc:
+            if "资料库不存在" not in str(exc):
+                raise
+            # First write on a fresh CloudBase namespace: create the logical
+            # repository (idempotent) and retry once.
+            self.create_private_repository(repo)
+            acquired = _try_acquire()
         if acquired:
             self._held_locks[(owner, repo)] = (device_id, lease_id)
         return acquired

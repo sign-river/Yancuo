@@ -20,7 +20,7 @@ from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
     CardFrame,
     PageHeader,
-    ToastMessage,
+    ToastStack,
     default_button,
     primary_button,
 )
@@ -73,7 +73,7 @@ class TodayReviewDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
         layout.addWidget(buttons)
-        self.toast = ToastMessage(self)
+        self.toast = ToastStack(self)
         self._render()
 
     def _current(self):

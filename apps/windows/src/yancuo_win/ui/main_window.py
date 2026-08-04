@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -82,7 +84,7 @@ from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
 from yancuo_win.ui.settings_dialog import ServiceSettingsPage
-from yancuo_win.ui.task_center import TaskCenterDialog
+from yancuo_win.ui.task_center import AIJobDetailDialog, TaskCenterDialog
 from yancuo_win.ui.widgets import (
     action_combo_box,
     CardFrame,
@@ -92,7 +94,9 @@ from yancuo_win.ui.widgets import (
     PageHeader,
     SearchInput,
     SoftItemDelegate,
-    ToastMessage,
+    friendly_cloud_error,
+    show_dropdown_menu,
+    ToastStack,
     apply_themed_tree_branches,
     button_row,
     danger_button,
@@ -110,6 +114,19 @@ _PAGE_NOTES = 4
 _PAGE_SETTINGS = 5
 _PAGE_PROBLEM_DETAIL = 6
 _PAGE_AI_COMPLETION = 7
+
+
+def _format_backup_stamp(tag: str) -> str:
+    """Turn a backup tag timestamp into a friendly local time string."""
+    match = re.search(r"(\d{8}T\d{6}Z)", tag or "")
+    if not match:
+        return ""
+    try:
+        stamp = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ")
+        stamp = stamp.replace(tzinfo=timezone.utc).astimezone()
+        return stamp.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return ""
 
 _STATUS_LABELS = {
     "inbox": "收件箱",
@@ -140,6 +157,12 @@ class CatalogAction:
     disabled_hint: str = ""
 
 
+def _profile_choice_label(item: dict[str, object]) -> str:
+    """Friendly label for a cloud profile picker entry."""
+    stamp = _format_backup_stamp(str(item.get("tag") or ""))
+    return f"备份于 {stamp}" if stamp else "云端备份快照"
+
+
 class _InlineQuestionItem(QWidget):
     """One question row with one header and an optional inline preview."""
 
@@ -162,8 +185,15 @@ class _InlineQuestionItem(QWidget):
         self._click_timer.timeout.connect(self._on_toggle)
         self.setObjectName("InlineQuestionItem")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # 固定摘要区：折叠与展开时高度、间距完全一致，标题/标签/箭头不跳动
+        self._summary = QWidget()
+        self._summary.setObjectName("InlineQuestionSummary")
+        summary_layout = QVBoxLayout(self._summary)
+        summary_layout.setContentsMargins(16, 12, 16, 12)
+        summary_layout.setSpacing(8)
         header = QHBoxLayout()
         title = QLabel(problem.title or "(无标题题目)")
         title.setObjectName("QuestionItemTitle")
@@ -182,7 +212,7 @@ class _InlineQuestionItem(QWidget):
         chevron.setToolTip("收起原题预览" if expanded else "展开原题预览")
         chevron.clicked.connect(on_toggle)
         header.addWidget(chevron)
-        layout.addLayout(header)
+        summary_layout.addLayout(header)
         status = _STATUS_LABELS.get(problem.status, problem.status)
         metadata = QHBoxLayout()
         metadata.setSpacing(8)
@@ -195,11 +225,20 @@ class _InlineQuestionItem(QWidget):
             tag.setObjectName("QuestionMetaTag")
             metadata.addWidget(tag)
         metadata.addStretch(1)
-        layout.addLayout(metadata)
+        summary_layout.addLayout(metadata)
+        self._summary.setFixedHeight(72)
+        layout.addWidget(self._summary)
+
         if not expanded:
             self.setFixedHeight(72)
             return
 
+        # 独立详情区：只在这里承载展开后的题目内容
+        self._details = QWidget()
+        self._details.setObjectName("InlineQuestionDetails")
+        details_layout = QVBoxLayout(self._details)
+        details_layout.setContentsMargins(16, 0, 16, 12)
+        details_layout.setSpacing(0)
         reader = MathContentView()
         reader.setObjectName("InlineQuestionPreview")
         reader.set_adaptive_content_height(420, reserve_height=True)
@@ -218,8 +257,8 @@ class _InlineQuestionItem(QWidget):
             show_header=False,
             show_answer_notice=False,
         )
-        layout.addWidget(reader)
-
+        details_layout.addWidget(reader)
+        layout.addWidget(self._details)
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
         self._title_label.setText(
@@ -301,7 +340,7 @@ class MainWindow(QMainWindow):
         self.resize(1320, 840)
         self._build_central()
         self._build_status()
-        self.toast = ToastMessage(self)
+        self.toast = ToastStack(self)
         self.ai_completion_notification = CompletionNotification(self)
         self.ai_completion_notification.activated.connect(
             self._open_completed_ai_review
@@ -739,7 +778,7 @@ class MainWindow(QMainWindow):
         ai_queue = CardFrame()
         ai_queue.add_title("AI 任务与审核队列")
         self.dashboard_ai_queue = ai_queue.add_hint("暂无 AI 任务")
-        open_tasks = primary_button("查看 AI 任务")
+        open_tasks = primary_button("打开任务控制台")
         open_tasks.clicked.connect(self._open_ai_tasks)
         open_note_review = QPushButton("继续笔记审核")
         open_note_review.clicked.connect(lambda: self.note_page._resume_note_draft())
@@ -1466,7 +1505,6 @@ class MainWindow(QMainWindow):
             [
                 ("导出完整备份", self._export_ebpack),
                 ("导入完整备份", self._import_ebpack),
-                None,
                 ("创建 ZIP 备份（旧版兼容）", self._backup),
                 ("从 ZIP 恢复（旧版兼容）", self._restore_backup),
             ],
@@ -1487,7 +1525,6 @@ class MainWindow(QMainWindow):
             [
                 ("导出分享包", self._export_gmshare),
                 ("导出工作区", self._export_workspace),
-                None,
                 ("导入分享包", self._import_gmshare),
                 ("导入工作区", self._import_workspace),
             ],
@@ -1654,6 +1691,10 @@ class MainWindow(QMainWindow):
         return page
 
     @staticmethod
+    def _friendly_cloud_error(error: str) -> str:
+        return friendly_cloud_error(error)
+
+    @staticmethod
     def _credential_available(credential_key: str, environment_key: str = "") -> bool:
         if environment_key and os.environ.get(environment_key, "").strip():
             return True
@@ -1719,12 +1760,20 @@ class MainWindow(QMainWindow):
             self._on_cloud_profiles_failed("云端资料状态格式无效")
             return
         profiles = state.get("remote_profiles", [])
-        lines = [f"本地资料：{state.get('local_profile_id', '未知')}"]
-        lines.extend(
-            f"云端资料：{item['profile_id']} · {item.get('tag', '无快照')}"
-            for item in profiles
-            if isinstance(item, dict) and item.get("profile_id")
-        )
+        local_id = str(state.get("local_profile_id") or "")
+        lines = ["本地资料：当前设备使用的错题本资料（已就绪）"]
+        for item in profiles:
+            if not isinstance(item, dict) or not item.get("profile_id"):
+                continue
+            stamp = _format_backup_stamp(str(item.get("tag") or ""))
+            same = str(item.get("profile_id") or "") == local_id
+            if stamp:
+                label = f"云端资料：备份于 {stamp}"
+            else:
+                label = "云端资料：存在备份快照"
+            if same:
+                label += "（当前资料）"
+            lines.append(label)
         if state.get("requires_takeover"):
             lines.append("发现其他资料：恢复或合并前需明确确认，不会自动覆盖本地数据。")
         if state.get("branch_detected"):
@@ -1737,7 +1786,9 @@ class MainWindow(QMainWindow):
         )
 
     def _on_cloud_profiles_failed(self, error: str) -> None:
-        self.account_remote_summary.setText(f"无法读取云端资料：{error}")
+        self.account_remote_summary.setText(
+            f"无法读取云端资料：{_friendly_cloud_error(error)}"
+        )
 
     def _on_cloud_profile_worker_finished(self) -> None:
         worker = self._cloud_profile_worker
@@ -1756,7 +1807,7 @@ class MainWindow(QMainWindow):
                 self._show_status_toast("云端尚无可恢复的资料快照")
                 return
             labels = [
-                f"{item['profile_id']} · {item.get('tag', '无快照')}"
+                _profile_choice_label(item)
                 for item in profiles
             ]
             choice, accepted = QInputDialog.getItem(
@@ -1812,7 +1863,7 @@ class MainWindow(QMainWindow):
             if not profiles:
                 self._show_status_toast("没有其他云端资料可比较")
                 return
-            labels = [f"{item['profile_id']} · {item.get('tag', '无快照')}" for item in profiles]
+            labels = [_profile_choice_label(item) for item in profiles]
             choice, accepted = QInputDialog.getItem(
                 self, "选择资料", "只比较，不写入当前资料", labels, 0, False
             )
@@ -1858,7 +1909,7 @@ class MainWindow(QMainWindow):
             if not profiles:
                 self._show_status_toast("没有其他云端资料可合并")
                 return
-            labels = [f"{item['profile_id']} · {item.get('tag', '无快照')}" for item in profiles]
+            labels = [_profile_choice_label(item) for item in profiles]
             choice, accepted = QInputDialog.getItem(
                 self, "选择资料", "选择要合并的云端资料", labels, 0, False
             )
@@ -1993,20 +2044,20 @@ class MainWindow(QMainWindow):
 
     def _open_ai_tasks(self) -> None:
         dialog = TaskCenterDialog(self.ai, self.ai_coordinator, self)
-        dialog.job_open_requested.connect(self._open_ai_job)
+        dialog.job_open_requested.connect(self._open_task_job)
         dialog.exec()
 
-    def _open_ai_job(self, job_id: str) -> None:
+    def _open_task_job(self, queue: str, job_id: str) -> None:
         job = self.ai.get_job(job_id)
         if job is None:
-            self._show_status_toast("AI 任务不存在")
+            self._show_status_toast("任务不存在")
             return
-        if job.domain == "question_intake":
+        if queue == "question" and job.domain == "question_intake":
             self.intake_page.ai_job_id = job_id
             self._show_navigation_page(_PAGE_INTAKE)
             self.intake_page._open_current_ai_task()
             return
-        if job.domain == "note_intake":
+        if queue == "note" and job.domain == "note_intake":
             intake = self.note_page.note_intake.get_session(job.context_id)
             self._show_navigation_page(_PAGE_NOTES)
             if intake is not None and intake.status == "review":
@@ -2014,10 +2065,10 @@ class MainWindow(QMainWindow):
             else:
                 self.note_page._show_ai_intake()
                 self.note_page.ai_intake_status.setText(
-                    "任务仍在后台处理中，可从 AI 任务中心查看实时回复。"
+                    "任务仍在后台处理中，可从任务控制台查看实时回复。"
                 )
             return
-        self._open_review()
+        AIJobDetailDialog(self.ai, job_id, self.ai_coordinator, self).exec()
 
     # —— 刷新 ——
 
@@ -3571,12 +3622,24 @@ class MainWindow(QMainWindow):
             self._show_status_toast("云端没有可恢复的备份")
             return
         latest = next((item for item in backups if item.get("is_latest")), None)
-        summary = "云端备份列表：\n" + "\n".join(
-            f"- {item.get('profile_id') or '旧格式'} · {item['tag']}"
-            f"{' (资料最新)' if item.get('is_latest') else ''}"
-            for item in backups[:20]
+
+        def _friendly(item: dict[str, object]) -> str:
+            tag = str(item.get("tag") or "")
+            stamp = _format_backup_stamp(tag)
+            label = f"备份 · {stamp}" if stamp else tag
+            return f"{label}{'（当前资料最新）' if item.get('is_latest') else ''}"
+
+        lines = "\n".join(f"- {_friendly(item)}" for item in backups[:20])
+        box = QMessageBox(self)
+        box.setWindowTitle("确认恢复")
+        box.setText(
+            f"将从云端恢复以下备份到所选文件夹：\n\n{lines}\n\n"
+            "恢复会把云端数据完整导出到该文件夹，不会覆盖当前正在使用的资料。继续吗？"
         )
-        if QMessageBox.question(self, "确认恢复", summary + "\n\n将恢复当前本地资料对应的最新快照到所选目录。继续？") != QMessageBox.StandardButton.Yes:
+        restore_button = box.addButton("恢复", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not restore_button:
             return
         tag = latest["tag"] if latest else "未知"
         self._pending_cloud_restore = (cloud, target, tag)
@@ -3600,7 +3663,15 @@ class MainWindow(QMainWindow):
 
     def _on_cloud_restore_done(self, tag: str, value: object) -> None:
         result = value if isinstance(value, dict) else {}
-        self._show_operation_result("云恢复完成", "云端快照已恢复到独立目录，当前资料没有被覆盖。", details=f"恢复位置：{result.get('target_root', '未知')}\n快照：{tag}\n下一步：设置 YANCUO_DATA_ROOT 后重启。")
+        target = result.get("target_root", "未知")
+        stamp = _format_backup_stamp(tag)
+        details = (
+            f"恢复位置：{target}\n"
+            f"备份时间：{stamp or tag}\n\n"
+            "恢复的数据已完整保存到独立文件夹，当前正在使用的资料没有受影响。\n"
+            "你可以用文件管理器打开上面的文件夹查看恢复出的数据。"
+        )
+        self._show_operation_result("云恢复完成", "云端快照已恢复成功", details=details)
 
     def _show_cloud_restore_failed(self, error: str) -> None:
         self._show_operation_result("云恢复失败", "云端快照未能恢复。", details=error, retry=self._cloud_restore, is_error=True)
@@ -3949,11 +4020,11 @@ class MainWindow(QMainWindow):
 
     def _show_catalog_menu(self) -> None:
         menu = self._build_catalog_action_menu(self.get_manage_actions())
-        menu.exec(
-            self.catalog_menu_button.mapToGlobal(
-                self.catalog_menu_button.rect().bottomLeft()
-            )
+        bind_icon(self.catalog_menu_button, "chevron-up", size=16)
+        menu.aboutToHide.connect(
+            lambda: bind_icon(self.catalog_menu_button, "chevron-down", size=16)
         )
+        show_dropdown_menu(menu, self.catalog_menu_button)
 
     def _catalog_node_context(self) -> CatalogNodeContext:
         """Normalize selection once so both menus use the same node type."""

@@ -64,6 +64,7 @@ from yancuo_win.ui.widgets import (
     ghost_button,
     primary_button,
     set_tab_order_chain,
+    show_dropdown_menu,
 )
 
 _STATUS_LABELS = {
@@ -1085,10 +1086,12 @@ class NotePage(QWidget):
         self.edit_button.clicked.connect(lambda: self._set_mode("edit"))
         self.more_button = ghost_button("更多")
         bind_icon(self.more_button, "more-horizontal")
-        more_menu = QMenu(self.more_button)
-        more_menu.addAction("加入合集", self._edit_note_collections)
-        more_menu.addAction("加入复习计划", self._request_review)
-        self.more_button.setMenu(more_menu)
+        self.more_menu = QMenu(self.more_button)
+        self.more_menu.addAction("加入合集", self._edit_note_collections)
+        self.more_menu.addAction("加入复习计划", self._request_review)
+        self.more_button.clicked.connect(
+            lambda: show_dropdown_menu(self.more_menu, self.more_button)
+        )
         actions.addWidget(self.more_button)
         actions.addStretch(1)
         actions.addWidget(self.read_button)

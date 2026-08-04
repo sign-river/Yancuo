@@ -720,6 +720,7 @@ class ProblemIntakeService:
             "即使只有一道题也使用 problems 数组；不要把多道题拼进同一个题干。",
             "每道题必须同时输出 content_blocks，按原题顺序使用 text、formula、table、figure 四类内容块；question_markdown/question_latex 仍作为兼容降级表示。",
             "text/formula 块使用 content；table 块使用 rows 二维数组。普通单元格为字符串，合并单元格为 {\"content\":\"...\",\"rowspan\":2,\"colspan\":2}；不得猜造看不清的单元格。",
+            "figure 块只用于无法用文字、LaTeX 或表格可靠表达的纯图形内容，例如计算机组成/数据结构/网络等科目中的内存布局图、网络拓扑或结构图、硬件电路图、状态机图、必须看形状才能理解的坐标图等。公式、符号表达式、简单表格和普通文字一律禁止使用 figure，必须用 text/formula/table 块以文字方式表示；不得给单个公式、单个符号或一行文字截图。",
             "figure 块必须给出 source_image_index 和 source_region；source_image_index 是本次输入图片从 0 开始的顺序，source_region 是该图内归一化矩形。函数图、几何图、流程图等只能引用原图区域，禁止重绘。",
             "无法可靠结构化的内容保留在 text 块，并在 uncertain_fields 中指出原因；不能为了结构完整而补写缺失数据或图形标注。",
             "region 是该题在原图中的归一化矩形坐标，左上角为原点，四个值均为 0 到 1；无法判断时使用整图 {\"x\":0,\"y\":0,\"width\":1,\"height\":1}。",
@@ -872,6 +873,30 @@ class ProblemIntakeService:
             len(answer),
         )
         return answer
+
+    def start_user_answer_job(
+        self, image_paths: list[Path], *, keywords: str = ""
+    ) -> AiJob:
+        """Create a queued AI job for user-answer recognition.
+
+        Unlike the synchronous ``recognize_user_answer_images`` helper, this
+        creates a persistent ``AiJob`` so the operation shows up in the AI
+        queue and can be cancelled from the task console.
+        """
+        if not image_paths:
+            raise DomainError("请先选择包含作答的图片")
+        if any(not path.is_file() for path in image_paths):
+            raise DomainError("作答图片不存在")
+        get_provider(self.runtime.settings).validate_configuration()
+        return self.ai.create_background_job(
+            domain="user_answer",
+            context_id="",
+            job_type="user_answer_recognize",
+            config={
+                "image_paths": [str(path) for path in image_paths],
+                "keywords": keywords.strip(),
+            },
+        )
 
     def start_ai(
         self,

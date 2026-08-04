@@ -45,15 +45,20 @@ def test_password_login_saves_session_but_not_password(monkeypatch) -> None:  # 
     assert session.subject == "user-1"
     assert seen["url"] == "https://env-123.api.tcloudbasegateway.com/auth/v1/token"
     assert seen["body"]["grant_type"] == "password"
-    assert "secret" not in saved["cred"]
-    assert CloudBaseSession.from_json(saved["cred"]).refresh_token == "refresh"
+    assert "secret" not in "\n".join(saved.values())
+    assert saved["cred.access"] == "access"
+    assert json.loads(saved["cred.meta"])["refresh_token"] == "refresh"
 
 
 def test_access_token_refresh_rotates_stored_session(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     expired = CloudBaseSession("old", "rotate-me", int(time.time()) - 1, "user-1")
     saved = {}
+
+    def fake_get_secret(key: str) -> str | None:
+        return expired.to_json() if key == "cred" else None
+
     monkeypatch.setattr(
-        "yancuo_win.cloud.cloudbase_auth.get_secret", lambda _key: expired.to_json()
+        "yancuo_win.cloud.cloudbase_auth.get_secret", fake_get_secret
     )
     monkeypatch.setattr(
         "yancuo_win.cloud.cloudbase_auth.set_secret",
@@ -74,14 +79,19 @@ def test_access_token_refresh_rotates_stored_session(monkeypatch) -> None:  # ty
     )
 
     assert get_access_token("env-123", "cred") == "new"
-    assert CloudBaseSession.from_json(saved["cred"]).refresh_token == "new-refresh"
+    assert saved["cred.access"] == "new"
+    assert json.loads(saved["cred.meta"])["refresh_token"] == "new-refresh"
 
 
 def test_access_token_refresh_preserves_unrotated_refresh_token(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     expired = CloudBaseSession("old", "keep-me", int(time.time()) - 1, "user-1")
     saved = {}
+
+    def fake_get_secret(key: str) -> str | None:
+        return expired.to_json() if key == "cred" else None
+
     monkeypatch.setattr(
-        "yancuo_win.cloud.cloudbase_auth.get_secret", lambda _key: expired.to_json()
+        "yancuo_win.cloud.cloudbase_auth.get_secret", fake_get_secret
     )
     monkeypatch.setattr(
         "yancuo_win.cloud.cloudbase_auth.set_secret",
@@ -95,10 +105,10 @@ def test_access_token_refresh_preserves_unrotated_refresh_token(monkeypatch) -> 
     )
 
     assert get_access_token("env-123", "cred") == "new"
-    restored = CloudBaseSession.from_json(saved["cred"])
-    assert restored is not None
-    assert restored.refresh_token == "keep-me"
-    assert restored.subject == "user-1"
+    assert saved["cred.access"] == "new"
+    meta = json.loads(saved["cred.meta"])
+    assert meta["refresh_token"] == "keep-me"
+    assert meta["subject"] == "user-1"
 
 
 def test_concurrent_access_token_refresh_uses_rotating_token_once(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -43,6 +43,7 @@ from yancuo_win.ui.widgets import (
     ghost_button,
     primary_button,
     set_tab_order_chain,
+    show_dropdown_menu,
 )
 from yancuo_win.ui.icons import bind_icon
 
@@ -475,7 +476,7 @@ class ProblemDetailPage(QWidget):
         self.trash_action.triggered.connect(self._request_trash)
         self.restore_action = self.more_menu.addAction("恢复到正式题库")
         self.restore_action.triggered.connect(self._request_restore)
-        self.more_button.setMenu(self.more_menu)
+        self.more_button.clicked.connect(self._show_more_menu)
         self.management_group.layout().addWidget(self.edit_button)
         self.management_group.layout().addWidget(self.more_button)
 
@@ -1017,3 +1018,6 @@ class ProblemDetailPage(QWidget):
     def _request_restore(self) -> None:
         if self.problem_id:
             self.restore_requested.emit(self.problem_id)
+
+    def _show_more_menu(self) -> None:
+        show_dropdown_menu(self.more_menu, self.more_button)

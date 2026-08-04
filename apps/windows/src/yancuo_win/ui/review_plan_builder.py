@@ -31,7 +31,7 @@ from yancuo_win.ui.widgets import (
     SearchInput,
     SoftItemDelegate,
     StatusTag,
-    ToastMessage,
+    ToastStack,
     apply_themed_tree_branches,
     describe_field,
     deferred_view_updates,
@@ -65,7 +65,7 @@ class ReviewPlanBuilder(QWidget):
         self._queue_labels: dict[str, str] = {}
         self._queue_visible_count = 0
         self._build()
-        self.toast = ToastMessage(self)
+        self.toast = ToastStack(self)
         self.reload()
 
     def _build(self) -> None:
@@ -533,12 +533,12 @@ class ReviewPlanBuilder(QWidget):
         if not ids:
             message = "请先从左侧选择题目或笔记，并加入计划草稿。"
             self.status_message.emit(message)
-            self.toast.show_message(message, tone="warning")
+            self.toast.show_error("创建失败", message)
             return
         if not name:
             message = "请填写复习计划名称。"
             self.status_message.emit(message)
-            self.toast.show_message(message, tone="warning")
+            self.toast.show_error("创建失败", message)
             self.plan_name.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         count = len(ids)

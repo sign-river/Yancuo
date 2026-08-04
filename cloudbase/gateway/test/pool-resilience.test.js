@@ -7,17 +7,23 @@ const path = require("node:path");
 
 const gateway = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
 
-test("PostgreSQL pool acquisition has a bounded wait", () => {
+test("RDB RPC calls have a bounded timeout", () => {
   assert.match(
     gateway,
-    /PG_CONNECT_TIMEOUT_MS[\s\S]{0,180}10_000[\s\S]{0,180}60_000/,
+    /RDB_TIMEOUT_MS[\s\S]{0,180}15_000[\s\S]{0,180}60_000/,
   );
-  assert.match(gateway, /connectionTimeoutMillis: PG_CONNECT_TIMEOUT_MS/);
+  assert.match(gateway, /AbortSignal\.timeout\(RDB_TIMEOUT_MS\)/);
 });
 
-test("idle PostgreSQL client errors cannot become unhandled events", () => {
-  assert.match(gateway, /pool\.on\("error", \(error\) =>/);
-  const listener = gateway.slice(gateway.indexOf('pool.on("error"'), gateway.indexOf("const cloud"));
-  assert.match(listener, /error\.name/);
-  assert.doesNotMatch(listener, /error\.message|error\.stack/);
+test("non-2xx RDB responses fail closed without leaking internals", () => {
+  assert.match(gateway, /if \(!rdbResponse\.ok\)/);
+  assert.match(gateway, /fail\(message, 502\)/);
+  assert.match(gateway, /if \(value\.ok !== true\)/);
+  assert.match(gateway, /Number\(value\.status \|\| 400\)/);
+});
+
+test("the gateway no longer depends on a direct PostgreSQL socket", () => {
+  assert.doesNotMatch(gateway, /require\("pg"\)/);
+  assert.doesNotMatch(gateway, /new Pool\(/);
+  assert.doesNotMatch(gateway, /pool\.query/);
 });
