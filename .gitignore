@@ -239,3 +239,6 @@ apps/windows/.yancuo_data_smoke/
 # Node.js
 node_modules/
 
+
+# CloudBase 部署包（构建产物，不提交）
+cloudbase/release/
