@@ -223,6 +223,7 @@ class ProblemChatService:
         conversation_id: str,
         content: str,
         references: Sequence[ProblemReference | dict[str, Any]] = (),
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> ProblemMessage:
         content = content.strip()
         if not content:
@@ -295,7 +296,9 @@ class ProblemChatService:
             session.commit()
 
         try:
-            response = self._request_reply(conversation_id)
+            response = self._request_reply(
+                conversation_id, on_text_delta=on_text_delta
+            )
         except Exception as exc:
             with self._session() as session:
                 failed = session.get(ProblemMessage, user_message_id)
@@ -334,7 +337,9 @@ class ProblemChatService:
             session.expunge(assistant)
             return assistant
 
-    def _request_reply(self, conversation_id: str):
+    def _request_reply(
+        self, conversation_id: str, on_text_delta: Callable[[str], None] | None = None
+    ):
         conversation = self.get_conversation(conversation_id)
         if conversation is None:
             raise DomainError("对话不存在")
@@ -371,6 +376,7 @@ class ProblemChatService:
             messages=messages,
             model=conversation.model or self.runtime.settings.ai.default_text_model,
             timeout_seconds=self.runtime.settings.ai.request_timeout_seconds,
+            on_text_delta=on_text_delta,
         )
 
     def _message_content(

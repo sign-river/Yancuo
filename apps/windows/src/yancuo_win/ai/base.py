@@ -164,6 +164,7 @@ class AIProvider(ABC):
         messages: list[dict[str, Any]],
         model: str,
         timeout_seconds: int,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> ChatCompletionResult:
         raise NotImplementedError(f"{self.name} 不支持题目对话")
 

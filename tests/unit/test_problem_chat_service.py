@@ -40,6 +40,7 @@ class _CapturingChatProvider:
         messages: list[dict[str, Any]],
         model: str,
         timeout_seconds: int,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> ChatCompletionResult:
         del timeout_seconds
         self.requests.append(messages)

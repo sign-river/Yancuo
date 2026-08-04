@@ -143,6 +143,7 @@ class ProblemChatWorker(QThread):
 
     finished_ok = Signal(object)
     failed = Signal(str)
+    text_delta = Signal(str)
 
     def __init__(
         self,
@@ -157,9 +158,19 @@ class ProblemChatWorker(QThread):
         self.conversation_id = conversation_id
         self.content = content
         self.references = references
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def run(self) -> None:
         try:
-            self.finished_ok.emit(self.service.send_message(self.conversation_id, self.content, self.references))
+            result = self.service.send_message(
+                self.conversation_id,
+                self.content,
+                self.references,
+                on_text_delta=self.text_delta.emit,
+            )
+            self.finished_ok.emit(result)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))

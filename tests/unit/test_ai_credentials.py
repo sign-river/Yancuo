@@ -498,5 +498,5 @@ def test_chat_disconnect_uses_chat_specific_retry_instruction(
         api_key_env="FARO_API_KEY",
     )
 
-    with pytest.raises(DomainError, match="自动重试 2 次.*重新发送问题"):
+    with pytest.raises(DomainError, match="AI 流式连接中断"):
         provider.complete_chat(messages=[{"role": "user", "content": "测试"}], model="chat", timeout_seconds=1)

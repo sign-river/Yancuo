@@ -583,13 +583,13 @@ class OpenAICompatibleProvider(AIProvider):
         messages: list[dict[str, Any]],
         model: str,
         timeout_seconds: int,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> ChatCompletionResult:
-        body = self._request_json(
+        body = self._request_stream_json(
             "/chat/completions",
-            method="POST",
             timeout_seconds=timeout_seconds,
             payload={"model": model or "gpt-4o-mini", "temperature": 0.2, "messages": messages},
-            retry_instruction="请检查网络后重新发送问题",
+            on_text_delta=on_text_delta or (lambda _text: None),
         )
         try:
             content = body["choices"][0]["message"]["content"]

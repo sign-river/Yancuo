@@ -168,11 +168,19 @@ class MockProvider(AIProvider):
         )
 
     def complete_chat(
-        self, *, messages: list[dict[str, Any]], model: str, timeout_seconds: int
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        timeout_seconds: int,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> ChatCompletionResult:
         del timeout_seconds
         question = str(messages[-1].get("content") or "") if messages else ""
+        reply = f"（Mock）针对当前题目的讨论：{question[:200]}"
+        if on_text_delta is not None:
+            on_text_delta(reply)
         return ChatCompletionResult(
-            content_markdown=f"（Mock）针对当前题目的讨论：{question[:200]}",
+            content_markdown=reply,
             model=model or "mock-v1",
         )

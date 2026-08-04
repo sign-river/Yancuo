@@ -483,6 +483,24 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 0 12px;
         border-radius: 8px;
     }}
+    QFrame#ChatBubbleUser {{
+        background: {t.list_selected};
+        border: 1px solid {t.hover_border};
+        border-radius: 12px;
+    }}
+    QLabel#ChatBubbleUserText {{
+        color: {t.text};
+        font-size: 14px;
+    }}
+    QFrame#ChatBubbleAssistant {{
+        background: transparent;
+        border: none;
+    }}
+    QFrame#ChatReferenceCard {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+    }}
     QFrame#UncertainCard {{
         background: {t.fallback_bg};
         border: 1px solid {t.hover_border};
