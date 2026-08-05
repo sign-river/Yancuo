@@ -994,7 +994,10 @@ class MathContentView(QWidget):
         )
         if view_width <= 0:
             view_width = max(1, self._view.width())
-        fit_factor = view_width / page.width()
+        # QPdfView renders 1 page point as 96/72 px at 100% (96 dpi), so the
+        # fit factor that makes the page width equal the viewport is:
+        #   fit = viewport / (page_pt * 96/72)
+        fit_factor = view_width / (page.width() * (96.0 / 72.0))
         _logger.debug(
             "pdf zoom apply scale=%.3f fit=%.3f view_w=%d doc_w=%.1f page_h=%.1f",
             self._zoom_scale,
