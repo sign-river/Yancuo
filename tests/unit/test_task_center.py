@@ -1,18 +1,18 @@
-"""Task console three-queue behavior tests."""
+"""Task console status-queue behavior tests."""
 
 from __future__ import annotations
 
 from PySide6.QtWidgets import QApplication
 
 from yancuo_win.data.models import AiJob
-from yancuo_win.ui.task_center import TaskQueuePage, _queue_filter
+from yancuo_win.ui.task_center import TaskQueuePage, _job_label
 
 
-def _job(job_id: str, domain: str) -> AiJob:
+def _job(job_id: str, domain: str, status: str = "running") -> AiJob:
     return AiJob(
         id=job_id,
         job_type="intake",
-        status="running",
+        status=status,
         provider="faro",
         model="",
         prompt_key="",
@@ -36,37 +36,40 @@ class _FakeAI:
         return 0.0
 
 
-def test_queue_filter_partitions_domains() -> None:
-    question = _job("q1", "question_intake")
-    note = _job("n1", "note_intake")
-    completion = _job("c1", "question_completion")
-    assert _queue_filter("question")(question)
-    assert not _queue_filter("question")(note)
-    assert not _queue_filter("question")(completion)
-    assert _queue_filter("note")(note)
-    assert not _queue_filter("note")(question)
-    assert _queue_filter("ai")(question)
-    assert _queue_filter("ai")(note)
-    assert _queue_filter("ai")(completion)
-
-
-def test_console_has_three_queues_and_lists_jobs() -> None:
+def test_console_has_three_status_queues_and_lists_jobs() -> None:
     _ = QApplication.instance() or QApplication([])
-    ai = _FakeAI([_job("q1", "question_intake"), _job("n1", "note_intake"), _job("c1", "question_completion")])
+    ai = _FakeAI([
+        _job("q1", "question_intake", status="running"),
+        _job("q2", "question_intake", status="completed"),
+        _job("n1", "note_intake", status="failed"),
+        _job("c1", "question_completion", status="pending"),
+    ])
     page = TaskQueuePage(ai)
     assert page.tabs.count() == 3
-    assert page.question_pane.list.count() == 1
-    assert page.note_pane.list.count() == 1
-    assert page.ai_pane.list.count() == 3
+    assert [page.tabs.tabText(i) for i in range(3)] == ["进行中", "已完成", "失败"]
+    assert page.active_pane.list.count() == 2  # running + pending
+    assert page.done_pane.list.count() == 1
+    assert page.failed_pane.list.count() == 1
     page.close()
+
+
+def test_job_label_is_user_friendly() -> None:
+    job = _job("q1", "question_intake", status="completed")
+    label = _job_label(job)
+    assert "题目识别" in label
+    assert "已完成" in label
+    assert job.id not in label
+    assert "openai_compatible" not in label
+
 
 def test_refresh_keeps_selected_job() -> None:
     _ = QApplication.instance() or QApplication([])
     ai = _FakeAI([_job("q1", "question_intake"), _job("q2", "question_intake")])
     page = TaskQueuePage(ai)
-    page.question_pane.list.setCurrentRow(1)
-    assert page.question_pane._selected_job_id() == "q2"
+    page.active_pane.list.setCurrentRow(1)
+    assert page.active_pane._selected_job_id() == "q2"
     page.refresh()  # same call the 2s timer performs
-    assert page.question_pane.list.currentItem() is not None
-    assert page.question_pane._selected_job_id() == "q2"
+    assert page.active_pane.list.currentItem() is not None
+    assert page.active_pane._selected_job_id() == "q2"
     page.close()
+

@@ -1213,7 +1213,7 @@ def test_mock_provider_hint_and_task_selection_are_non_blocking(
     assert page.tabs.count() == 3
     assert page.summary.text() != ""
     page._run_selected()  # no selection; must not crash
-    page.question_pane.refresh()
+    page.active_pane.refresh()
 
 
 def test_task_queue_opens_as_embedded_page_not_dialog(

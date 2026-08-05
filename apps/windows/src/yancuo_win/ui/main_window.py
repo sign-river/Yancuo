@@ -84,7 +84,7 @@ from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
 from yancuo_win.ui.settings_dialog import ServiceSettingsPage
-from yancuo_win.ui.task_center import AIJobDetailDialog, TaskQueuePage
+from yancuo_win.ui.task_center import AIJobDetailPage, TaskQueuePage
 from yancuo_win.ui.widgets import (
     action_combo_box,
     CardFrame,
@@ -116,6 +116,7 @@ _PAGE_SETTINGS = 5
 _PAGE_PROBLEM_DETAIL = 6
 _PAGE_AI_COMPLETION = 7
 _PAGE_TASK_QUEUE = 8
+_PAGE_AI_JOB_DETAIL = 9
 
 
 def _format_backup_stamp(tag: str) -> str:
@@ -330,6 +331,7 @@ class MainWindow(QMainWindow):
         self._ctx_buttons: list[QPushButton] = []
         self._detail_return_page = _PAGE_LIBRARY
         self._ai_completion_return_page = _PAGE_LIBRARY
+        self._task_queue_pending = False
         self._sidebar_collapsed = False
         self._sidebar_narrow_open = False
         self._problem_rows: dict[str, Problem] = {}
@@ -406,13 +408,18 @@ class MainWindow(QMainWindow):
             lambda message: self.statusBar().showMessage(message)
         )
         self.intake_page.ai_review_ready.connect(self._show_ai_completion_notification)
-        self.intake_page.dashboard_requested.connect(self._show_dashboard)
-        self.intake_page.library_requested.connect(self._show_library)
+        self.intake_page.dashboard_requested.connect(
+            lambda: self._handle_intake_back("dashboard")
+        )
+        self.intake_page.library_requested.connect(
+            lambda: self._handle_intake_back("library")
+        )
         self.intake_page.open_problem_requested.connect(self._open_problem_from_intake)
         self.stack.addWidget(self.intake_page)
         self.stack.addWidget(self._build_library_page())
         self.stack.addWidget(self._build_review_page())
         self.note_page = NotePage(self.notes, self.ai_coordinator)
+        self.note_page.library_shown.connect(self._handle_note_back)
         self.note_page.status_message.connect(
             lambda message: self.statusBar().showMessage(message)
         )
@@ -457,6 +464,9 @@ class MainWindow(QMainWindow):
         self.task_queue_page = TaskQueuePage(self.ai, self.ai_coordinator)
         self.task_queue_page.job_open_requested.connect(self._open_task_job)
         self.stack.addWidget(self.task_queue_page)
+        self.ai_job_detail_page = AIJobDetailPage(self.ai, self.ai_coordinator)
+        self.ai_job_detail_page.back_requested.connect(self._close_ai_job_detail)
+        self.stack.addWidget(self.ai_job_detail_page)
         layout.addWidget(self.stack, stretch=1)
         root_layout.addLayout(layout, stretch=1)
 
@@ -552,6 +562,7 @@ class MainWindow(QMainWindow):
         return side
 
     def _on_main_nav(self, row: int) -> None:
+        self._task_queue_pending = False
         if row < 0:
             return
         item = self.main_nav.item(row)
@@ -2108,19 +2119,22 @@ class MainWindow(QMainWindow):
         self.task_queue_page.refresh()
         self._show_navigation_page(_PAGE_TASK_QUEUE)
 
-    def _open_task_job(self, queue: str, job_id: str) -> None:
+    def _open_task_job(self, job_id: str) -> None:
+        """从任务队列进入任务；退出时回到任务列表。"""
         job = self.ai.get_job(job_id)
         if job is None:
             self._show_status_toast("任务不存在")
             return
-        if queue == "question" and job.domain == "question_intake":
+        if job.domain == "question_intake":
             self.intake_page.ai_job_id = job_id
             self._show_navigation_page(_PAGE_INTAKE)
+            self._task_queue_pending = True
             self.intake_page._open_current_ai_task()
             return
-        if queue == "note" and job.domain == "note_intake":
+        if job.domain == "note_intake":
             intake = self.note_page.note_intake.get_session(job.context_id)
             self._show_navigation_page(_PAGE_NOTES)
+            self._task_queue_pending = True
             if intake is not None and intake.status == "review":
                 self.note_page._show_draft_preview(intake)
             else:
@@ -2129,7 +2143,29 @@ class MainWindow(QMainWindow):
                     "任务仍在后台处理中，可从任务队列查看实时回复。"
                 )
             return
-        AIJobDetailDialog(self.ai, job_id, self.ai_coordinator, self).exec()
+        self.ai_job_detail_page.open_job(job_id)
+        self.stack.setCurrentIndex(_PAGE_AI_JOB_DETAIL)
+
+    def _handle_intake_back(self, target: str) -> None:
+        """录入页返回：从任务队列进入时回到任务列表，否则按原目标返回。"""
+        if self._task_queue_pending:
+            self._task_queue_pending = False
+            self._show_navigation_page(_PAGE_TASK_QUEUE)
+            return
+        if target == "dashboard":
+            self._show_dashboard()
+        else:
+            self._show_library()
+
+    def _handle_note_back(self) -> None:
+        """笔记页返回笔记库：从任务队列进入时回到任务列表。"""
+        if self._task_queue_pending:
+            self._task_queue_pending = False
+            self._show_navigation_page(_PAGE_TASK_QUEUE)
+
+    def _close_ai_job_detail(self) -> None:
+        """AI 任务详情页返回：回到任务队列。"""
+        self._show_navigation_page(_PAGE_TASK_QUEUE)
 
     # —— 刷新 ——
 

@@ -676,6 +676,7 @@ class NotePage(QWidget):
     status_message = Signal(str)
     notes_changed = Signal()
     add_to_review_requested = Signal(str)
+    library_shown = Signal()
 
     def __init__(
         self,
@@ -1519,6 +1520,7 @@ class NotePage(QWidget):
             if choice != QMessageBox.StandardButton.Discard:
                 return
         self._restore_library_state()
+        self.library_shown.emit()
 
     def _capture_library_state(self, note_id: str | None = None) -> None:
         self._library_state = {
@@ -1652,6 +1654,7 @@ class NotePage(QWidget):
 
     def _show_library(self, *_args, select_note_id: str | None = None) -> None:
         self._restore_library_state(select_note_id=select_note_id)
+        self.library_shown.emit()
 
     def _show_manual_create(self) -> None:
         if self.page_stack.currentWidget() is self.library_page:

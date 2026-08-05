@@ -1,17 +1,14 @@
-"""任务队列页：题目 / 笔记 / AI 三个队列子界面，支持进入任务详情。"""
+"""任务队列页：按进行中 / 已完成 / 失败三个状态子队列查看后台任务，进入任务查看详情。"""
 
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog,
-    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -21,6 +18,7 @@ from PySide6.QtWidgets import (
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.ui.widgets import (
+    IconButton,
     PageHeader,
     SoftItemDelegate,
     danger_button,
@@ -28,54 +26,121 @@ from yancuo_win.ui.widgets import (
     primary_button,
 )
 
-_QUEUE_LABELS = {
-    "question": "题目队列",
-    "note": "笔记队列",
-    "ai": "AI 队列",
+_STATUS_LABELS = {
+    "pending": "排队中",
+    "running": "进行中",
+    "completed": "已完成",
+    "done": "已完成",
+    "failed": "失败",
+    "canceled": "已取消",
+    "cancelled": "已取消",
+}
+_DOMAIN_LABELS = {
+    "question_intake": "题目识别",
+    "note_intake": "笔记识别",
+    "question_completion": "题目补全",
+    "note_completion": "笔记补全",
+    "generic": "后台任务",
+}
+_JOB_TYPE_LABELS = {
+    "intake": "识别录入",
+    "intake_structure": "识别录入",
+    "structure_recognize": "结构识别",
+    "structure": "结构整理",
+    "completion": "AI 补全",
+    "note_extract": "笔记提取",
+    "extract": "内容提取",
+    "user_answer": "作答识别",
+    "chat": "AI 对话",
+}
+_PROVIDER_LABELS = {
+    "openai_compatible": "Faro API",
+    "faro": "Faro API",
+    "mock": "本地模拟",
 }
 
+_ACTIVE_STATUSES = frozenset({"pending", "running"})
+_DONE_STATUSES = frozenset({"completed", "done"})
+_FAILED_STATUSES = frozenset({"failed", "canceled", "cancelled"})
+_QUEUE_TABS = (
+    ("进行中", _ACTIVE_STATUSES, "active"),
+    ("已完成", _DONE_STATUSES, "done"),
+    ("失败", _FAILED_STATUSES, "failed"),
+)
 
-def _queue_filter(queue: str):
-    if queue == "question":
-        return lambda job: job.domain == "question_intake"
-    if queue == "note":
-        return lambda job: job.domain == "note_intake"
-    return lambda job: True
+
+def _status_label(status: str) -> str:
+    return _STATUS_LABELS.get(status, status)
 
 
-def _job_label(job, *, with_domain: bool = False) -> str:
-    domain = f" · {job.domain}" if with_domain and job.domain else ""
+def _domain_label(domain: str) -> str:
+    return _DOMAIN_LABELS.get(domain, domain)
+
+
+def _job_type_label(job_type: str) -> str:
+    return _JOB_TYPE_LABELS.get(job_type, job_type)
+
+
+def _provider_label(provider: str) -> str:
+    return _PROVIDER_LABELS.get(provider, provider)
+
+
+def _job_label(job) -> str:
+    """用户友好的一行任务摘要，不展示原始英文代码与任务 ID。"""
     cost = float(job.estimated_cost or 0.0)
-    return (
-        f"[{job.status}]{domain} {job.job_type} · {job.provider} · "
-        f"{int(job.done_items or 0)}/{int(job.total_items or 0)} · "
-        f"fail={int(job.failed_items or 0)} · "
-        f"cost≈{cost:.4f} · {job.id[:18]}"
-    )
+    parts = [
+        _domain_label(job.domain),
+        _job_type_label(job.job_type),
+        _provider_label(job.provider),
+        _status_label(job.status),
+        f"{int(job.done_items or 0)}/{int(job.total_items or 0)}",
+    ]
+    if int(job.failed_items or 0):
+        parts.append(f"失败 {int(job.failed_items or 0)}")
+    if cost > 0:
+        parts.append(f"费用 ¥{cost:.2f}")
+    return " · ".join(parts)
 
 
-class AIJobDetailDialog(QDialog):
-    """Streaming AI job detail: metadata plus live response text."""
+def _job_detail_summary(job) -> str:
+    """任务详情页与预览区的友好摘要。"""
+    cost = float(job.estimated_cost or 0.0)
+    lines = [
+        f"{_domain_label(job.domain)} · {_job_type_label(job.job_type)} · {_provider_label(job.provider)}",
+        f"状态：{_status_label(job.status)} · 进度：{int(job.done_items or 0)}/{int(job.total_items or 0)}"
+        + (f" · 失败：{int(job.failed_items or 0)}" if int(job.failed_items or 0) else "")
+        + (f" · 费用 ¥{cost:.2f}" if cost > 0 else ""),
+    ]
+    if job.error_message:
+        lines.append(f"错误：{job.error_message}")
+    return "\n".join(lines)
+
+
+class AIJobDetailPage(QWidget):
+    """嵌入式 AI 任务详情页，带返回任务列表动作，替代原弹窗。"""
+
+    back_requested = Signal()
 
     def __init__(
         self,
         ai: AIService,
-        job_id: str,
         coordinator: AIJobCoordinator | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setObjectName("AIJobDetailDialog")
+        self.setObjectName("AIJobDetailPage")
         self.ai = ai
-        self.job_id = job_id
         self.coordinator = coordinator
-        self.setWindowTitle("AI 任务详情")
-        self.resize(680, 520)
+        self.job_id = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(12)
-        layout.addWidget(PageHeader("AI 任务详情", "实时查看 AI 任务的流式回复与执行状态。"))
+        header = PageHeader("AI 任务详情", "实时查看 AI 任务的流式回复与执行状态。")
+        back = IconButton("chevron-left", "返回任务列表")
+        back.clicked.connect(self.back_requested.emit)
+        header.add_leading(back)
+        layout.addWidget(header)
 
         self.meta = QLabel("")
         self.meta.setObjectName("MutedLabel")
@@ -93,68 +158,83 @@ class AIJobDetailDialog(QDialog):
         row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(8)
         refresh = default_button("刷新")
-        refresh.clicked.connect(self._refresh)
+        refresh.clicked.connect(self.refresh)
+        rerun = default_button("重新运行")
+        rerun.clicked.connect(self._rerun)
         cancel_btn = danger_button("取消任务")
         cancel_btn.clicked.connect(self._cancel)
         row.addWidget(refresh)
+        row.addWidget(rerun)
         row.addWidget(cancel_btn)
         row.addStretch(1)
         layout.addWidget(actions)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
-        close_button.setText("关闭")
-        close_button.clicked.connect(self.accept)
-        layout.addWidget(buttons)
-
         self._timer = QTimer(self)
         self._timer.setInterval(800)
-        self._timer.timeout.connect(self._refresh)
-        self._timer.start()
-        self._refresh()
+        self._timer.timeout.connect(self.refresh)
 
-    def _refresh(self) -> None:
+    def open_job(self, job_id: str) -> None:
+        self.job_id = job_id
+        self.refresh()
+        self._timer.start()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self.job_id:
+            self._timer.start()
+            self.refresh()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def refresh(self) -> None:
+        if not self.job_id:
+            self.meta.setText("请选择任务后查看详情。")
+            return
         job = self.ai.get_job(self.job_id)
         if job is None:
             self.meta.setText("任务不存在或已被清理。")
             self._timer.stop()
+            self.response.setPlainText("")
             return
-        self.meta.setText(
-            f"任务：{job.id}\n"
-            f"类型：{job.job_type} · 领域：{job.domain} · 提供商：{job.provider} · 模型：{job.model}\n"
-            f"状态：{job.status} · 进度：{int(job.done_items or 0)}/{int(job.total_items or 0)} · "
-            f"失败：{int(job.failed_items or 0)} · 费用≈{float(job.estimated_cost or 0):.4f} 元"
-        )
-        if job.error_message:
-            self.meta.setText(self.meta.text() + f"\n错误：{job.error_message}")
+        self.meta.setText(_job_detail_summary(job))
         self.response.setPlainText(job.response_text or "")
-        if job.status in ("done", "failed", "canceled", "cancelled"):
+        if job.status in _DONE_STATUSES | _FAILED_STATUSES:
             self._timer.stop()
 
     def _cancel(self) -> None:
         if self.coordinator is not None:
             self.coordinator.cancel(self.job_id)
-            self._refresh()
+            self.refresh()
+
+    def _rerun(self) -> None:
+        if self.coordinator is not None and self.job_id:
+            self.coordinator.enqueue(self.job_id)
+            self._timer.start()
+            self.refresh()
 
 
 class _QueuePane(QWidget):
-    """One queue tab: task list with enter / run / cancel actions."""
+    """一个状态子队列：任务列表 + 预览 + 操作按钮。"""
 
-    open_requested = Signal(str, str)  # (queue, job_id)
+    open_requested = Signal(str)  # job_id
 
     def __init__(
         self,
         ai: AIService,
         coordinator: AIJobCoordinator,
-        queue: str,
+        statuses: frozenset[str],
+        kind: str,
+        tab_label: str,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.ai = ai
         self.coordinator = coordinator
-        self.queue = queue
-        self._with_domain = queue == "ai"
+        self.statuses = statuses
+        self.kind = kind
+        self.tab_label = tab_label
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -162,7 +242,7 @@ class _QueuePane(QWidget):
 
         self.list = QListWidget()
         self.list.setObjectName("DialogItemList")
-        self.list.setAccessibleName(f"{_QUEUE_LABELS[queue]}任务")
+        self.list.setAccessibleName(f"{tab_label}任务")
         self.list.setUniformItemSizes(True)
         self.list.setMouseTracking(True)
         self.list.setItemDelegate(SoftItemDelegate(self.list, minimum_height=40))
@@ -186,35 +266,32 @@ class _QueuePane(QWidget):
         enter.clicked.connect(self._open_selected)
         row.addWidget(refresh)
         row.addWidget(enter)
-        if queue == "ai":
-            run_btn = default_button("运行选中任务")
-            run_btn.clicked.connect(self._run_selected)
+        if kind == "active":
             cancel_btn = danger_button("取消运行中")
             cancel_btn.clicked.connect(self._cancel_running)
-            row.addWidget(run_btn)
             row.addWidget(cancel_btn)
+        elif kind == "failed":
+            rerun = default_button("重新运行")
+            rerun.clicked.connect(self._run_selected)
+            row.addWidget(rerun)
         row.addStretch(1)
         layout.addWidget(actions)
 
     def refresh(self) -> None:
-        # Capture the selection before clearing so the periodic refresh
-        # (every 2s) does not drop the user’s current selection.
+        # 先保存选中项，再清空重建（否则每 2s 定时刷新会丢掉当前选择）
         current = self.list.currentItem()
         selected_job_id = current.data(256) if current is not None else None
         self.list.clear()
-        keep = _queue_filter(self.queue)
         for job in self.ai.list_jobs(limit=100):
-            if not keep(job):
+            if job.status not in self.statuses:
                 continue
-            item = QListWidgetItem(
-                _job_label(job, with_domain=self._with_domain)
-            )
+            item = QListWidgetItem(_job_label(job))
             item.setData(256, job.id)
             self.list.addItem(item)
             if job.id == selected_job_id:
                 self.list.setCurrentItem(item)
         if not self.list.count():
-            empty = QListWidgetItem(f"暂无{_QUEUE_LABELS[self.queue]}任务")
+            empty = QListWidgetItem(f"暂无{self.tab_label}任务")
             empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self.list.addItem(empty)
 
@@ -225,17 +302,23 @@ class _QueuePane(QWidget):
     def _show_selected(self, current, _previous) -> None:
         job_id = current.data(256) if current is not None else None
         job = self.ai.get_job(str(job_id)) if job_id else None
-        self.preview.setPlainText(job.response_text if job else "")
+        if job is None:
+            self.preview.setPlainText("")
+            return
+        self.preview.setPlainText(
+            _job_detail_summary(job) + "\n\n" + (job.response_text or "")
+        )
 
     def _open_selected(self) -> None:
         job_id = self._selected_job_id()
         if job_id:
-            self.open_requested.emit(self.queue, job_id)
+            self.open_requested.emit(job_id)
 
     def _run_selected(self) -> None:
         job_id = self._selected_job_id()
         if job_id:
             self.coordinator.enqueue(job_id)
+            self.refresh()
 
     def _cancel_running(self) -> None:
         job_id = self._selected_job_id()
@@ -245,16 +328,15 @@ class _QueuePane(QWidget):
 
 
 class TaskQueuePage(QWidget):
-    """Embedded task queue page with three queue sub-interfaces.
+    """嵌入式任务队列页，按进行中 / 已完成 / 失败三个状态子队列展示。"""
 
-    Question intake, note intake and AI jobs each get their own tab; the
-    page lives in the main window stack instead of a modal dialog.
-    """
-
-    job_open_requested = Signal(str, str)  # (queue, job_id)
+    job_open_requested = Signal(str)  # job_id
 
     def __init__(
-        self, ai: AIService, coordinator: AIJobCoordinator | None = None, parent=None
+        self,
+        ai: AIService,
+        coordinator: AIJobCoordinator | None = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("TaskQueuePage")
@@ -267,22 +349,21 @@ class TaskQueuePage(QWidget):
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(12)
         layout.addWidget(
-            PageHeader("任务队列", "按题目、笔记、AI 三个队列查看后台任务，进入任务查看详情。")
+            PageHeader("任务队列", "按进行中、已完成、失败三个队列查看后台任务，进入任务查看详情。")
         )
         self.summary = QLabel("")
         self.summary.setObjectName("MutedLabel")
         layout.addWidget(self.summary)
 
         self.tabs = QTabWidget()
-        self.question_pane = _QueuePane(self.ai, self.coordinator, "question", self)
-        self.note_pane = _QueuePane(self.ai, self.coordinator, "note", self)
-        self.ai_pane = _QueuePane(self.ai, self.coordinator, "ai", self)
-        self.question_pane.open_requested.connect(self.job_open_requested)
-        self.note_pane.open_requested.connect(self.job_open_requested)
-        self.ai_pane.open_requested.connect(self.job_open_requested)
-        self.tabs.addTab(self.question_pane, "题目队列")
-        self.tabs.addTab(self.note_pane, "笔记队列")
-        self.tabs.addTab(self.ai_pane, "AI 队列")
+        self.panes: dict[str, _QueuePane] = {}
+        for tab_label, statuses, kind in _QUEUE_TABS:
+            pane = _QueuePane(
+                self.ai, self.coordinator, statuses, kind, tab_label, self
+            )
+            pane.open_requested.connect(self.job_open_requested)
+            self.panes[kind] = pane
+            self.tabs.addTab(pane, tab_label)
         layout.addWidget(self.tabs, stretch=1)
 
         self._timer = QTimer(self)
@@ -290,6 +371,18 @@ class TaskQueuePage(QWidget):
         self._timer.timeout.connect(self.refresh)
 
         self.refresh()
+
+    @property
+    def active_pane(self) -> _QueuePane:
+        return self.panes["active"]
+
+    @property
+    def done_pane(self) -> _QueuePane:
+        return self.panes["done"]
+
+    @property
+    def failed_pane(self) -> _QueuePane:
+        return self.panes["failed"]
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -303,25 +396,17 @@ class TaskQueuePage(QWidget):
     def refresh(self) -> None:
         cost = self.ai.today_cost()
         jobs = self.ai.list_jobs(limit=100)
-        question = sum(1 for j in jobs if j.domain == "question_intake")
-        note = sum(1 for j in jobs if j.domain == "note_intake")
-        ai = len(jobs)
+        active = sum(1 for j in jobs if j.status in _ACTIVE_STATUSES)
+        done = sum(1 for j in jobs if j.status in _DONE_STATUSES)
+        failed = sum(1 for j in jobs if j.status in _FAILED_STATUSES)
         self.summary.setText(
-            f"题目队列 {question} 项 · 笔记队列 {note} 项 · AI 队列 {ai} 项 · "
-            f"今日估算费用 {cost:.4f} 元"
+            f"进行中 {active} 项 · 已完成 {done} 项 · 失败 {failed} 项 · 今日费用 ¥{cost:.2f}"
         )
-        self.question_pane.refresh()
-        self.note_pane.refresh()
-        self.ai_pane.refresh()
+        for pane in self.panes.values():
+            pane.refresh()
 
     def _run_selected(self) -> None:
-        # Kept for compatibility: runs the selected task in the AI pane.
-        self.ai_pane._run_selected()
+        # 兼容入口：重新运行失败队列中选中的任务。
+        self.failed_pane._run_selected()
 
-    def _on_done(self, job_id: str) -> None:
-        QMessageBox.information(self, "完成", f"任务完成：{job_id}\n请打开「AI 审核」查看结果。")
-        self.refresh()
 
-    def _on_fail(self, job_id: str, err: str) -> None:
-        QMessageBox.warning(self, "失败", f"{job_id}\n{err}")
-        self.refresh()
