@@ -850,6 +850,7 @@ class ProblemDetailPage(QWidget):
             tag_names=[tag.name for tag in (problem.tags or [])],
             include_answers=True,
             show_header=False,
+            classic=True,
         )
         self.chat_card.setVisible(False)
         self.reader_stack.setCurrentWidget(self.reader)

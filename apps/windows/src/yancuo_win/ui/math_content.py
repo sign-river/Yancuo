@@ -179,16 +179,46 @@ def _section(
     *,
     empty: str = "（空）",
     allow_bare_latex: bool = True,
+    card_class: str = "",
 ) -> str:
     rendered = _render_markdown_tables(
         value,
         empty=empty,
         allow_bare_latex=allow_bare_latex,
     )
+    extra = f" {card_class}" if card_class else ""
     return (
-        '<section class="content-card">'
+        f'<section class="content-card{extra}">'
         f"<h2>{html.escape(title)}</h2>"
         f'<div class="rich-text">{rendered}</div>'
+        "</section>"
+    )
+
+
+def _classic_problem_card(parts: list[tuple[str, str]]) -> str:
+    """Render the classic textbook 题目 card: title, statement, centered formula, ask."""
+    text_indices = [index for index, (kind, _) in enumerate(parts) if kind == "text"]
+    first_text = text_indices[0] if text_indices else None
+    last_text = text_indices[-1] if text_indices else None
+    statement: list[str] = []
+    formulas: list[str] = []
+    ask: list[str] = []
+    for index, (kind, part) in enumerate(parts):
+        if kind == "formula":
+            formulas.append(f'<div class="formula-block">{part}</div>')
+        elif kind == "text":
+            if index == last_text and index != first_text:
+                ask.append(f'<div class="problem-ask">{part}</div>')
+            else:
+                statement.append(f'<div class="problem-statement">{part}</div>')
+        elif last_text is None or index < last_text:
+            statement.append(part)
+        else:
+            ask.append(part)
+    return (
+        '<section class="content-card problem-card">'
+        '<h2 class="card-section-title">题目</h2>'
+        f'<div class="problem-body">{"".join(statement)}{"".join(formulas)}{"".join(ask)}</div>'
         "</section>"
     )
 
@@ -283,6 +313,7 @@ def build_problem_html(
     show_answer_notice: bool = True,
     fit_content: bool = False,
     compact: bool = False,
+    classic: bool = False,
     theme: str = "light",
 ) -> str:
     """Build a complete, self-contained HTML problem document."""
@@ -330,14 +361,17 @@ def build_problem_html(
             raw_blocks = json.loads(str(fields.get("question_content_json") or "[]"))
         except json.JSONDecodeError:
             raw_blocks = []
-    problem_parts: list[str] = []
+    problem_parts: list[tuple[str, str]] = []
     for block in raw_blocks:
         if not isinstance(block, Mapping):
             continue
         kind = block.get("type")
         if kind in {"text", "formula"}:
             problem_parts.append(
-                f'<div class="rich-text">{_render_markdown_tables(str(block.get("content") or ""), empty="", allow_bare_latex=True)}</div>'
+                (
+                    kind,
+                    f'<div class="rich-text">{_render_markdown_tables(str(block.get("content") or ""), empty="", allow_bare_latex=True)}</div>',
+                )
             )
         elif kind == "table" and isinstance(block.get("rows"), list):
             rendered_rows: list[str] = []
@@ -360,29 +394,47 @@ def build_problem_html(
                         f"<td{spans}>{render_math_text(content, empty='', allow_bare_latex=True)}</td>"
                     )
                 rendered_rows.append(f"<tr>{''.join(cells)}</tr>")
-            problem_parts.append(f'<table class="problem-table">{"".join(rendered_rows)}</table>')
+            problem_parts.append(("table", f'<table class="problem-table">{"".join(rendered_rows)}</table>'))
         elif kind == "figure":
             source = str(block.get("image_data_uri") or block.get("image_src") or "")
             caption = str(block.get("content") or "题图")
             if source.startswith(("data:image/", "file:")):
                 problem_parts.append(
-                    '<div class="figure-block">'
-                    f'<img class="problem-figure" src="{html.escape(source, quote=True)}" '
-                    f'alt="{html.escape(caption, quote=True)}">'
-                    f'<div class="figure-caption">{html.escape(caption)}</div></div>'
+                    (
+                        "figure",
+                        '<div class="figure-block">'
+                        f'<img class="problem-figure" src="{html.escape(source, quote=True)}" '
+                        f'alt="{html.escape(caption, quote=True)}">'
+                        f'<div class="figure-caption">{html.escape(caption)}</div></div>',
+                    )
                 )
             else:
-                problem_parts.append(f'<div class="rich-text">{html.escape(caption)}</div>')
+                problem_parts.append(("text", f'<div class="rich-text">{html.escape(caption)}</div>'))
     if problem_parts:
         if latex and not _contains_math(question, allow_bare_latex=True):
             problem_parts.append(
-                f'<div class="rich-text">{_formula_html(latex, display=True)}</div>'
+                ("formula", f'<div class="rich-text">{_formula_html(latex, display=True)}</div>')
             )
-        body.append(
-            '<section class="content-card">'
-            f'<div class="problem-flow">{"".join(problem_parts)}</div>'
-            "</section>"
-        )
+        if classic:
+            body.append(_classic_problem_card(problem_parts))
+        else:
+            body.append(
+                '<section class="content-card">'
+                f'<div class="problem-flow">{"".join(part for _, part in problem_parts)}</div>'
+                "</section>"
+            )
+    elif classic:
+        legacy_parts: list[tuple[str, str]] = [
+            (
+                "text",
+                f'<div class="rich-text">{_render_markdown_tables(question, empty="（空）", allow_bare_latex=True)}</div>',
+            )
+        ]
+        if latex and not _contains_math(question, allow_bare_latex=True):
+            legacy_parts.append(
+                ("formula", f'<div class="rich-text">{_formula_html(latex, display=True)}</div>')
+            )
+        body.append(_classic_problem_card(legacy_parts))
     else:
         body.append(_section("题目", question))
         if latex and not _contains_math(question, allow_bare_latex=True):
@@ -394,11 +446,12 @@ def build_problem_html(
     user_answer = str(fields.get("user_answer") or "")
     correct_answer = str(fields.get("correct_answer") or "")
     solution = str(fields.get("solution_markdown") or "")
+    detail_class = "detail-card" if classic else ""
     if include_answers:
         if user_answer.strip():
-            body.append(_section("我的作答", user_answer))
-        body.append(_section("正确答案", correct_answer))
-        body.append(_section("解析", solution))
+            body.append(_section("我的作答", user_answer, card_class=detail_class))
+        body.append(_section("正确答案", correct_answer, card_class=detail_class))
+        body.append(_section("解析", solution, card_class=detail_class))
     elif show_answer_notice:
         body.append(
             '<section class="answer-hidden">答案与解析已隐藏，完成思考后再显示。</section>'
@@ -406,7 +459,8 @@ def build_problem_html(
 
     notes = str(fields.get("notes") or "")
     if include_answers and notes.strip():
-        body.append(_section("备注", notes))
+        body.append(_section("备注", notes, card_class="detail-card" if classic else ""))
+    classic_body = ' class="classic-problem"' if classic else ""
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -456,9 +510,42 @@ def build_problem_html(
   }}
   .math-fallback {{ padding: 2px 5px; border-radius: 4px; background: {colors.fallback_bg}; color: {colors.fallback_text}; }}
   .math-fallback-block {{ display: block; padding: 10px; overflow-x: auto; }}
+  body.classic-problem {{ padding: 28px 32px; }}
+  body.classic-problem .content-card {{
+    margin: 0 0 22px; padding: 30px 32px; border-radius: 16px; overflow: hidden;
+  }}
+  body.classic-problem .problem-card {{ min-height: 440px; }}
+  body.classic-problem .card-section-title {{
+    margin: 0 0 22px; font-size: 19px; line-height: 1.4; font-weight: 700;
+  }}
+  body.classic-problem .problem-statement,
+  body.classic-problem .problem-ask {{ font-size: 17px; line-height: 1.85; }}
+  body.classic-problem .problem-card .rich-text {{ overflow-x: hidden; }}
+  body.classic-problem .formula-block {{
+    text-align: center; margin: 58px 0 70px; max-width: 100%;
+    overflow-x: auto; scrollbar-width: none;
+  }}
+  body.classic-problem .formula-block::-webkit-scrollbar {{ display: none; }}
+  body.classic-problem .formula-block .rich-text {{ overflow: visible; }}
+  body.classic-problem .formula-block math {{ font-size: 1.28em; }}
+  body.classic-problem .formula-block math[display="block"] {{
+    display: block; margin: 0 auto; text-align: center;
+  }}
+  body.classic-problem .detail-card h2 {{
+    margin: 0 0 18px; font-size: 19px; line-height: 1.4; font-weight: 700;
+  }}
+  body.classic-problem .detail-card .rich-text {{
+    font-size: 17px; line-height: 1.85; overflow-x: hidden;
+  }}
+  body.classic-problem .detail-card .rich-text math[display="block"] {{
+    display: block; margin: 0.85em auto; text-align: center;
+  }}
+  body.classic-problem .meta-chip, body.classic-problem .tag {{
+    padding: 5px 12px; border-radius: 999px; font-size: 13px; line-height: 1.5;
+  }}
 </style>
 </head>
-<body>{''.join(body)}</body>
+<body{classic_body}>{''.join(body)}</body>
 </html>"""
 
 
@@ -1051,6 +1138,7 @@ class MathContentView(QWidget):
         show_header: bool = True,
         show_answer_notice: bool = True,
         compact: bool = False,
+        classic: bool = False,
     ) -> None:
         self._last_note_render = None
         self._last_fragment_render = None
@@ -1061,6 +1149,7 @@ class MathContentView(QWidget):
             "show_header": show_header,
             "show_answer_notice": show_answer_notice,
             "compact": compact,
+            "classic": classic,
         }
         self._render_last()
 
@@ -1115,6 +1204,7 @@ class MathContentView(QWidget):
             show_answer_notice=self._last_render["show_answer_notice"],
             fit_content=self._content_sized_pdf,
             compact=self._last_render["compact"] or self._compact,
+            classic=self._last_render.get("classic", False),
             theme=current_theme_name(),
         )
         self._schedule_render()
