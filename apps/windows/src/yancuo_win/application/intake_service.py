@@ -720,6 +720,7 @@ class ProblemIntakeService:
             "即使只有一道题也使用 problems 数组；不要把多道题拼进同一个题干。",
             "每道题必须同时输出 content_blocks，按原题顺序使用 text、formula、table、figure 四类内容块；question_markdown/question_latex 仍作为兼容降级表示。",
             "text/formula 块使用 content；table 块使用 rows 二维数组。普通单元格为字符串，合并单元格为 {\"content\":\"...\",\"rowspan\":2,\"colspan\":2}；不得猜造看不清的单元格。",
+            "题干文本（content_blocks 的 text 块与 question_markdown）不要包含题号或序号前缀（如 “12.”、“(1)”、“1.”），除非该序号是题目正文不可分割的部分；纯题号应省略，不要把题号写进题干。",
             "figure 块只用于无法用文字、LaTeX 或表格可靠表达的纯图形内容，例如计算机组成/数据结构/网络等科目中的内存布局图、网络拓扑或结构图、硬件电路图、状态机图、必须看形状才能理解的坐标图等。公式、符号表达式、简单表格和普通文字一律禁止使用 figure，必须用 text/formula/table 块以文字方式表示；不得给单个公式、单个符号或一行文字截图。",
             "figure 块必须给出 source_image_index 和 source_region；source_image_index 是本次输入图片从 0 开始的顺序，source_region 是该图内归一化矩形。函数图、几何图、流程图等只能引用原图区域，禁止重绘。",
             "无法可靠结构化的内容保留在 text 块，并在 uncertain_fields 中指出原因；不能为了结构完整而补写缺失数据或图形标注。",
