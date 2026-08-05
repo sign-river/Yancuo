@@ -380,7 +380,6 @@ def build_problem_html(
             )
         body.append(
             '<section class="content-card">'
-            "<h2>题目</h2>"
             f'<div class="problem-flow">{"".join(problem_parts)}</div>'
             "</section>"
         )
@@ -437,7 +436,9 @@ def build_problem_html(
     border: 1px solid {colors.border}; border-radius: 12px;
   }}
   .rich-text {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
-  .problem-flow {{ display: flex; flex-direction: column; gap: 10px; }}
+  .problem-flow {{ display: block; }}
+  .problem-flow .rich-text {{ margin: 0 0 10px; }}
+  .problem-flow .rich-text:last-child {{ margin-bottom: 0; }}
   .problem-table {{ width: 100%; border-collapse: collapse; }}
   .problem-table td {{ border: 1px solid {colors.border}; padding: 7px 9px; vertical-align: top; }}
   .problem-table th {{ border: 1px solid {colors.border}; padding: 7px 9px; text-align: left; background: {colors.chip_bg}; }}
