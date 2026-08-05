@@ -1175,17 +1175,6 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda _checked=False, target=view: self._set_library_view(target))
             self.library_view_group.addButton(button)
         self.library_browse_button.setChecked(True)
-        self.library_view_combo = QComboBox()
-        self.library_view_combo.setAccessibleName("\u9898\u5e93\u89c6\u56fe")
-        self.library_view_combo.addItem("\u6d4f\u89c8\u9898\u5e93", "browse")
-        self.library_view_combo.addItem("\u5904\u7406\u4e2d\u5fc3", "process")
-        self.library_view_combo.setMinimumWidth(130)
-        self.library_view_combo.setFixedHeight(36)
-        self.library_view_combo.currentIndexChanged.connect(
-            self._on_library_view_combo_changed
-        )
-        # \u4e0b\u62c9\u6846\u4ec5\u4fdd\u7559\u540e\u7aef\u517c\u5bb9\uff0c\u4e0d\u518d\u5c55\u793a\uff1b\u76f4\u63a5\u5c55\u793a\u4e24\u4e2a\u5207\u6362\u6309\u94ae
-        self.library_view_combo.setVisible(False)
         view_switch_layout.addWidget(self.library_browse_button, 1)
         view_switch_layout.addWidget(self.library_process_button, 1)
         tabs.addWidget(search_bar, 1)
@@ -1400,7 +1389,6 @@ class MainWindow(QMainWindow):
         self.refresh_nav()
         self.refresh_problems()
         self.note_page.reload()
-        self._sync_library_view_combo()
 
     def _sync_search_mode_combo(self) -> None:
         combo = getattr(self, "library_search_combo", None)
@@ -1410,13 +1398,6 @@ class MainWindow(QMainWindow):
         combo.setCurrentIndex(1 if self._is_ai_search_mode() else 0)
         combo.blockSignals(False)
 
-    def _sync_library_view_combo(self) -> None:
-        combo = getattr(self, "library_view_combo", None)
-        if combo is None:
-            return
-        combo.blockSignals(True)
-        combo.setCurrentIndex(0 if self._library_view == "browse" else 1)
-        combo.blockSignals(False)
 
     def _on_library_search_combo_changed(self, index: int) -> None:
         mode = self.library_search_combo.itemData(index)
@@ -1428,15 +1409,6 @@ class MainWindow(QMainWindow):
         self.ai_search_button.blockSignals(False)
         self._on_search_mode_changed()
 
-    def _on_library_view_combo_changed(self, index: int) -> None:
-        target = self.library_view_combo.itemData(index)
-        self.library_browse_button.blockSignals(True)
-        self.library_process_button.blockSignals(True)
-        self.library_browse_button.setChecked(target == "browse")
-        self.library_process_button.setChecked(target == "process")
-        self.library_browse_button.blockSignals(False)
-        self.library_process_button.blockSignals(False)
-        self._set_library_view(target)
 
     def _on_library_new_combo_changed(self, index: int) -> None:
         action = self.library_new_combo.itemData(index)
@@ -1583,7 +1555,7 @@ class MainWindow(QMainWindow):
         pack = CardFrame()
         pack.setProperty("surfaceRole", "data")
         pack.add_title("备份与恢复")
-        pack.add_hint("完整备份格式：.ebpack；ZIP 仅用于旧版兼容。")
+        pack.add_hint("完整备份格式：.ebpack。")
         self.local_backup_summary = QLabel("尚未在本次会话中创建完整备份。")
         self.local_backup_summary.setObjectName("MutedLabel")
         self.local_backup_summary.setWordWrap(True)
@@ -1593,13 +1565,11 @@ class MainWindow(QMainWindow):
             [
                 ("导出完整备份", self._export_ebpack),
                 ("导入完整备份", self._import_ebpack),
-                ("创建 ZIP 备份（旧版兼容）", self._backup),
-                ("从 ZIP 恢复（旧版兼容）", self._restore_backup),
             ],
         )
         self.backup_action_combo.setAccessibleName("备份与恢复操作")
         self.backup_action_combo.setAccessibleDescription(
-            "选择完整备份、恢复或旧版 ZIP 操作"
+            "选择完整备份或恢复操作"
         )
         pack.body.addLayout(button_row(self.backup_action_combo))
         workspace.addWidget(pack, 0, 0, 1, 2)
@@ -3508,24 +3478,6 @@ class MainWindow(QMainWindow):
                 is_error=True,
             )
 
-    def _backup(self) -> None:
-        if self._local_backup_worker is not None:
-            self._show_status_toast("已有本机备份任务正在运行")
-            return
-        self._local_backup_worker = CallableWorker(self.services.create_backup, self)
-        self._local_backup_worker.finished_ok.connect(self._on_zip_backup_done)
-        self._local_backup_worker.failed.connect(self._show_zip_backup_failed)
-        self._local_backup_worker.finished.connect(self._on_local_backup_worker_finished)
-        self._local_backup_worker.start()
-
-    def _on_zip_backup_done(self, value: object) -> None:
-        path = Path(str(value))
-        self._set_local_backup_summary(path, "ZIP 本机备份")
-        self._show_operation_result("备份完成", "本机备份已生成。", details=f"保存位置：{path}")
-
-    def _show_zip_backup_failed(self, error: str) -> None:
-        self._show_operation_result("备份失败", "本机备份未能生成。", details=error, retry=self._backup, is_error=True)
-
     def _export_ebpack(self) -> None:
         if self._local_backup_worker is not None:
             self._show_status_toast("已有本机备份任务正在运行")
@@ -3881,33 +3833,6 @@ class MainWindow(QMainWindow):
         if worker is not None:
             worker.deleteLater()
 
-    def _restore_backup(self) -> None:
-        if self._local_restore_worker is not None:
-            self._show_status_toast("已有本机恢复任务正在运行")
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择备份包", str(self.runtime.paths.backup_dir), "Zip (*.zip)"
-        )
-        if not path:
-            return
-        target = QFileDialog.getExistingDirectory(
-            self, "选择恢复到的空数据目录（将写入库与资源）"
-        )
-        if not target:
-            return
-        self._local_restore_worker = CallableWorker(
-            lambda: self.services.restore_backup(Path(path), Path(target)), self
-        )
-        self._local_restore_worker.finished_ok.connect(self._on_zip_restore_done)
-        self._local_restore_worker.failed.connect(self._show_zip_restore_failed)
-        self._local_restore_worker.finished.connect(self._on_local_restore_worker_finished)
-        self._local_restore_worker.start()
-
-    def _on_zip_restore_done(self, root: object) -> None:
-        self._show_operation_result("恢复完成", "旧版 zip 已恢复到独立目录，当前资料没有被覆盖。", details=f"恢复位置：{root}\n下一步：将 YANCUO_DATA_ROOT 指向该目录后重启。")
-
-    def _show_zip_restore_failed(self, error: str) -> None:
-        self._show_operation_result("恢复失败", "旧版 zip 未能恢复。", details=error, retry=self._restore_backup, is_error=True)
     def _open_settings(self) -> None:
         self._show_navigation_page(_PAGE_SETTINGS)
         self.settings_nav.setCurrentRow(1)

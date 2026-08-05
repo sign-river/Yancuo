@@ -81,10 +81,6 @@ class CloudBackupService:
             "profiles": {},
             "aliases": {},
         }
-        # Old installations exposed one repository-wide latest pointer. Keep it
-        # readable but never silently assign it to a newly generated profile.
-        if latest.get("tag"):
-            index["legacy_latest"] = latest
         return index
 
     @staticmethod
@@ -164,7 +160,6 @@ class CloudBackupService:
             ),
             "remote_profiles": remote,
             "requires_takeover": bool(remote_ids - {local, canonical}),
-            "legacy_latest_available": bool(self._profile_index().get("legacy_latest")),
             "aliases": aliases,
         }
 
@@ -314,22 +309,7 @@ class CloudBackupService:
             profile_snapshots[profile_id] = snapshot
             index["updated_at"] = datetime.now(timezone.utc).isoformat()
             index["primary_profile_id"] = profile_id
-            latest = {
-                "format": "graduate-mistake-book-latest",
-                "format_version": 1,
-                "tag": tag,
-                "asset_name": asset_name,
-                "sha256": sha,
-                "uploaded_at": datetime.now(timezone.utc).isoformat(),
-                "device_id": device_id,
-                "database_id": self.runtime.identity.database_id,
-                "schema_version": self.runtime.schema_version,
-                "primary_device": device_id,
-                "size": pack.stat().st_size,
-                "asset": asset_info,
-            }
             # 完整包就绪后才写资料索引；legacy 字段保留给旧客户端读取。
-            index["legacy_latest"] = latest
             self.provider.write_sync_manifest(self.owner, self.repo, index)
             manifest_published = True
             self.runtime.identity = record_snapshot_head(

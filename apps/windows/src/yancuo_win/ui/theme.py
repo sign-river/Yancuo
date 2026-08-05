@@ -1339,10 +1339,6 @@ def app_stylesheet(theme: str = "light") -> str:
         border: 1px solid {t.border};
         border-radius: 8px;
     }}
-    QFrame#ToastMessage {{
-        background: transparent;
-        border: none;
-    }}
 
     QFrame#AppToastCard {{
         background: {t.card};
@@ -1397,36 +1393,6 @@ def app_stylesheet(theme: str = "light") -> str:
         color: {t.text};
     }}
 
-    QFrame#ToastContent {{
-        background: {t.fallback_bg};
-        border: 1px solid {t.border_strong};
-        border-radius: {m.radius_floating}px;
-    }}
-    QFrame#ToastContent[tone="warning"] {{
-        background: {t.fallback_bg};
-        border: 1px solid {t.danger_border};
-    }}
-    QFrame#ToastContent[tone="warning"] QLabel#ToastText {{
-        color: {t.fallback_text};
-        font-weight: 600;
-    }}
-    QFrame#ToastProgressFrame {{
-        background: {t.card};
-        border: 1px solid {t.border_strong};
-        border-bottom-left-radius: {m.radius_floating}px;
-        border-bottom-right-radius: {m.radius_floating}px;
-    }}
-    QProgressBar#ToastProgress {{
-        min-height: 4px;
-        max-height: 4px;
-        border: none;
-        border-radius: 2px;
-        background: {t.progress_bg};
-    }}
-    QProgressBar#ToastProgress::chunk {{
-        border-radius: 2px;
-        background: #7c5cff;
-    }}
     QFrame#CompletionNotification {{
         background: {t.card};
         border: 1px solid {t.border_strong};

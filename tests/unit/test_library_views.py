@@ -187,8 +187,6 @@ def test_data_transfer_actions_are_grouped_in_accessible_dropdowns(
     assert backup_actions == [
         "导出完整备份",
         "导入完整备份",
-        "创建 ZIP 备份（旧版兼容）",
-        "从 ZIP 恢复（旧版兼容）",
     ]
     assert transfer_actions == [
         "导出分享包",
@@ -940,7 +938,6 @@ def test_library_view_buttons_are_separate_and_aligned_with_tree(window: MainWin
     switch = window.library_browse_button.parentWidget()
     # 两个按钮并排放在同一个切换框内，不再使用下拉框
     assert switch is window.library_process_button.parentWidget()
-    assert window.library_view_combo.isHidden()
     # 切换框放在左侧导航面板顶部，与下方知识文件树共用宽度
     assert switch.parent() is window.library_navigation_panel
     assert not window.library_browse_button.isHidden()
