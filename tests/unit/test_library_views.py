@@ -830,7 +830,9 @@ def test_question_preview_toggle_does_not_rebuild_problem_list(
     assert expanded is not None
     reader = expanded.findChild(MathContentView)
     assert reader is not None
-    assert reader.height() == 420
+    # 预览框随内容自适应高度（不再固定为 420）
+    assert reader._content_height_limit == 420
+    assert reader._reserve_content_height is False
 
 
 def test_formula_content_surfaces_use_bounded_adaptive_height(

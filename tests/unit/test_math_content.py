@@ -422,7 +422,7 @@ def test_classic_problem_card_three_part_layout() -> None:
     ask_index = rendered.index("problem-ask", body_start)
     assert statement_index < formula_index < ask_index
     assert 'body.classic-problem .formula-block math[display="block"]' in rendered
-    assert "min-height: 440px" in rendered
+    assert "min-height: 280px" in rendered
 
 
 def test_classic_problem_card_separates_answer_cards() -> None:
@@ -462,6 +462,29 @@ def test_classic_legacy_question_uses_centered_formula_card() -> None:
     assert "formula-block" in rendered
     assert "problem-statement" in rendered
     assert 'class="content-card problem-card"' in rendered
+
+
+def test_classic_compact_preview_uses_tight_spacing() -> None:
+    rendered = build_problem_html(
+        {
+            "title": "预览题",
+            "content_blocks": [
+                {"type": "text", "content": "12. 已知"},
+                {"type": "formula", "content": r"x^2+1"},
+                {"type": "text", "content": "求值。"},
+            ],
+        },
+        classic=True,
+        compact=True,
+    )
+
+    # 紧凑模式：卡片不设最小高，公式上下距缩小，防止预览框留大片空白
+    assert "min-height: 0px" in rendered
+    assert "margin: 22px 0 26px" in rendered
+    assert "padding: 18px 22px" in rendered
+    assert '<div class="problem-statement">' in rendered
+    assert '<div class="formula-block">' in rendered
+    assert '<div class="problem-ask">' in rendered
 
 
 def test_classic_disabled_by_default_keeps_compact_flow() -> None:

@@ -241,7 +241,8 @@ class _InlineQuestionItem(QWidget):
         details_layout.setSpacing(0)
         reader = MathContentView()
         reader.setObjectName("InlineQuestionPreview")
-        reader.set_adaptive_content_height(420, reserve_height=True)
+        # reserve_height=False: 预览框高度随内容自适应，不再固定为最大值留出大片空白
+        reader.set_adaptive_content_height(420, reserve_height=False)
         reader.content_height_changed.connect(self.updateGeometry)
         question_markdown = problem.question_markdown or ""
         if problem.question_latex and problem.question_latex not in question_markdown:
@@ -256,6 +257,8 @@ class _InlineQuestionItem(QWidget):
             include_answers=False,
             show_header=False,
             show_answer_notice=False,
+            classic=True,
+            compact=True,
         )
         details_layout.addWidget(reader)
         layout.addWidget(self._details)

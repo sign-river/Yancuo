@@ -510,38 +510,45 @@ def build_problem_html(
   }}
   .math-fallback {{ padding: 2px 5px; border-radius: 4px; background: {colors.fallback_bg}; color: {colors.fallback_text}; }}
   .math-fallback-block {{ display: block; padding: 10px; overflow-x: auto; }}
-  body.classic-problem {{ padding: 28px 32px; }}
+  body.classic-problem {{ padding: {18 if compact else 28}px {22 if compact else 32}px; }}
   body.classic-problem .content-card {{
-    margin: 0 0 22px; padding: 30px 32px; border-radius: 16px; overflow: hidden;
+    margin: 0 0 {14 if compact else 22}px; padding: {18 if compact else 26}px {22 if compact else 30}px;
+    border-radius: {12 if compact else 16}px; overflow: hidden;
   }}
-  body.classic-problem .problem-card {{ min-height: 440px; }}
+  body.classic-problem .problem-card {{ min-height: {0 if compact else 280}px; }}
   body.classic-problem .card-section-title {{
-    margin: 0 0 22px; font-size: 19px; line-height: 1.4; font-weight: 700;
+    margin: 0 0 {12 if compact else 18}px; font-size: {16 if compact else 19}px;
+    line-height: 1.4; font-weight: 700;
   }}
   body.classic-problem .problem-statement,
-  body.classic-problem .problem-ask {{ font-size: 17px; line-height: 1.85; }}
+  body.classic-problem .problem-ask {{
+    font-size: {15 if compact else 17}px; line-height: {1.7 if compact else 1.85};
+  }}
   body.classic-problem .problem-card .rich-text {{ overflow-x: hidden; }}
   body.classic-problem .formula-block {{
-    text-align: center; margin: 58px 0 70px; max-width: 100%;
-    overflow-x: auto; scrollbar-width: none;
+    text-align: center; margin: {22 if compact else 34}px 0 {26 if compact else 40}px;
+    max-width: 100%; overflow-x: auto; scrollbar-width: none;
   }}
   body.classic-problem .formula-block::-webkit-scrollbar {{ display: none; }}
   body.classic-problem .formula-block .rich-text {{ overflow: visible; }}
-  body.classic-problem .formula-block math {{ font-size: 1.28em; }}
+  body.classic-problem .formula-block math {{ font-size: {1.18 if compact else 1.28}em; }}
   body.classic-problem .formula-block math[display="block"] {{
     display: block; margin: 0 auto; text-align: center;
   }}
   body.classic-problem .detail-card h2 {{
-    margin: 0 0 18px; font-size: 19px; line-height: 1.4; font-weight: 700;
+    margin: 0 0 {12 if compact else 18}px; font-size: {16 if compact else 19}px;
+    line-height: 1.4; font-weight: 700;
   }}
   body.classic-problem .detail-card .rich-text {{
-    font-size: 17px; line-height: 1.85; overflow-x: hidden;
+    font-size: {15 if compact else 17}px; line-height: {1.7 if compact else 1.85};
+    overflow-x: hidden;
   }}
   body.classic-problem .detail-card .rich-text math[display="block"] {{
-    display: block; margin: 0.85em auto; text-align: center;
+    display: block; margin: {'.6em' if compact else '0.85em'} auto; text-align: center;
   }}
   body.classic-problem .meta-chip, body.classic-problem .tag {{
-    padding: 5px 12px; border-radius: 999px; font-size: 13px; line-height: 1.5;
+    padding: {4 if compact else 5}px {10 if compact else 12}px; border-radius: 999px;
+    font-size: {12 if compact else 13}px; line-height: 1.5;
   }}
 </style>
 </head>
