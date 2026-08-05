@@ -1332,6 +1332,7 @@ class IntakePage(QWidget):
         self.ai_files: list[Path] = []
         self.ai_job_id: str | None = None
         self._cancelled_ai_jobs: set[str] = set()
+        self._from_task_queue = False
         self._pending_answer_job_id: str | None = None
         self.coordinator.register_handler("user_answer", self._run_user_answer_job)
         self.region_worker: RegionRecognitionWorker | None = None
@@ -1607,12 +1608,20 @@ class IntakePage(QWidget):
         layout.addLayout(start_row)
         return page
 
+    def _processing_back(self) -> None:
+        """返回：从任务队列进入时直接回任务列表，否则回到上传页。"""
+        if self._from_task_queue:
+            self._from_task_queue = False
+            self.library_requested.emit()
+            return
+        self.show_ai_upload()
+
     def _build_processing(self) -> QWidget:
         page, layout = self._page()
         processing_header = self._header(
             "AI 实时回复",
             "这里展示模型公开输出和处理阶段；返回上传页不会中断任务。",
-            self.show_ai_upload,
+            self._processing_back,
             back_tooltip="返回上传页",
         )
         self.processing_back = processing_header.findChild(IconButton)

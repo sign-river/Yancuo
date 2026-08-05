@@ -98,6 +98,7 @@ class NoteDraftGroupTree(QTreeWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._from_task_queue = False
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
@@ -1909,12 +1910,20 @@ class NotePage(QWidget):
             return
         self._start_note_worker(intake, source_path)
 
+    def _draft_preview_back(self) -> None:
+        """返回：从任务队列进入时直接回任务列表，否则回到 AI 录入页。"""
+        if self._from_task_queue:
+            self._from_task_queue = False
+            self.library_shown.emit()
+            return
+        self._show_ai_intake()
+
     def _show_draft_preview(self, intake: NoteIntakeSession) -> None:
         if self.draft_preview_page is not None:
             self.page_stack.removeWidget(self.draft_preview_page)
             self.draft_preview_page.deleteLater()
         page = NoteDraftPreviewPage(intake, self.note_intake, self)
-        page.back_requested.connect(self._show_ai_intake)
+        page.back_requested.connect(self._draft_preview_back)
         page.confirmed.connect(self._finish_draft_confirmation)
         self.draft_preview_page = page
         self.page_stack.addWidget(page)

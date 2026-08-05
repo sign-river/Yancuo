@@ -564,6 +564,10 @@ class MainWindow(QMainWindow):
 
     def _on_main_nav(self, row: int) -> None:
         self._task_queue_pending = False
+        if hasattr(self, "intake_page"):
+            self.intake_page._from_task_queue = False
+        if hasattr(self, "note_page"):
+            self.note_page._from_task_queue = False
         if row < 0:
             return
         item = self.main_nav.item(row)
@@ -2130,12 +2134,14 @@ class MainWindow(QMainWindow):
             self.intake_page.ai_job_id = job_id
             self._show_navigation_page(_PAGE_INTAKE)
             self._task_queue_pending = True
+            self.intake_page._from_task_queue = True
             self.intake_page._open_current_ai_task()
             return
         if job.domain == "note_intake":
             intake = self.note_page.note_intake.get_session(job.context_id)
             self._show_navigation_page(_PAGE_NOTES)
             self._task_queue_pending = True
+            self.note_page._from_task_queue = True
             if intake is not None and intake.status == "review":
                 self.note_page._show_draft_preview(intake)
             else:
@@ -2151,6 +2157,7 @@ class MainWindow(QMainWindow):
         """录入页返回：从任务队列进入时回到任务列表，否则按原目标返回。"""
         if self._task_queue_pending:
             self._task_queue_pending = False
+            self.intake_page._from_task_queue = False
             self._show_navigation_page(_PAGE_TASK_QUEUE)
             return
         if target == "dashboard":
@@ -2162,6 +2169,7 @@ class MainWindow(QMainWindow):
         """笔记页返回笔记库：从任务队列进入时回到任务列表。"""
         if self._task_queue_pending:
             self._task_queue_pending = False
+            self.note_page._from_task_queue = False
             self._show_navigation_page(_PAGE_TASK_QUEUE)
 
     def _close_ai_job_detail(self) -> None:
