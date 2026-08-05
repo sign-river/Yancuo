@@ -33,7 +33,7 @@ from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
 from yancuo_win.ui.math_content import MathContentView
-from yancuo_win.ui.task_center import TaskCenterDialog
+from yancuo_win.ui.task_center import TaskQueuePage
 from yancuo_win.ui.widgets import ChevronComboBox, SoftItemDelegate, ThemedTreeBranchStyle
 
 
@@ -149,7 +149,7 @@ def test_settings_page_consolidates_account_services_and_data(
     labels = [
         window.main_nav.item(row).text() for row in range(window.main_nav.count())
     ]
-    assert labels == ["工作台", "题库", "笔记", "复习", "设置"]
+    assert labels == ["工作台", "题库", "笔记", "复习", "任务队列", "设置"]
 
     items = window.main_nav.findItems("设置", Qt.MatchFlag.MatchExactly)
     assert len(items) == 1
@@ -233,7 +233,7 @@ def test_navigation_shortcuts_and_search_focus_are_discoverable(
     shortcuts = {
         shortcut.key().toString(): shortcut for shortcut in window.navigation_shortcuts
     }
-    assert set(shortcuts) == {"Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+,"}
+    assert set(shortcuts) == {"Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+,"}
     assert window.main_nav.item(1).toolTip() == "题库（Ctrl+2）"
 
     QTest.keyClick(window, Qt.Key.Key_3, Qt.KeyboardModifier.ControlModifier)
@@ -1178,12 +1178,20 @@ def test_mock_provider_hint_and_task_selection_are_non_blocking(
     settings._test_ai_connection()
     assert messages[-1] == "Mock 不访问网络；连接测试请先选择 Faro API"
 
-    dialog = TaskCenterDialog(window.ai)
-    assert dialog.tabs.count() == 3
-    assert dialog.summary.text() != ""
-    dialog._run_selected()  # no selection; must not crash
-    dialog.question_pane.refresh()
-    dialog.close()
+    page = window.task_queue_page
+    assert page.tabs.count() == 3
+    assert page.summary.text() != ""
+    page._run_selected()  # no selection; must not crash
+    page.question_pane.refresh()
+
+
+def test_task_queue_opens_as_embedded_page_not_dialog(
+    window: MainWindow,
+) -> None:
+    window._open_task_queue()
+    assert window.stack.currentWidget() is window.task_queue_page
+    assert window.stack.currentIndex() == window.stack.indexOf(window.task_queue_page)
+    assert window.main_nav.currentItem().text() == "任务队列"
 
 
 def test_settings_expose_loading_failure_disabled_and_permission_states(
@@ -1270,7 +1278,7 @@ def test_unsaved_settings_require_confirmation_before_leaving(
     window: MainWindow,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window.main_nav.setCurrentRow(4)
+    window.main_nav.setCurrentRow(5)
     settings = window.ai_settings_page
     assert not settings.apply_ai_button.isEnabled()
     settings.ai_model.setCurrentText("changed-model")

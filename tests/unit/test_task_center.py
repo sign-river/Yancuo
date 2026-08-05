@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QApplication
 
 from yancuo_win.data.models import AiJob
-from yancuo_win.ui.task_center import TaskCenterDialog, _queue_filter
+from yancuo_win.ui.task_center import TaskQueuePage, _queue_filter
 
 
 def _job(job_id: str, domain: str) -> AiJob:
@@ -53,9 +53,9 @@ def test_queue_filter_partitions_domains() -> None:
 def test_console_has_three_queues_and_lists_jobs() -> None:
     app = QApplication.instance() or QApplication([])
     ai = _FakeAI([_job("q1", "question_intake"), _job("n1", "note_intake"), _job("c1", "question_completion")])
-    dialog = TaskCenterDialog(ai)
-    assert dialog.tabs.count() == 3
-    assert dialog.question_pane.list.count() == 1
-    assert dialog.note_pane.list.count() == 1
-    assert dialog.ai_pane.list.count() == 3
-    dialog.close()
+    page = TaskQueuePage(ai)
+    assert page.tabs.count() == 3
+    assert page.question_pane.list.count() == 1
+    assert page.note_pane.list.count() == 1
+    assert page.ai_pane.list.count() == 3
+    page.close()

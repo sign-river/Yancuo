@@ -1,4 +1,4 @@
-"""任务控制台：题目 / 笔记 / AI 三队列，支持进入任务详情。"""
+"""任务队列页：题目 / 笔记 / AI 三个队列子界面，支持进入任务详情。"""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class AIJobDetailDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setObjectName("TaskCenterDialog")
+        self.setObjectName("AIJobDetailDialog")
         self.ai = ai
         self.job_id = job_id
         self.coordinator = coordinator
@@ -245,8 +245,12 @@ class _QueuePane(QWidget):
             self.refresh()
 
 
-class TaskCenterDialog(QDialog):
-    """Console with three queues: question intake, note intake and AI jobs."""
+class TaskQueuePage(QWidget):
+    """Embedded task queue page with three queue sub-interfaces.
+
+    Question intake, note intake and AI jobs each get their own tab; the
+    page lives in the main window stack instead of a modal dialog.
+    """
 
     job_open_requested = Signal(str, str)  # (queue, job_id)
 
@@ -254,17 +258,17 @@ class TaskCenterDialog(QDialog):
         self, ai: AIService, coordinator: AIJobCoordinator | None = None, parent=None
     ) -> None:
         super().__init__(parent)
-        self.setObjectName("TaskCenterDialog")
+        self.setObjectName("TaskQueuePage")
         self.ai = ai
         self.coordinator = coordinator or AIJobCoordinator(ai, self)
-        self.setWindowTitle("任务控制台")
+        self.setWindowTitle("任务队列")
         self.resize(760, 520)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(12)
         layout.addWidget(
-            PageHeader("任务控制台", "按题目、笔记、AI 三个队列查看后台任务，进入任务查看详情。")
+            PageHeader("任务队列", "按题目、笔记、AI 三个队列查看后台任务，进入任务查看详情。")
         )
         self.summary = QLabel("")
         self.summary.setObjectName("MutedLabel")
@@ -282,14 +286,20 @@ class TaskCenterDialog(QDialog):
         self.tabs.addTab(self.ai_pane, "AI 队列")
         layout.addWidget(self.tabs, stretch=1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
-        close_button.setText("关闭")
-        close_button.clicked.connect(self.accept)
-        layout.addWidget(buttons)
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self.refresh)
 
         self.refresh()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._timer.stop()
+        super().hideEvent(event)
 
     def refresh(self) -> None:
         cost = self.ai.today_cost()

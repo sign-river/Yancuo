@@ -84,7 +84,7 @@ from yancuo_win.ui.problem_editor import ProblemEditorDialog
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
 from yancuo_win.ui.settings_dialog import ServiceSettingsPage
-from yancuo_win.ui.task_center import AIJobDetailDialog, TaskCenterDialog
+from yancuo_win.ui.task_center import AIJobDetailDialog, TaskQueuePage
 from yancuo_win.ui.widgets import (
     action_combo_box,
     CardFrame,
@@ -115,6 +115,7 @@ _PAGE_NOTES = 4
 _PAGE_SETTINGS = 5
 _PAGE_PROBLEM_DETAIL = 6
 _PAGE_AI_COMPLETION = 7
+_PAGE_TASK_QUEUE = 8
 
 
 def _format_backup_stamp(tag: str) -> str:
@@ -453,6 +454,9 @@ class MainWindow(QMainWindow):
         )
         self.ai_completion_page.accepted.connect(self._close_ai_completion)
         self.stack.addWidget(self.ai_completion_page)
+        self.task_queue_page = TaskQueuePage(self.ai, self.ai_coordinator)
+        self.task_queue_page.job_open_requested.connect(self._open_task_job)
+        self.stack.addWidget(self.task_queue_page)
         layout.addWidget(self.stack, stretch=1)
         root_layout.addLayout(layout, stretch=1)
 
@@ -521,13 +525,14 @@ class MainWindow(QMainWindow):
         self.main_nav = QListWidget()
         self.main_nav.setObjectName("MainNav")
         self.main_nav.setAccessibleName("主导航")
-        self.main_nav.setAccessibleDescription("使用上下方向键切换工作台、题库、笔记、复习和设置")
+        self.main_nav.setAccessibleDescription("使用上下方向键切换工作台、题库、笔记、复习、任务队列和设置")
         self.main_nav.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         for label, page, shortcut in (
             ("工作台", _PAGE_DASHBOARD, "Ctrl+1"),
             ("题库", _PAGE_LIBRARY, "Ctrl+2"),
             ("笔记", _PAGE_NOTES, "Ctrl+3"),
             ("复习", _PAGE_REVIEW, "Ctrl+4"),
+            ("任务队列", _PAGE_TASK_QUEUE, "Ctrl+5"),
             ("设置", _PAGE_SETTINGS, "Ctrl+,"),
         ):
             item = QListWidgetItem(label)
@@ -576,6 +581,8 @@ class MainWindow(QMainWindow):
             self._refresh_focus_pages()
         elif page == _PAGE_NOTES:
             self.note_page.reload()
+        elif page == _PAGE_TASK_QUEUE:
+            self.task_queue_page.refresh()
         elif page == _PAGE_SETTINGS:
             self._refresh_focus_pages()
             self._refresh_account_page()
@@ -710,6 +717,7 @@ class MainWindow(QMainWindow):
             ("打开题库", "Ctrl+2", _PAGE_LIBRARY),
             ("打开笔记", "Ctrl+3", _PAGE_NOTES),
             ("打开复习", "Ctrl+4", _PAGE_REVIEW),
+            ("打开任务队列", "Ctrl+5", _PAGE_TASK_QUEUE),
             ("打开设置", "Ctrl+,", _PAGE_SETTINGS),
         )
         self.navigation_shortcuts: list[QShortcut] = []
@@ -780,10 +788,10 @@ class MainWindow(QMainWindow):
         row.addWidget(review, stretch=1)
         layout.addLayout(row)
         ai_queue = CardFrame()
-        ai_queue.add_title("AI 任务与审核队列")
+        ai_queue.add_title("任务队列")
         self.dashboard_ai_queue = ai_queue.add_hint("暂无 AI 任务")
-        open_tasks = primary_button("打开任务控制台")
-        open_tasks.clicked.connect(self._open_ai_tasks)
+        open_tasks = primary_button("打开任务队列")
+        open_tasks.clicked.connect(self._open_task_queue)
         open_note_review = QPushButton("继续笔记审核")
         open_note_review.clicked.connect(lambda: self.note_page._resume_note_draft())
         ai_queue.body.addLayout(button_row(open_tasks, open_note_review))
@@ -2114,10 +2122,10 @@ class MainWindow(QMainWindow):
         )
         self.data_path_label.setText(str(self.runtime.paths.root))
 
-    def _open_ai_tasks(self) -> None:
-        dialog = TaskCenterDialog(self.ai, self.ai_coordinator, self)
-        dialog.job_open_requested.connect(self._open_task_job)
-        dialog.exec()
+    def _open_task_queue(self) -> None:
+        """Open the embedded task queue page instead of a modal dialog."""
+        self.task_queue_page.refresh()
+        self._show_navigation_page(_PAGE_TASK_QUEUE)
 
     def _open_task_job(self, queue: str, job_id: str) -> None:
         job = self.ai.get_job(job_id)
@@ -2137,7 +2145,7 @@ class MainWindow(QMainWindow):
             else:
                 self.note_page._show_ai_intake()
                 self.note_page.ai_intake_status.setText(
-                    "任务仍在后台处理中，可从任务控制台查看实时回复。"
+                    "任务仍在后台处理中，可从任务队列查看实时回复。"
                 )
             return
         AIJobDetailDialog(self.ai, job_id, self.ai_coordinator, self).exec()

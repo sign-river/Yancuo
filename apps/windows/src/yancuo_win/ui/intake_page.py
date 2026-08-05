@@ -2076,7 +2076,7 @@ class IntakePage(QWidget):
         self.answer_recognize_button.setText("已加入队列")
         self.coordinator.enqueue(job.id)
         self.answer_recognition_status.setText(
-            "已加入 AI 队列，正在识别作答内容，可到任务控制台查看进度。"
+            "已加入 AI 队列，正在识别作答内容，可到任务队列查看进度。"
         )
 
     def _on_answer_recognition_done(self, answer: str) -> None:
