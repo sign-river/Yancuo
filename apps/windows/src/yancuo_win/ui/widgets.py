@@ -630,11 +630,8 @@ class AppToast(QFrame):
         self.progress.setValue(self._duration_ms)
         card_layout.addWidget(self.progress)
 
-        shadow = QGraphicsDropShadowEffect(self.card)
-        shadow.setBlurRadius(22)
-        shadow.setOffset(0, 5)
-        shadow.setColor(QColor(15, 23, 42, 46))
-        self.card.setGraphicsEffect(shadow)
+        # 单层 QGraphicsOpacityEffect 即可；嵌套 shadow 会触发
+        # "one painter at a time" / Painter not active 冲突
 
         outer.addWidget(self.card)
 
