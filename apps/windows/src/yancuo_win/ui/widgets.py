@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QProgressBar,
     QPushButton,
     QProxyStyle,
@@ -279,6 +280,33 @@ class ScrollSafeDoubleSpinBox(QDoubleSpinBox):
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         event.ignore()
+
+
+class FineScrollListWidget(QListWidget):
+    """QListWidget whose mouse wheel scrolls by a small fixed step.
+
+    Stock item views jump several rows per wheel notch, which makes long
+    lists hard to locate.  This subclass scrolls one short row-height per
+    notch and scales trackpad pixel deltas down for finer control.
+    """
+
+    _WHEEL_STEP_PX = 72
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        pixel = event.pixelDelta().y()
+        if pixel:
+            step = max(1, round(abs(pixel) * 0.6))
+            direction = 1 if pixel > 0 else -1
+        else:
+            angle = event.angleDelta().y()
+            if not angle:
+                super().wheelEvent(event)
+                return
+            direction = 1 if angle > 0 else -1
+            step = self._WHEEL_STEP_PX
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.value() - direction * step)
+        event.accept()
 
 
 class SoftItemDelegate(QStyledItemDelegate):

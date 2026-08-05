@@ -90,6 +90,7 @@ from yancuo_win.ui.widgets import (
     CardFrame,
     ConfirmDialog,
     CompletionNotification,
+    FineScrollListWidget,
     IconButton,
     PageHeader,
     SearchInput,
@@ -1284,7 +1285,7 @@ class MainWindow(QMainWindow):
         list_header_layout.addLayout(row)
         list_header_layout.addWidget(self.library_list_hint)
         center_layout.addWidget(list_header)
-        self.problem_list = QListWidget()
+        self.problem_list = FineScrollListWidget()
         self.problem_list.setObjectName("ProblemList")
         self.problem_list.setAccessibleName("题目列表")
         self.problem_list.setAccessibleDescription("使用方向键选择题目，按回车打开详情")
