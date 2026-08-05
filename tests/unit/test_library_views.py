@@ -830,7 +830,7 @@ def test_question_preview_toggle_does_not_rebuild_problem_list(
     reader = expanded.findChild(MathContentView)
     assert reader is not None
     # 预览框随内容自适应高度（不再固定为 420）
-    assert reader._content_height_limit == 420
+    assert reader._content_height_limit is None
     assert reader._reserve_content_height is False
 
 
@@ -843,7 +843,7 @@ def test_formula_content_surfaces_use_bounded_adaptive_height(
     assert expanded is not None
     inline_reader = expanded.findChild(MathContentView)
     assert inline_reader is not None
-    assert inline_reader._content_height_limit == 420
+    assert inline_reader._content_height_limit is None
 
     assert window.problem_detail_page.reader.fit_content_height_args == ()
     assert window.problem_detail_page.reader.fit_content_height_kwargs == {
