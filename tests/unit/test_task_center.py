@@ -59,3 +59,14 @@ def test_console_has_three_queues_and_lists_jobs() -> None:
     assert page.note_pane.list.count() == 1
     assert page.ai_pane.list.count() == 3
     page.close()
+
+def test_refresh_keeps_selected_job() -> None:
+    app = QApplication.instance() or QApplication([])
+    ai = _FakeAI([_job("q1", "question_intake"), _job("q2", "question_intake")])
+    page = TaskQueuePage(ai)
+    page.question_pane.list.setCurrentRow(1)
+    assert page.question_pane._selected_job_id() == "q2"
+    page.refresh()  # same call the 2s timer performs
+    assert page.question_pane.list.currentItem() is not None
+    assert page.question_pane._selected_job_id() == "q2"
+    page.close()

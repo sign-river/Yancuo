@@ -198,11 +198,11 @@ class _QueuePane(QWidget):
         layout.addWidget(actions)
 
     def refresh(self) -> None:
-        self.list.clear()
-        selected_job_id = None
+        # Capture the selection before clearing so the periodic refresh
+        # (every 2s) does not drop the user’s current selection.
         current = self.list.currentItem()
-        if current is not None:
-            selected_job_id = current.data(256)
+        selected_job_id = current.data(256) if current is not None else None
+        self.list.clear()
         keep = _queue_filter(self.queue)
         for job in self.ai.list_jobs(limit=100):
             if not keep(job):
