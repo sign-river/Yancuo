@@ -163,10 +163,10 @@ class ContentBlocksEditor(QWidget):
         for label, value in (("文本", "text"), ("公式", "formula"), ("表格", "table"), ("题图", "figure")):
             self.kind.addItem(label, value)
         self.content = FocusAwareTextEdit()
-        self.content.setMaximumHeight(100)
+        self.content.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.content.setPlaceholderText("文本、公式或题图说明")
         self.table_rows = FocusAwareTextEdit()
-        self.table_rows.setMaximumHeight(130)
+        self.table_rows.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table_rows.setPlaceholderText(
             "每行一行、制表符分隔；合并单元格可直接填写 rows JSON"
         )
@@ -1104,12 +1104,10 @@ class ProblemForm(QWidget):
             )
             one_line_height = line_height + 24
             target_height = max(one_line_height, content_height + 24)
-            maximum = int(editor.property("contentMaxHeight"))
-            editor.setFixedHeight(min(maximum, target_height))
+            # 文本框随内容长高，由外层面板滚动；不再出现内嵌滚动条
+            editor.setFixedHeight(target_height)
             editor.setVerticalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAsNeeded
-                if target_height > maximum
-                else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
             )
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
