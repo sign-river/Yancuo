@@ -14,7 +14,18 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QBuffer,
+    QEvent,
+    QIODevice,
+    QObject,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QIcon,
@@ -958,6 +969,19 @@ class ProblemForm(QWidget):
         self._form_target.addWidget(answer)
         self._form_target.addStretch(1)
 
+        if self.show_render_previews and self.render_view is not None:
+            self._preview_scroll_filters: list[QObject] = []
+            for widget, key in (
+                (self.title_edit, "question"),
+                (self.question, "question"),
+                (self.user_answer, "user_answer"),
+                (self.correct_answer, "correct_answer"),
+                (self.solution, "solution"),
+                (self.notes, "notes"),
+                (self.tags, "question"),
+            ):
+                self._connect_preview_scroll(widget, key)
+
         self.subject.currentIndexChanged.connect(self._reload_chapters)
         self.chapter.currentIndexChanged.connect(
             self._sync_taxonomy_hint_visibility
@@ -1105,6 +1129,21 @@ class ProblemForm(QWidget):
         else:
             button.setMinimumSize(0, 0)
             button.setMaximumSize(16777215, 16777215)
+
+    def _connect_preview_scroll(self, widget: QWidget, key: str) -> None:
+        """点击编辑框时，把左侧预览滚动到该字段对应的小节。"""
+        preview = self.render_view
+
+        class _FocusScrollFilter(QObject):
+            def eventFilter(self, obj, event):  # noqa: N802, ANN001
+                if event.type() == QEvent.Type.FocusIn:
+                    preview.scroll_to_section(key)
+                return False
+
+        if preview is not None:
+            filter_obj = _FocusScrollFilter(self)
+            widget.installEventFilter(filter_obj)
+            self._preview_scroll_filters.append(filter_obj)
 
     def reload_catalog(self) -> None:
         current = self.subject.currentData()

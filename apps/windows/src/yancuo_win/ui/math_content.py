@@ -180,6 +180,7 @@ def _section(
     empty: str = "（空）",
     allow_bare_latex: bool = True,
     card_class: str = "",
+    section_key: str | None = None,
 ) -> str:
     rendered = _render_markdown_tables(
         value,
@@ -187,8 +188,9 @@ def _section(
         allow_bare_latex=allow_bare_latex,
     )
     extra = f" {card_class}" if card_class else ""
+    data = f' data-section="{section_key}"' if section_key else ""
     return (
-        f'<section class="content-card{extra}">'
+        f'<section class="content-card{extra}"{data}>'
         f"<h2>{html.escape(title)}</h2>"
         f'<div class="rich-text">{rendered}</div>'
         "</section>"
@@ -216,7 +218,7 @@ def _classic_problem_card(parts: list[tuple[str, str]]) -> str:
         else:
             ask.append(part)
     return (
-        '<section class="content-card problem-card">'
+        '<section class="content-card problem-card" data-section="question">'
         '<h2 class="card-section-title">题目</h2>'
         f'<div class="problem-body">{"".join(statement)}{"".join(formulas)}{"".join(ask)}</div>'
         "</section>"
@@ -419,7 +421,7 @@ def build_problem_html(
             body.append(_classic_problem_card(problem_parts))
         else:
             body.append(
-                '<section class="content-card">'
+                '<section class="content-card" data-section="question">'
                 f'<div class="problem-flow">{"".join(part for _, part in problem_parts)}</div>'
                 "</section>"
             )
@@ -436,10 +438,10 @@ def build_problem_html(
             )
         body.append(_classic_problem_card(legacy_parts))
     else:
-        body.append(_section("题目", question))
+        body.append(_section("题目", question, section_key="question"))
         if latex and not _contains_math(question, allow_bare_latex=True):
             body.append(
-                '<section class="content-card formula-card"><h2>题目公式</h2>'
+                '<section class="content-card formula-card" data-section="question"><h2>题目公式</h2>'
                 f'<div class="rich-text">{_formula_html(latex, display=True)}</div></section>'
             )
 
@@ -449,9 +451,9 @@ def build_problem_html(
     detail_class = "detail-card" if classic else ""
     if include_answers:
         if user_answer.strip():
-            body.append(_section("我的作答", user_answer, card_class=detail_class))
-        body.append(_section("正确答案", correct_answer, card_class=detail_class))
-        body.append(_section("解析", solution, card_class=detail_class))
+            body.append(_section("我的作答", user_answer, card_class=detail_class, section_key="user_answer"))
+        body.append(_section("正确答案", correct_answer, card_class=detail_class, section_key="correct_answer"))
+        body.append(_section("解析", solution, card_class=detail_class, section_key="solution"))
     elif show_answer_notice:
         body.append(
             '<section class="answer-hidden">答案与解析已隐藏，完成思考后再显示。</section>'
@@ -459,7 +461,7 @@ def build_problem_html(
 
     notes = str(fields.get("notes") or "")
     if include_answers and notes.strip():
-        body.append(_section("备注", notes, card_class="detail-card" if classic else ""))
+        body.append(_section("备注", notes, card_class="detail-card" if classic else "", section_key="notes"))
     classic_body = ' class="classic-problem"' if classic else ""
 
     return f"""<!doctype html>
@@ -772,6 +774,8 @@ class MathContentView(QWidget):
         self._compact = False
         self._zoom_scale = preview_zoom_scale()
         self._content_height: int | None = None
+        self._section_layout: dict[str, dict[str, int]] = {}
+        self._content_height_px = 0
         self._pdf_view_initialized = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -916,6 +920,8 @@ class MathContentView(QWidget):
             or self._render_scheduled
         ):
             return
+        self._section_layout = {}
+        self._content_height_px = 0
         self._render_scheduled = True
         QTimer.singleShot(0, self._start_render)
 
@@ -970,6 +976,23 @@ class MathContentView(QWidget):
         scrollbar = self._view.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def scroll_to_section(self, key: str) -> None:
+        """把指定小节滚动到预览中间；在顶部/底部时尽量滚动、不越界。"""
+        if self._document is None or not self._section_layout or not self._content_height_px:
+            return
+        entry = self._section_layout.get(key)
+        if entry is None:
+            return
+        scrollbar = self._view.verticalScrollBar()
+        viewport_height = max(1, self._view.viewport().height())
+        total_px = scrollbar.maximum() + viewport_height
+        if total_px <= 0:
+            return
+        center = entry.get("top", 0) + entry.get("height", 0) / 2
+        fraction = center / self._content_height_px
+        target = int(fraction * total_px - viewport_height / 2)
+        scrollbar.setValue(max(scrollbar.minimum(), min(int(target), scrollbar.maximum())))
+
     def _html_loaded(
         self, page: QWebEnginePage, generation: int, loaded: bool
     ) -> None:
@@ -984,22 +1007,43 @@ class MathContentView(QWidget):
                     const width = {_PDF_CSS_WIDTH};
                     document.documentElement.style.width = `${{width}}px`;
                     document.body.style.width = `${{width}}px`;
-                    return Math.ceil(Math.max(
-                        document.body.scrollHeight,
-                        document.body.getBoundingClientRect().height
-                    ));
+                    const sections = {{}};
+                    document.querySelectorAll('section[data-section]').forEach((el) => {{
+                        const key = el.getAttribute('data-section');
+                        if (!(key in sections)) {{
+                            sections[key] = {{ top: el.offsetTop, height: el.offsetHeight }};
+                        }}
+                    }});
+                    return JSON.stringify({{
+                        height: Math.ceil(Math.max(
+                            document.body.scrollHeight,
+                            document.body.getBoundingClientRect().height
+                        )),
+                        sections,
+                    }});
                 }})()""",
-                lambda height, target=page, token=generation: self._print_content_pdf(
-                    target, token, height
+                lambda payload, target=page, token=generation: self._print_content_pdf(
+                    target, token, payload
                 ),
             )
             return
         self._print_pdf(page, generation)
 
-    def _print_content_pdf(self, page: QWebEnginePage, generation: int, height) -> None:  # noqa: ANN001
+    def _print_content_pdf(self, page: QWebEnginePage, generation: int, payload) -> None:  # noqa: ANN001
         if page is not self._renderer or generation != self._render_generation:
             return
-        content_height = max(80, int(height or 0))
+        content_height = 80
+        if isinstance(payload, str) and payload:
+            try:
+                parsed = json.loads(payload)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                self._section_layout = parsed.get("sections") or {}
+                self._content_height_px = max(80, int(parsed.get("height") or 0))
+                content_height = self._content_height_px
+        elif isinstance(payload, int):
+            content_height = max(80, payload)
         # Chromium uses 96 CSS pixels per inch. The custom page height removes
         # the PDF reader's otherwise independent vertical viewport.
         page_size = QPageSize(
