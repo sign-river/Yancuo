@@ -1814,8 +1814,8 @@ class IntakePage(QWidget):
         """Build the dedicated source-image and recognition adjustment tab."""
         image_tools = QWidget()
         root = QVBoxLayout(image_tools)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(12)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(10)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, image_tools)
         root.addWidget(splitter, stretch=1)
@@ -1828,7 +1828,7 @@ class IntakePage(QWidget):
         left_layout.setSpacing(8)
         self.image_preview = ImagePreviewLabel("无原图预览")
         self.image_preview.padding = 28
-        self.image_preview.setMinimumHeight(380)
+        self.image_preview.setMinimumHeight(320)
         self.image_preview.set_editable(True)
         self.image_preview.region_drawn.connect(self._save_drawn_region)
         left_layout.addWidget(self.image_preview, stretch=1)
@@ -1839,7 +1839,7 @@ class IntakePage(QWidget):
         right_panel.setObjectName("ImageToolsSidePanel")
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(10, 0, 0, 0)
-        right_layout.setSpacing(24)
+        right_layout.setSpacing(14)
         right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 7)
@@ -1849,7 +1849,7 @@ class IntakePage(QWidget):
 
         # —— 来源图片 ——
         source_section = QVBoxLayout()
-        source_section.setSpacing(12)
+        source_section.setSpacing(8)
         source_title = QLabel("来源图片")
         source_title.setObjectName("SectionTitle")
         source_section.addWidget(source_title)
@@ -1857,7 +1857,7 @@ class IntakePage(QWidget):
         self.source_image_list.setObjectName("CandidateSourceImages")
         self.source_image_list.setAccessibleName("候选题来源图片")
         self.source_image_list.setIconSize(QSize(24, 24))
-        self.source_image_list.setFixedHeight(132)
+        self.source_image_list.setFixedHeight(104)
         source_section.addWidget(self.source_image_list)
         source_actions = QHBoxLayout()
         source_actions.setSpacing(8)
@@ -1875,7 +1875,7 @@ class IntakePage(QWidget):
 
         # —— 题目区域 ——
         region_section = QVBoxLayout()
-        region_section.setSpacing(12)
+        region_section.setSpacing(8)
         region_title = QLabel("题目区域")
         region_title.setObjectName("SectionTitle")
         region_section.addWidget(region_title)
@@ -1905,8 +1905,8 @@ class IntakePage(QWidget):
         self.uncertain_card = QFrame()
         self.uncertain_card.setObjectName("UncertainCard")
         uncertain_card_layout = QVBoxLayout(self.uncertain_card)
-        uncertain_card_layout.setContentsMargins(14, 12, 14, 12)
-        uncertain_card_layout.setSpacing(10)
+        uncertain_card_layout.setContentsMargins(12, 10, 12, 10)
+        uncertain_card_layout.setSpacing(8)
         uncertain_header = QHBoxLayout()
         uncertain_header.setSpacing(8)
         warn_icon = QLabel("⚠")
