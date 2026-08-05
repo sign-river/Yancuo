@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -271,6 +272,10 @@ class _QueuePane(QWidget):
         enter.clicked.connect(self._open_selected)
         row.addWidget(refresh)
         row.addWidget(enter)
+        if kind in ("done", "failed"):
+            clear_btn = danger_button("清除记录")
+            clear_btn.clicked.connect(self._clear_records)
+            row.addWidget(clear_btn)
         if kind == "active":
             cancel_btn = danger_button("取消运行中")
             cancel_btn.clicked.connect(self._cancel_running)
@@ -308,6 +313,34 @@ class _QueuePane(QWidget):
             self.list.addItem(empty)
         bar = self.list.verticalScrollBar()
         bar.setValue(min(scroll, bar.maximum()))
+
+    def _clear_records(self) -> None:
+        """清除当前子队列展示的任务记录，不影响已入库内容。"""
+        ids = []
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if item.flags() & Qt.ItemFlag.ItemIsEnabled:
+                value = item.data(256)
+                if value:
+                    ids.append(str(value))
+        if not ids:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "清除记录",
+                f"确认清除 {len(ids)} 条任务记录？\n仅删除任务记录，不影响已入库的题目和笔记。",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            self.ai.delete_jobs(ids)
+        except Exception as exc:
+            QMessageBox.warning(self, "清除失败", str(exc))
+            return
+        self._last_snapshot = []
+        self.refresh()
 
     def _selected_job_id(self) -> str | None:
         item = self.list.currentItem()

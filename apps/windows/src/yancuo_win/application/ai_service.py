@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
 from yancuo_win.ai.base import (
@@ -472,6 +472,32 @@ class AIService:
             deleted = s.execute(delete(AiRecognitionCache)).rowcount or 0
             s.commit()
             return int(deleted)
+
+    def delete_jobs(self, job_ids) -> int:
+        """删除任务记录（含明细与事件），不影响已入库的题目和笔记。"""
+        ids = [str(job_id) for job_id in job_ids if job_id]
+        if not ids:
+            return 0
+        with self.session() as s:
+            # 解除其他表的可选外键引用，避免删除被外键约束阻塞
+            s.execute(
+                update(IntakeSession)
+                .where(IntakeSession.job_id.in_(ids))
+                .values(job_id=None),
+            )
+            s.execute(
+                update(ReviewSession)
+                .where(ReviewSession.job_id.in_(ids))
+                .values(job_id=None),
+            )
+            deleted = 0
+            for job_id in ids:
+                job = s.get(AiJob, job_id)
+                if job is not None:
+                    s.delete(job)
+                    deleted += 1
+            s.commit()
+            return deleted
 
     def list_jobs(self, limit: int = 50) -> list[AiJob]:
         with self.session() as s:
