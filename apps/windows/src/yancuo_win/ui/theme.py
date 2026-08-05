@@ -6,8 +6,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainterPath, QPalette, QRegion
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainterPath, QPalette, QRegion
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QFrame, QWidget
 
 THEME_MODES = {"system", "light", "dark"}
@@ -1592,6 +1592,10 @@ class ThemeManager(QObject):
             self._style_combo_popup(watched)
             if event.type() == QEvent.Type.Show:
                 self._offset_combo_popup(watched)
+                QTimer.singleShot(
+                    0,
+                    lambda popup=watched: self._fit_combo_popup(popup),
+                )
         return super().eventFilter(watched, event)
 
     @staticmethod
@@ -1666,6 +1670,33 @@ class ThemeManager(QObject):
                 popup.move(popup.x(), round(target_y))
 
         QTimer.singleShot(0, apply)
+
+    @staticmethod
+    def _fit_combo_popup(popup: QWidget) -> None:
+        """把下拉弹层按条目数完全展开（受屏幕高度限制），避免只露出两行。"""
+        view = popup.findChild(QAbstractItemView)
+        model = view.model() if view is not None else None
+        if view is None or model is None or model.rowCount() <= 0:
+            return
+        row_height = view.sizeHintForRow(0)
+        if row_height <= 0:
+            return
+        chrome = max(0, popup.height() - view.height())
+        required = model.rowCount() * row_height + chrome
+        if required <= popup.height():
+            return
+        screen = (
+            QGuiApplication.screenAt(popup.mapToGlobal(QPoint(0, 0)))
+            or QGuiApplication.primaryScreen()
+        )
+        limit = (
+            screen.availableGeometry().bottom() - popup.mapToGlobal(QPoint(0, 0)).y()
+            if screen is not None
+            else required
+        )
+        target = max(popup.height(), min(required, limit))
+        if target > popup.height():
+            popup.resize(popup.width(), target)
 
     def set_mode(self, mode: str) -> str:
         self.mode = normalize_theme_mode(mode)
