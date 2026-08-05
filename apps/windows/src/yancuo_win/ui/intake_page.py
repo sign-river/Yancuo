@@ -1070,7 +1070,7 @@ class ProblemForm(QWidget):
         latex = self._question_latex.strip()
         if latex:
             question = f"{question}\n\n\\[{latex}\\]".strip()
-        blocks = self.content_blocks.blocks if self.content_blocks.isVisible() else []
+        blocks = self.content_blocks.blocks
         tags = [tag.strip() for tag in self.tags.text().split(",") if tag.strip()]
         self.render_view.set_problem(
             {
@@ -2966,6 +2966,8 @@ class IntakePage(QWidget):
     def _on_ai_result_tab_changed(self, index: int) -> None:
         if index == 0:
             self._refresh_ai_preview()
+        elif index == 1:
+            self.ai_form.refresh_render_previews()
 
     def _refresh_ai_preview(self) -> None:
         if not hasattr(self, "ai_result_preview") or not hasattr(self, "ai_form"):
