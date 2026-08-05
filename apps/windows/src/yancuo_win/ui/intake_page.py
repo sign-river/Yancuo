@@ -852,9 +852,10 @@ class ProblemForm(QWidget):
             self._form_target.setSpacing(12)
             editor_panel.setWidget(editor_host)
             self.splitter.addWidget(editor_panel)
-            self.splitter.setStretchFactor(0, 1)
+            # 题目预览占 2 份、编辑字段占 1 份
+            self.splitter.setStretchFactor(0, 2)
             self.splitter.setStretchFactor(1, 1)
-            self.splitter.setSizes([520, 560])
+            self.splitter.setSizes([720, 360])
 
         basic = CardFrame()
         basic.add_title("基本归属")
