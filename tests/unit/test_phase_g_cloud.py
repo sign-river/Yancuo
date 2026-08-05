@@ -38,7 +38,7 @@ def test_local_folder_upload_latest_restore(runtime, tmp_path: Path) -> None:
 
     cloud.ensure_repository()
     uploaded = cloud.upload_backup()
-    assert uploaded["tag"].startswith(f"data-v1-{runtime.identity.profile_id}-")
+    assert uploaded["tag"].startswith(f"data-v1-{runtime.identity.profile_id[-8:]}-")
     assert uploaded["profile_id"] == runtime.identity.profile_id
     assert len(uploaded["sha256"]) == 64
     assert list(runtime.paths.cache_dir.glob("data-v1-*.ebpack")) == []

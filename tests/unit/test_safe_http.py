@@ -7,7 +7,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request
 
 from yancuo_win.infrastructure.safe_http import (
-    SafeHTTPSRedirectHandler,
     _local_proxy_candidates,
     safe_urlopen,
 )

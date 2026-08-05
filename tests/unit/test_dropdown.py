@@ -41,7 +41,6 @@ def test_dropdown_opens_below_anchor_with_gap() -> None:
     menu = QMenu()
     menu.addAction("动作一")
     captured: dict = {}
-    import yancuo_win.ui.widgets as mod
     original = menu.popup
     menu.popup = lambda pos: captured.update(pos=pos)
     import PySide6.QtGui as _qtgui
@@ -66,7 +65,6 @@ def test_dropdown_shifts_left_near_right_edge() -> None:
     menu.addAction("一个非常长的动作名称用来撑宽菜单")
     menu.addAction("另一个动作")
     captured: dict = {}
-    import yancuo_win.ui.widgets as mod
     original = menu.popup
     menu.popup = lambda pos: captured.update(pos=pos)
     import PySide6.QtGui as _qtgui
@@ -90,7 +88,6 @@ def test_dropdown_flips_above_when_bottom_space_insufficient() -> None:
     menu.addAction("动作二")
     menu.addAction("动作三")
     captured: dict = {}
-    import yancuo_win.ui.widgets as mod
     original = menu.popup
     menu.popup = lambda pos: captured.update(pos=pos)
     import PySide6.QtGui as _qtgui
@@ -113,7 +110,6 @@ def test_dropdown_min_width_uses_anchor_and_caps_at_max() -> None:
     menu = QMenu()
     menu.addAction("A")
     captured: dict = {}
-    import yancuo_win.ui.widgets as mod
     original = menu.popup
     menu.popup = lambda pos: captured.update(pos=pos)
     import PySide6.QtGui as _qtgui

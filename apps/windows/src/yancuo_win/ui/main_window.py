@@ -1857,7 +1857,7 @@ class MainWindow(QMainWindow):
 
     def _on_cloud_profiles_failed(self, error: str) -> None:
         self.account_remote_summary.setText(
-            f"无法读取云端资料：{_friendly_cloud_error(error)}"
+            f"无法读取云端资料：{self._friendly_cloud_error(error)}"
         )
 
     def _on_cloud_profile_worker_finished(self) -> None:
@@ -2079,7 +2079,6 @@ class MainWindow(QMainWindow):
             )
         except DomainError:
             due = 0
-        ai = self.runtime.settings.ai
         active = self.services.count_problems("active")
         jobs = self.ai.list_jobs(limit=100)
         active_ai_jobs = sum(job.status in {"pending", "running"} for job in jobs)

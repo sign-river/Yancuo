@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 from PySide6.QtGui import QColor, QImage

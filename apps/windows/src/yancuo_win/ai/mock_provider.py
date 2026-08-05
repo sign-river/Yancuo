@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from yancuo_win.ai.base import AIProvider, ChatCompletionResult, JsonCompletionResult, ProviderCapabilities, StructuredResult
 

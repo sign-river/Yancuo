@@ -32,7 +32,6 @@ from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.cloud.cloudbase_auth import (
-    CloudBaseSession,
     clear_stored_session,
     load_stored_session,
     sign_in_with_password,
