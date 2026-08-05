@@ -760,7 +760,12 @@ class AppToast(QFrame):
         self.progress.setTextVisible(False)
         self.progress.setRange(0, self._duration_ms)
         self.progress.setValue(self._duration_ms)
-        card_layout.addWidget(self.progress)
+        self.progress.setInvertedAppearance(True)
+        progress_row = QHBoxLayout()
+        progress_row.setContentsMargins(8, 0, 8, 0)
+        progress_row.setSpacing(0)
+        progress_row.addWidget(self.progress)
+        card_layout.addLayout(progress_row)
 
         # 单层 QGraphicsOpacityEffect 即可；嵌套 shadow 会触发
         # "one painter at a time" / Painter not active 冲突
