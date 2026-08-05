@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QDateTime, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QButtonGroup,
     QCheckBox,
@@ -66,6 +67,19 @@ from yancuo_win.ui.widgets import (
 from yancuo_win.ui.theme import apply_app_theme, current_theme_name, get_theme_manager
 from yancuo_win.ui.icons import bind_icon
 from yancuo_win.ui.math_content import set_preview_zoom_scale
+
+
+class _ZoomSpinBox(QSpinBox):
+    """Spin box that selects its current text on focus so typing replaces it.
+
+    Without this, clicking into the field leaves the cursor inside the old
+    value and typing appends digits, producing out-of-range text that Qt's
+    default correction silently reverts when the field loses focus.
+    """
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        self.selectAll()
 
 
 class ServiceSettingsPage(QWidget):
@@ -174,7 +188,7 @@ class ServiceSettingsPage(QWidget):
             theme_row.addStretch(1)
             appearance_form.addRow("主题", theme_choices)
             appearance_form.addRow("当前显示", self.theme_status)
-            self.preview_zoom = QSpinBox()
+            self.preview_zoom = _ZoomSpinBox()
             describe_field(
                 self.preview_zoom,
                 "预览缩放",
@@ -183,6 +197,10 @@ class ServiceSettingsPage(QWidget):
             self.preview_zoom.setRange(80, 150)
             self.preview_zoom.setSingleStep(1)
             self.preview_zoom.setSuffix("%")
+            # 越界输入吸附到最近合法值（80/150），而不是失焦时回退到旧值
+            self.preview_zoom.setCorrectionMode(
+                QAbstractSpinBox.CorrectionMode.CorrectToNearestValue
+            )
             self.preview_zoom.setValue(round(s.application.preview_zoom_scale * 100))
             self.preview_zoom.valueChanged.connect(
                 lambda value: set_preview_zoom_scale(value / 100)
