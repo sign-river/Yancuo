@@ -1196,7 +1196,7 @@ def app_stylesheet(theme: str = "light") -> str:
         min-width: 78px;
     }}
     QPushButton#LibraryViewButton {{
-        min-width: 84px;
+        min-width: 76px;
     }}
     QPushButton#SearchModeButton:hover:!checked:!disabled,
     QPushButton#LibraryViewButton:hover:!checked:!disabled {{
