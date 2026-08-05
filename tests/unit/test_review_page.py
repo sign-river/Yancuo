@@ -120,6 +120,25 @@ class _NotesStub:
         return self.note if note_id == self.note.id else None
 
 
+def test_home_has_no_empty_gap_between_overview_and_action_cards(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    page = review_page_module.ReviewPage(_ServicesStub())
+
+    # 选择复习计划卡片已移至子页，home 不再保留空的 center_row 伸展行
+    assert page.plan_select_card.parent() is page.plan_select_page
+    home_items = [
+        page.home_layout.itemAt(index)
+        for index in range(page.home_layout.count())
+    ]
+    # header / overview / 操作卡片网格 / 底部伸展，共 4 项；之前多了一个空的中间行
+    assert len(home_items) == 4
+    assert home_items[0].widget() is not None  # PageHeader
+    assert home_items[1].widget() is page.review_overview
+    assert home_items[2].layout() is not None  # action grid
+    assert home_items[3].spacerItem() is not None
+
+
 def test_review_page_does_not_show_progress_during_construction(monkeypatch) -> None:
     QApplication.instance() or QApplication([])
     monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)

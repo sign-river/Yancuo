@@ -296,9 +296,7 @@ class ReviewPage(QWidget):
         self.review_overview.setObjectName("ReviewOverview")
         root.addWidget(self.review_overview)
 
-        center_row = QHBoxLayout()
-        center_row.setContentsMargins(0, 0, 0, 0)
-        center_row.addStretch(1)
+        # 该卡片后续被 _move_to_subpage() 移到“选择复习计划”子页，不再放入 home 布局
         plans = CardFrame()
         plans.setObjectName("ReviewPlanSurface")
         plans.setMaximumWidth(1080)
@@ -390,9 +388,6 @@ class ReviewPage(QWidget):
         footer.addWidget(self.start_selected_button)
         body.addLayout(footer)
 
-        center_row.addWidget(plans, 0, Qt.AlignmentFlag.AlignTop)
-        center_row.addStretch(1)
-        root.addLayout(center_row, stretch=1)
         queue_card = CardFrame()
         self.plan_builder_card = queue_card
         queue_card.add_title("制定复习计划")
