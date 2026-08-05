@@ -766,9 +766,6 @@ class MainWindow(QMainWindow):
         manual = QPushButton("手动录题")
         manual.clicked.connect(self._show_manual_intake)
         record.body.addLayout(button_row(ai, manual))
-        layout.addWidget(record)
-
-        row = QHBoxLayout()
 
         review = CardFrame()
         review.add_title("今日复习")
@@ -776,6 +773,9 @@ class MainWindow(QMainWindow):
         start_review = QPushButton("开始今日复习")
         start_review.clicked.connect(self._today_review)
         review.body.addLayout(button_row(start_review))
+
+        row = QHBoxLayout()
+        row.addWidget(record, stretch=1)
         row.addWidget(review, stretch=1)
         layout.addLayout(row)
         ai_queue = CardFrame()
