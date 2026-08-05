@@ -769,15 +769,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(record)
 
         row = QHBoxLayout()
-        pending = CardFrame()
-        pending.add_title("待继续")
-        self.dashboard_pending = pending.add_hint("暂无未完成任务")
-        continue_intake = QPushButton("继续录题")
-        continue_intake.clicked.connect(self._show_library)
-        changes = QPushButton("查看待确认变更")
-        changes.clicked.connect(self._open_review)
-        pending.body.addLayout(button_row(continue_intake, changes))
-        row.addWidget(pending, stretch=1)
 
         review = CardFrame()
         review.add_title("今日复习")
@@ -2091,7 +2082,6 @@ class MainWindow(QMainWindow):
             due = 0
         ai = self.runtime.settings.ai
         active = self.services.count_problems("active")
-        pending_changes = len(self.ai.list_open_review_items())
         jobs = self.ai.list_jobs(limit=100)
         active_ai_jobs = sum(job.status in {"pending", "running"} for job in jobs)
         question_reviews = sum(
@@ -2105,13 +2095,6 @@ class MainWindow(QMainWindow):
             f"正式题库 {active} 题  ·  今日待复习 {due} 题"
             if active
             else "从录入第一道错题开始：手动填写，或上传图片让 AI 整理"
-        )
-        ai_provider = (
-            "Faro API" if ai.default_provider == "openai_compatible" else "Mock"
-        )
-        self.dashboard_pending.setText(
-            f"待确认变更 {pending_changes} 项；"
-            f"AI {ai_provider} {'已启用' if ai.enabled else '未启用'}。"
         )
         self.dashboard_review.setText(
             f"今日还有 {due} 道题需要复习。" if due else "今日复习已完成。"
