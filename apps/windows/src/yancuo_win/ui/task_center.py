@@ -98,6 +98,9 @@ def _job_label(job, status_override: str | None = None) -> str:
         _status_label(status_override or job.status),
         f"{int(job.done_items or 0)}/{int(job.total_items or 0)}",
     ]
+    created = getattr(job, "created_at", None)
+    if created is not None:
+        parts.append(f"创建于 {created.strftime('%m-%d %H:%M')}")
     if int(job.failed_items or 0):
         parts.append(f"失败 {int(job.failed_items or 0)}")
     if cost > 0:
@@ -108,8 +111,10 @@ def _job_label(job, status_override: str | None = None) -> str:
 def _job_detail_summary(job) -> str:
     """任务详情页与预览区的友好摘要。"""
     cost = float(job.estimated_cost or 0.0)
+    created = getattr(job, "created_at", None)
+    created_text = f" · 创建于 {created.strftime('%m-%d %H:%M')}" if created is not None else ""
     lines = [
-        f"{_domain_label(job.domain)} · {_job_type_label(job.job_type)} · {_provider_label(job.provider)}",
+        f"{_domain_label(job.domain)} · {_job_type_label(job.job_type)} · {_provider_label(job.provider)}{created_text}",
         f"状态：{_status_label(job.status)} · 进度：{int(job.done_items or 0)}/{int(job.total_items or 0)}"
         + (f" · 失败：{int(job.failed_items or 0)}" if int(job.failed_items or 0) else "")
         + (f" · 费用 ¥{cost:.2f}" if cost > 0 else ""),
