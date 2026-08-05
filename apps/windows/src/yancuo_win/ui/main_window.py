@@ -1254,12 +1254,12 @@ class MainWindow(QMainWindow):
         nav_footer.setFixedHeight(56)
         nav_actions = QHBoxLayout(nav_footer)
         nav_actions.setContentsMargins(12, 8, 12, 8)
-        self.new_subject_button = QPushButton("\uff0b \u65b0\u5efa")
-        self.new_subject_button.setToolTip("\u65b0\u5efa\u79d1\u76ee\u3001\u7ae0\u8282\u6216\u6807\u7b7e")
-        self.new_subject_button.clicked.connect(self._show_catalog_create_menu)
+        self.new_subject_button = primary_button("\u5f55\u5165\u9898\u76ee")
+        self.new_subject_button.setToolTip("\u4e0a\u4f20\u56fe\u7247\u6216\u624b\u52a8\u586b\u5199\uff0c\u5f55\u5165\u65b0\u9898\u76ee")
+        self.new_subject_button.clicked.connect(self._show_ai_intake)
         self.new_tag_button = QPushButton("\u7ba1\u7406")
         bind_icon(self.new_tag_button, "chevron-down", size=16)
-        self.new_tag_button.setToolTip("\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u79d1\u76ee\u6216\u7ae0\u8282")
+        self.new_tag_button.setToolTip("\u65b0\u5efa\u6216\u7ba1\u7406\u79d1\u76ee\u3001\u7ae0\u8282\u3001\u6807\u7b7e")
         self.new_tag_button.clicked.connect(self._show_catalog_menu)
         self.catalog_menu_button = self.new_tag_button
         nav_actions.addWidget(self.new_subject_button)
@@ -1450,10 +1450,6 @@ class MainWindow(QMainWindow):
             menu.exec(sender.mapToGlobal(sender.rect().bottomLeft()))
         else:
             menu.exec(self.cursor().pos())
-
-    def _show_catalog_create_menu(self) -> None:
-        menu = self._build_catalog_action_menu(self.get_create_actions())
-        menu.exec(self.new_subject_button.mapToGlobal(self.new_subject_button.rect().bottomLeft()))
 
     def _build_question_more_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -4096,11 +4092,15 @@ class MainWindow(QMainWindow):
         item = self.knowledge_tree.itemAt(position)
         if item is not None:
             self.knowledge_tree.setCurrentItem(item)
-        menu = self._build_catalog_action_menu(self.get_manage_actions())
+        menu = self._build_catalog_action_menu(
+            self.get_create_actions() + self.get_manage_actions()
+        )
         menu.exec(self.knowledge_tree.viewport().mapToGlobal(position))
 
     def _show_catalog_menu(self) -> None:
-        menu = self._build_catalog_action_menu(self.get_manage_actions())
+        menu = self._build_catalog_action_menu(
+            self.get_create_actions() + self.get_manage_actions()
+        )
         bind_icon(self.catalog_menu_button, "chevron-up", size=16)
         menu.aboutToHide.connect(
             lambda: bind_icon(self.catalog_menu_button, "chevron-down", size=16)
@@ -4188,7 +4188,7 @@ class MainWindow(QMainWindow):
         return menu
 
     def _update_catalog_action_buttons(self) -> None:
-        actions = self.get_manage_actions()
+        actions = self.get_create_actions() + self.get_manage_actions()
         self.catalog_menu_button.setEnabled(bool(actions))
         context = self._catalog_node_context()
         if context.node_type == "uncategorized":
@@ -4197,7 +4197,7 @@ class MainWindow(QMainWindow):
                 "为题目选择章节后会自动消失"
             )
         else:
-            tooltip = "管理当前目录" if actions else "请先选择一个科目或章节"
+            tooltip = "新建或管理当前目录" if actions else "请先选择一个科目或章节"
         self.catalog_menu_button.setToolTip(
             tooltip
         )

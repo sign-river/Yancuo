@@ -926,6 +926,14 @@ def test_catalog_menu_and_editor_use_valid_full_paths(window: MainWindow) -> Non
     ]
 
 
+def test_library_intake_button_is_primary_and_opens_intake(window: MainWindow) -> None:
+    button = window.new_subject_button
+    assert button.text() == "录入题目"
+    assert button.objectName() == "PrimaryButton"
+    button.click()
+    assert window.stack.currentIndex() == 1  # _PAGE_INTAKE
+
+
 def test_catalog_actions_follow_selected_node_type_and_position(
     window: MainWindow,
 ) -> None:
@@ -936,7 +944,8 @@ def test_catalog_actions_follow_selected_node_type_and_position(
         "create_tag",
     ]
     assert window.get_manage_actions() == ()
-    assert not window.catalog_menu_button.isEnabled()
+    # 管理菜单现包含新建动作，根节点下也可用
+    assert window.catalog_menu_button.isEnabled()
 
     subject_mode = next(
         mode for mode in _nav_modes(window) if mode.startswith("subject:")
@@ -982,7 +991,8 @@ def test_catalog_actions_follow_selected_node_type_and_position(
     assert "不是实际章节" in uncategorized_item.toolTip(0)
     assert [spec.action_id for spec in window.get_create_actions()] == ["create_tag"]
     assert window.get_manage_actions() == ()
-    assert not window.catalog_menu_button.isEnabled()
+    # 管理菜单现包含新建动作，根节点下也可用
+    assert window.catalog_menu_button.isEnabled()
     assert "不是实际章节" in window.catalog_menu_button.toolTip()
 
 
