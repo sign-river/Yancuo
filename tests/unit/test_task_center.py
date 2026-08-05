@@ -62,13 +62,26 @@ def test_job_label_is_user_friendly() -> None:
     assert "openai_compatible" not in label
 
 
-def test_refresh_keeps_selected_job() -> None:
+def test_refresh_skips_rebuild_when_unchanged() -> None:
+    _ = QApplication.instance() or QApplication([])
+    ai = _FakeAI([_job("q1", "question_intake"), _job("q2", "question_intake")])
+    page = TaskQueuePage(ai)
+    pane = page.active_pane
+    item_before = pane.list.item(0)
+    pane.list.setCurrentRow(1)
+    page.refresh()  # same call the 2s timer performs
+    assert pane.list.item(0) is item_before  # 未变化时不重建，滚动位置自然保持
+    assert pane._selected_job_id() == "q2"
+    page.close()
+
+
+def test_refresh_keeps_selected_job_after_rebuild() -> None:
     _ = QApplication.instance() or QApplication([])
     ai = _FakeAI([_job("q1", "question_intake"), _job("q2", "question_intake")])
     page = TaskQueuePage(ai)
     page.active_pane.list.setCurrentRow(1)
-    assert page.active_pane._selected_job_id() == "q2"
-    page.refresh()  # same call the 2s timer performs
+    ai._jobs[0].done_items = 2  # 让摘要变化，触发重建
+    page.refresh()
     assert page.active_pane.list.currentItem() is not None
     assert page.active_pane._selected_job_id() == "q2"
     page.close()

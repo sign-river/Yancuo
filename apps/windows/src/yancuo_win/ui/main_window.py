@@ -463,6 +463,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.ai_completion_page)
         self.task_queue_page = TaskQueuePage(self.ai, self.ai_coordinator)
         self.task_queue_page.job_open_requested.connect(self._open_task_job)
+        self.task_queue_page.back_requested.connect(self._show_dashboard)
         self.stack.addWidget(self.task_queue_page)
         self.ai_job_detail_page = AIJobDetailPage(self.ai, self.ai_coordinator)
         self.ai_job_detail_page.back_requested.connect(self._close_ai_job_detail)

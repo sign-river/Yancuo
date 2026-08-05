@@ -235,6 +235,7 @@ class _QueuePane(QWidget):
         self.statuses = statuses
         self.kind = kind
         self.tab_label = tab_label
+        self._last_snapshot: list[tuple[str, str]] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -278,13 +279,20 @@ class _QueuePane(QWidget):
         layout.addWidget(actions)
 
     def refresh(self) -> None:
-        # 先保存选中项，再清空重建（否则每 2s 定时刷新会丢掉当前选择）
+        jobs = [
+            job for job in self.ai.list_jobs(limit=100)
+            if job.status in self.statuses
+        ]
+        snapshot = [(job.id, _job_label(job)) for job in jobs]
+        # 内容没变就不重建列表，避免每 2s 刷新把滚动位置和选择重置到顶部
+        if snapshot == self._last_snapshot:
+            return
+        self._last_snapshot = snapshot
         current = self.list.currentItem()
         selected_job_id = current.data(256) if current is not None else None
+        scroll = self.list.verticalScrollBar().value()
         self.list.clear()
-        for job in self.ai.list_jobs(limit=100):
-            if job.status not in self.statuses:
-                continue
+        for job in jobs:
             item = QListWidgetItem(_job_label(job))
             item.setData(256, job.id)
             self.list.addItem(item)
@@ -294,6 +302,8 @@ class _QueuePane(QWidget):
             empty = QListWidgetItem(f"暂无{self.tab_label}任务")
             empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self.list.addItem(empty)
+        bar = self.list.verticalScrollBar()
+        bar.setValue(min(scroll, bar.maximum()))
 
     def _selected_job_id(self) -> str | None:
         item = self.list.currentItem()
@@ -331,6 +341,7 @@ class TaskQueuePage(QWidget):
     """嵌入式任务队列页，按进行中 / 已完成 / 失败三个状态子队列展示。"""
 
     job_open_requested = Signal(str)  # job_id
+    back_requested = Signal()  # 返回工作台
 
     def __init__(
         self,
@@ -348,9 +359,11 @@ class TaskQueuePage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(12)
-        layout.addWidget(
-            PageHeader("任务队列", "按进行中、已完成、失败三个队列查看后台任务，进入任务查看详情。")
-        )
+        header = PageHeader("任务队列", "按进行中、已完成、失败三个队列查看后台任务，进入任务查看详情。")
+        back = IconButton("chevron-left", "返回工作台")
+        back.clicked.connect(self.back_requested.emit)
+        header.add_leading(back)
+        layout.addWidget(header)
         self.summary = QLabel("")
         self.summary.setObjectName("MutedLabel")
         layout.addWidget(self.summary)
