@@ -108,7 +108,50 @@ def test_generic_show_message_keeps_compatibility() -> None:
     assert len(stack._toasts) == 1
     toast = stack._toasts[0]
     assert toast.body_label.text() == "云端连接测试成功"
-    assert toast.icon_label is None  # no red icon for generic notices
+    assert toast.icon_label is not None  # success tone gets a green check icon
+    assert toast.card.property("tone") == "success"
+    assert toast.progress.property("tone") == "success"
+
+    toast.dismiss()
+    QTest.qWait(320)
+    app.processEvents()
+    host.close()
+
+
+def test_show_message_auto_classifies_warning_tone() -> None:
+    app = _app()
+    host = QWidget()
+    host.resize(800, 600)
+    host.show()
+    app.processEvents()
+    stack = ToastStack(host)
+    stack.show_message("请先选择题目")
+    app.processEvents()
+
+    toast = stack._toasts[0]
+    assert toast.card.property("tone") == "warning"
+    assert toast.progress.property("tone") == "warning"
+    assert toast.icon_label is not None
+
+    toast.dismiss()
+    QTest.qWait(320)
+    app.processEvents()
+    host.close()
+
+
+def test_show_message_explicit_tone_wins() -> None:
+    app = _app()
+    host = QWidget()
+    host.resize(800, 600)
+    host.show()
+    app.processEvents()
+    stack = ToastStack(host)
+    stack.show_message("外观设置已保存并应用", tone="info")
+    app.processEvents()
+
+    toast = stack._toasts[0]
+    assert toast.card.property("tone") == "info"
+    assert toast.progress.property("tone") == "info"
 
     toast.dismiss()
     QTest.qWait(320)

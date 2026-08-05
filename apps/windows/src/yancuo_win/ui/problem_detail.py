@@ -450,6 +450,7 @@ class _ChatInputEdit(QTextEdit):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setAccessibleName("AI 讨论问题")
         self.setPlaceholderText("向当前题目提问（Enter 发送，Shift+Enter 换行）")
         self.setAcceptRichText(False)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)

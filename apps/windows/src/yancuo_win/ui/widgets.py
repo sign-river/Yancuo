@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from yancuo_win.ui.icons import bind_icon, symbolic_icon
+from yancuo_win.ui.theme import current_theme_name, theme_tokens
 
 
 @contextmanager
@@ -529,29 +530,117 @@ class ErrorState(QWidget):
         layout.addWidget(self.retry_button, alignment=Qt.AlignmentFlag.AlignCenter)
 
 
-def _error_icon_pixmap(size: int = 20) -> QPixmap:
-    """Render a red circle with a white exclamation mark."""
+def _status_icon_pixmap(color: str, kind: str, size: int = 20) -> QPixmap:
+    """Render a colored status icon: error exclamation, success check or info dot."""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor("#F54A45"))
+    painter.setBrush(QColor(color))
     painter.drawEllipse(0, 0, size, size)
-    painter.setPen(QPen(QColor("#FFFFFF"), max(1.6, size / 10)))
+    painter.setPen(
+        QPen(
+            QColor("#FFFFFF"),
+            max(1.8, size / 9),
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+    )
     center = size / 2
-    painter.drawLine(QPointF(center, size * 0.30), QPointF(center, size * 0.58))
-    painter.drawPoint(QPointF(center, size * 0.72))
+    if kind == "error":
+        painter.drawLine(QPointF(center, size * 0.30), QPointF(center, size * 0.58))
+        painter.drawPoint(QPointF(center, size * 0.72))
+    elif kind == "success":
+        painter.drawPolyline(
+            [
+                QPointF(size * 0.24, size * 0.52),
+                QPointF(size * 0.42, size * 0.68),
+                QPointF(size * 0.76, size * 0.34),
+            ]
+        )
+    else:  # info
+        painter.drawPoint(QPointF(center, size * 0.34))
+        painter.drawLine(QPointF(center, size * 0.48), QPointF(center, size * 0.70))
     painter.end()
     return pixmap
+
+
+def _error_icon_pixmap(size: int = 20) -> QPixmap:
+    """Backward-compatible red exclamation icon."""
+    return _status_icon_pixmap("#F54A45", "error", size)
+
+
+_TOAST_WARNING_MARKERS = (
+    "失败",
+    "错误",
+    "出错",
+    "无法",
+    "不存在",
+    "请先",
+    "请选择",
+    "请输入",
+    "没有可",
+    "没有其他",
+    "尚无",
+    "不能",
+    "不可用",
+    "无效",
+    "未找到",
+    "未生成",
+    "不允许",
+    "至少",
+    "必须",
+)
+
+_TOAST_SUCCESS_MARKERS = (
+    "成功",
+    "已保存",
+    "已应用",
+    "已加入",
+    "已更新",
+    "已恢复",
+    "已删除",
+    "已清空",
+    "已提交",
+    "已入库",
+    "已采用",
+    "已撤回",
+    "已保留",
+    "已重建",
+    "已创建",
+    "已修改",
+    "已替换",
+    "已合并",
+    "已上传",
+    "已下载",
+    "已同步",
+    "已备份",
+    "已移动",
+    "已记录",
+    "已重置",
+    "已设置",
+)
+
+
+def _classify_toast_tone(message: str) -> str:
+    """Pick an accent tone from message content for generic toast feedback."""
+    text = message or ""
+    if any(marker in text for marker in _TOAST_WARNING_MARKERS):
+        return "warning"
+    if any(marker in text for marker in _TOAST_SUCCESS_MARKERS) or text.startswith("已"):
+        return "success"
+    return "info"
 
 
 class AppToast(QFrame):
     """A single toast card rendered by :class:`ToastStack`.
 
-    White card with a red error accent, close button, countdown progress
-    bar, and slide/fade animations.  Positioning and stacking are handled
-    by the owning :class:`ToastStack`.
+    White card with a tone accent (error/warning red, success green,
+    info blue), matching icon, close button, countdown progress bar, and
+    slide/fade animations.  Positioning and stacking are handled by the
+    owning :class:`ToastStack`.
     """
 
     def __init__(
@@ -560,7 +649,7 @@ class AppToast(QFrame):
         *,
         title: str,
         body: str,
-        is_error: bool,
+        tone: str = "info",
         duration_ms: int = 3500,
     ) -> None:
         parent = stack.parent()
@@ -586,6 +675,7 @@ class AppToast(QFrame):
 
         self.card = QFrame()
         self.card.setObjectName("AppToastCard")
+        self.card.setProperty("tone", tone)
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_layout.setSpacing(0)
@@ -593,12 +683,25 @@ class AppToast(QFrame):
         row = QHBoxLayout()
         row.setContentsMargins(14, 12, 8, 10)
         row.setSpacing(10)
-        self.icon_label: QLabel | None = None
-        if is_error:
-            self.icon_label = QLabel()
-            self.icon_label.setFixedSize(20, 20)
-            self.icon_label.setPixmap(_error_icon_pixmap(20))
-            row.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignTop)
+        tokens = theme_tokens(current_theme_name())
+        icon_kind = (
+            "error"
+            if tone in {"error", "warning"}
+            else "success"
+            if tone == "success"
+            else "info"
+        )
+        icon_color = (
+            tokens.danger
+            if tone in {"error", "warning"}
+            else tokens.success
+            if tone == "success"
+            else tokens.primary
+        )
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setPixmap(_status_icon_pixmap(icon_color, icon_kind, 20))
+        row.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignTop)
 
         text_column = QVBoxLayout()
         text_column.setContentsMargins(0, 0, 0, 0)
@@ -625,6 +728,7 @@ class AppToast(QFrame):
 
         self.progress = QProgressBar()
         self.progress.setObjectName("AppToastProgress")
+        self.progress.setProperty("tone", tone)
         self.progress.setTextVisible(False)
         self.progress.setRange(0, self._duration_ms)
         self.progress.setValue(self._duration_ms)
@@ -736,20 +840,22 @@ class ToastStack(QObject):
         duration_ms: int = 2800,
         on_activated: Callable[[], None] | None = None,
         *,
-        tone: str = "default",
+        tone: str = "auto",
     ) -> None:
-        del on_activated, tone  # generic toasts are informational only
-        self._push(title="", body=message, is_error=False, duration_ms=duration_ms)
+        del on_activated
+        if tone in {"", "auto", "default"}:
+            tone = _classify_toast_tone(message)
+        self._push(title="", body=message, tone=tone, duration_ms=duration_ms)
 
     def show_error(self, title: str, message: str, duration_ms: int = 3500) -> None:
-        self._push(title=title, body=message, is_error=True, duration_ms=duration_ms)
+        self._push(title=title, body=message, tone="error", duration_ms=duration_ms)
 
     def _push(
         self,
         *,
         title: str,
         body: str,
-        is_error: bool,
+        tone: str,
         duration_ms: int,
     ) -> None:
         parent = self.parent()
@@ -762,7 +868,7 @@ class ToastStack(QObject):
             self,
             title=title,
             body=body,
-            is_error=is_error,
+            tone=tone,
             duration_ms=duration_ms,
         )
         y = self._TOP

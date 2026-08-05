@@ -33,6 +33,9 @@ class ThemeTokens:
     danger: str
     danger_bg: str
     danger_border: str
+    success: str
+    success_bg: str
+    success_border: str
     nav_text: str
     list_hover: str
     list_selected: str
@@ -88,6 +91,9 @@ LIGHT_THEME = ThemeTokens(
     danger="#F54A45",
     danger_bg="#FEF0F0",
     danger_border="#F8B9B7",
+    success="#16A34A",
+    success_bg="#EAF7EF",
+    success_border="#B7E0C6",
     nav_text="#FFFFFF",
     list_hover="#F2F5FA",
     list_selected="#E8F0FF",
@@ -126,6 +132,9 @@ DARK_THEME = ThemeTokens(
     danger="#FF7875",
     danger_bg="#3B2428",
     danger_border="#7A3F45",
+    success="#4ADE80",
+    success_bg="#1E3326",
+    success_border="#2F5D43",
     nav_text="#FFFFFF",
     list_hover="#273142",
     list_selected="#2B3D61",
@@ -1317,8 +1326,18 @@ def app_stylesheet(theme: str = "light") -> str:
 
     QFrame#AppToastCard {{
         background: {t.card};
-        border: 1px solid {t.danger_border};
+        border: 1px solid {t.border_strong};
         border-radius: 12px;
+    }}
+    QFrame#AppToastCard[tone="error"],
+    QFrame#AppToastCard[tone="warning"] {{
+        border: 1px solid {t.danger_border};
+    }}
+    QFrame#AppToastCard[tone="success"] {{
+        border: 1px solid {t.success_border};
+    }}
+    QFrame#AppToastCard[tone="info"] {{
+        border: 1px solid {t.hover_border};
     }}
     QLabel#AppToastTitle {{
         color: {t.text};
@@ -1336,8 +1355,18 @@ def app_stylesheet(theme: str = "light") -> str:
         max-height: 3px;
     }}
     QProgressBar#AppToastProgress::chunk {{
-        background: {t.danger};
+        background: {t.primary};
         border-radius: 2px;
+    }}
+    QProgressBar#AppToastProgress[tone="error"]::chunk,
+    QProgressBar#AppToastProgress[tone="warning"]::chunk {{
+        background: {t.danger};
+    }}
+    QProgressBar#AppToastProgress[tone="success"]::chunk {{
+        background: {t.success};
+    }}
+    QProgressBar#AppToastProgress[tone="info"]::chunk {{
+        background: {t.primary};
     }}
     QPushButton#AppToastClose {{
         border: none;

@@ -32,6 +32,15 @@ class _ReaderStub(QWidget):
     def set_message(self, *_args, **_kwargs) -> None:
         return None
 
+    def set_compact(self, *_args, **_kwargs) -> None:
+        return None
+
+    def set_adaptive_content_height(self, *_args, **_kwargs) -> None:
+        return None
+
+    def set_fragment(self, *_args, **_kwargs) -> None:
+        return None
+
 
 def _application() -> QApplication:
     return QApplication.instance() or QApplication([])
