@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPalette, QRegion
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QFrame, QWidget
 
 THEME_MODES = {"system", "light", "dark"}
+
+
+def _check_mark_url() -> str:
+    """定位勾选对勾图标的 URL，兼容源码与打包运行。"""
+    candidates = [Path(__file__).resolve().parent / "check_mark.png"]
+    if getattr(sys, "frozen", False):
+        candidates.insert(
+            0,
+            Path(getattr(sys, "_MEIPASS", "."))
+            / "yancuo_win"
+            / "ui"
+            / "check_mark.png",
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.as_uri()
+    return ""
 
 
 @dataclass(frozen=True)
@@ -1277,8 +1296,9 @@ def app_stylesheet(theme: str = "light") -> str:
         border-color: {t.muted};
     }}
     QCheckBox::indicator:checked {{
-        background: {t.muted};
-        border-color: {t.muted};
+        background: {t.primary};
+        border-color: {t.primary};
+        image: url("{_check_mark_url()}");
     }}
     QRadioButton::indicator {{
         width: 16px;
