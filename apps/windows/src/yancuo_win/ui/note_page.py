@@ -728,16 +728,13 @@ class NotePage(QWidget):
         library_root.setSpacing(12)
 
         self.new_note_button = primary_button("新建笔记")
-        self.new_note_button.clicked.connect(self._show_manual_create)
-        ai_note_button = QPushButton("AI 图片录入")
-        ai_note_button.clicked.connect(self._show_ai_intake)
+        self.new_note_button.clicked.connect(self._show_new_note_menu)
         self.resume_draft_button = ghost_button("继续草稿")
         self.resume_draft_button.clicked.connect(self._resume_note_draft)
         header = PageHeader(
             "笔记", "用可编辑的内容块整理公式、概念和学习记录。"
         )
         header.add_action(self.resume_draft_button)
-        header.add_action(ai_note_button)
         header.add_action(self.new_note_button)
         library_root.addWidget(header)
 
@@ -1656,6 +1653,15 @@ class NotePage(QWidget):
     def _show_library(self, *_args, select_note_id: str | None = None) -> None:
         self._restore_library_state(select_note_id=select_note_id)
         self.library_shown.emit()
+
+    def _show_new_note_menu(self) -> None:
+        """新建笔记下拉：AI 图片录入 / 手动录入。"""
+        menu = QMenu(self)
+        ai = menu.addAction("AI 图片录入")
+        ai.triggered.connect(self._show_ai_intake)
+        manual = menu.addAction("手动录入")
+        manual.triggered.connect(self._show_manual_create)
+        show_dropdown_menu(menu, self.new_note_button)
 
     def _show_manual_create(self) -> None:
         if self.page_stack.currentWidget() is self.library_page:
