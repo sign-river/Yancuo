@@ -62,10 +62,12 @@ _PROVIDER_LABELS = {
 _ACTIVE_STATUSES = frozenset({"pending", "running"})
 _DONE_STATUSES = frozenset({"completed", "done"})
 _FAILED_STATUSES = frozenset({"failed", "canceled", "cancelled"})
+# (页签名, 子队列类型, 状态文案覆盖)
 _QUEUE_TABS = (
-    ("进行中", _ACTIVE_STATUSES, "active"),
-    ("已完成", _DONE_STATUSES, "done"),
-    ("失败", _FAILED_STATUSES, "failed"),
+    ("进行中", "active", None),
+    ("待审核", "review", "待审核"),
+    ("已完成", "done", None),
+    ("失败", "failed", None),
 )
 
 
@@ -85,14 +87,14 @@ def _provider_label(provider: str) -> str:
     return _PROVIDER_LABELS.get(provider, provider)
 
 
-def _job_label(job) -> str:
+def _job_label(job, status_override: str | None = None) -> str:
     """用户友好的一行任务摘要，不展示原始英文代码与任务 ID。"""
     cost = float(job.estimated_cost or 0.0)
     parts = [
         _domain_label(job.domain),
         _job_type_label(job.job_type),
         _provider_label(job.provider),
-        _status_label(job.status),
+        _status_label(status_override or job.status),
         f"{int(job.done_items or 0)}/{int(job.total_items or 0)}",
     ]
     if int(job.failed_items or 0):
@@ -224,17 +226,19 @@ class _QueuePane(QWidget):
         self,
         ai: AIService,
         coordinator: AIJobCoordinator,
-        statuses: frozenset[str],
+        predicate,
         kind: str,
         tab_label: str,
+        status_override: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.ai = ai
         self.coordinator = coordinator
-        self.statuses = statuses
+        self.predicate = predicate
         self.kind = kind
         self.tab_label = tab_label
+        self.status_override = status_override
         self._last_snapshot: list[tuple[str, str]] = []
 
         layout = QVBoxLayout(self)
@@ -281,7 +285,7 @@ class _QueuePane(QWidget):
     def refresh(self) -> None:
         jobs = [
             job for job in self.ai.list_jobs(limit=100)
-            if job.status in self.statuses
+            if self.predicate(job)
         ]
         snapshot = [(job.id, _job_label(job)) for job in jobs]
         # 内容没变就不重建列表，避免每 2s 刷新把滚动位置和选择重置到顶部
@@ -293,7 +297,7 @@ class _QueuePane(QWidget):
         scroll = self.list.verticalScrollBar().value()
         self.list.clear()
         for job in jobs:
-            item = QListWidgetItem(_job_label(job))
+            item = QListWidgetItem(_job_label(job, self.status_override))
             item.setData(256, job.id)
             self.list.addItem(item)
             if job.id == selected_job_id:
@@ -347,12 +351,14 @@ class TaskQueuePage(QWidget):
         self,
         ai: AIService,
         coordinator: AIJobCoordinator | None = None,
+        pending_review=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("TaskQueuePage")
         self.ai = ai
         self.coordinator = coordinator or AIJobCoordinator(ai, self)
+        self._pending_review = pending_review or (lambda job: False)
         self.setWindowTitle("任务队列")
         self.resize(760, 520)
 
@@ -370,9 +376,15 @@ class TaskQueuePage(QWidget):
 
         self.tabs = QTabWidget()
         self.panes: dict[str, _QueuePane] = {}
-        for tab_label, statuses, kind in _QUEUE_TABS:
+        for tab_label, kind, status_override in _QUEUE_TABS:
             pane = _QueuePane(
-                self.ai, self.coordinator, statuses, kind, tab_label, self
+                self.ai,
+                self.coordinator,
+                self._pane_predicate(kind),
+                kind,
+                tab_label,
+                status_override,
+                self,
             )
             pane.open_requested.connect(self.job_open_requested)
             self.panes[kind] = pane
@@ -397,6 +409,22 @@ class TaskQueuePage(QWidget):
     def failed_pane(self) -> _QueuePane:
         return self.panes["failed"]
 
+    @property
+    def review_pane(self) -> _QueuePane:
+        return self.panes["review"]
+
+    def _pane_predicate(self, kind: str):
+        def predicate(job):
+            if kind == "review":
+                return job.status in _DONE_STATUSES and self._pending_review(job)
+            if kind == "done":
+                return job.status in _DONE_STATUSES and not self._pending_review(job)
+            if kind == "active":
+                return job.status in _ACTIVE_STATUSES
+            return job.status in _FAILED_STATUSES
+
+        return predicate
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self.refresh()
@@ -410,10 +438,11 @@ class TaskQueuePage(QWidget):
         cost = self.ai.today_cost()
         jobs = self.ai.list_jobs(limit=100)
         active = sum(1 for j in jobs if j.status in _ACTIVE_STATUSES)
-        done = sum(1 for j in jobs if j.status in _DONE_STATUSES)
+        review = sum(1 for j in jobs if j.status in _DONE_STATUSES and self._pending_review(j))
+        done = sum(1 for j in jobs if j.status in _DONE_STATUSES and not self._pending_review(j))
         failed = sum(1 for j in jobs if j.status in _FAILED_STATUSES)
         self.summary.setText(
-            f"进行中 {active} 项 · 已完成 {done} 项 · 失败 {failed} 项 · 今日费用 ¥{cost:.2f}"
+            f"进行中 {active} 项 · 待审核 {review} 项 · 已完成 {done} 项 · 失败 {failed} 项 · 今日费用 ¥{cost:.2f}"
         )
         for pane in self.panes.values():
             pane.refresh()

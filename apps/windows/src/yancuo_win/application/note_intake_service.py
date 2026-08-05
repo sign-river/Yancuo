@@ -757,7 +757,7 @@ class NoteIntakeService:
             raise DomainError(f"不支持的笔记录入状态：{status}")
         with self.runtime.session_factory() as session:
             intake = self._get_open_session(session, session_id)
-            if status == "processing" and intake.status not in {"draft", "failed", "review"}:
+            if status == "processing" and intake.status not in {"draft", "failed", "review", "processing"}:
                 raise DomainError("当前笔记录入状态不能重新开始识别")
             if status == "completed" and intake.status != "review":
                 raise DomainError("笔记草稿尚未进入确认状态")

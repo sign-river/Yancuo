@@ -36,20 +36,26 @@ class _FakeAI:
         return 0.0
 
 
-def test_console_has_three_status_queues_and_lists_jobs() -> None:
+def test_console_has_four_status_queues_and_lists_jobs() -> None:
     _ = QApplication.instance() or QApplication([])
     ai = _FakeAI([
         _job("q1", "question_intake", status="running"),
         _job("q2", "question_intake", status="completed"),
+        _job("q3", "question_intake", status="completed"),
         _job("n1", "note_intake", status="failed"),
         _job("c1", "question_completion", status="pending"),
     ])
-    page = TaskQueuePage(ai)
-    assert page.tabs.count() == 3
-    assert [page.tabs.tabText(i) for i in range(3)] == ["进行中", "已完成", "失败"]
+    def pending(job):
+        return job.id == "q2"  # q2 已完成但仍有待审核内容
+
+    page = TaskQueuePage(ai, pending_review=pending)
+    assert page.tabs.count() == 4
+    assert [page.tabs.tabText(i) for i in range(4)] == ["进行中", "待审核", "已完成", "失败"]
     assert page.active_pane.list.count() == 2  # running + pending
-    assert page.done_pane.list.count() == 1
-    assert page.failed_pane.list.count() == 1
+    assert page.review_pane.list.count() == 1  # q2 待审核
+    assert "待审核" in page.review_pane.list.item(0).text()
+    assert page.done_pane.list.count() == 1  # q3 已完成
+    assert page.failed_pane.list.count() == 1  # n1
     page.close()
 
 

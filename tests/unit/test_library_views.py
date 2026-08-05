@@ -1210,7 +1210,7 @@ def test_mock_provider_hint_and_task_selection_are_non_blocking(
     assert messages[-1] == "Mock 不访问网络；连接测试请先选择 Faro API"
 
     page = window.task_queue_page
-    assert page.tabs.count() == 3
+    assert page.tabs.count() == 4
     assert page.summary.text() != ""
     page._run_selected()  # no selection; must not crash
     page.active_pane.refresh()

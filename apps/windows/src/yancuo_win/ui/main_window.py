@@ -461,7 +461,9 @@ class MainWindow(QMainWindow):
         )
         self.ai_completion_page.accepted.connect(self._close_ai_completion)
         self.stack.addWidget(self.ai_completion_page)
-        self.task_queue_page = TaskQueuePage(self.ai, self.ai_coordinator)
+        self.task_queue_page = TaskQueuePage(
+            self.ai, self.ai_coordinator, pending_review=self._job_needs_review
+        )
         self.task_queue_page.job_open_requested.connect(self._open_task_job)
         self.task_queue_page.back_requested.connect(self._show_dashboard)
         self.stack.addWidget(self.task_queue_page)
@@ -2123,6 +2125,21 @@ class MainWindow(QMainWindow):
         """Open the embedded task queue page instead of a modal dialog."""
         self.task_queue_page.refresh()
         self._show_navigation_page(_PAGE_TASK_QUEUE)
+
+    def _job_needs_review(self, job) -> bool:
+        """判断已完成任务是否还有待审核内容（题目候选 / 笔记草稿确认）。"""
+        try:
+            if job.domain == "question_intake":
+                return any(
+                    batch.job_id == job.id and batch.pending_candidates > 0
+                    for batch in self.intake.list_resumable_ai_batches()
+                )
+            if job.domain == "note_intake":
+                intake = self.note_page.note_intake.get_session(job.context_id)
+                return intake is not None and intake.status == "review"
+        except DomainError:
+            return False
+        return False
 
     def _open_task_job(self, job_id: str) -> None:
         """从任务队列进入任务；退出时回到任务列表。"""
