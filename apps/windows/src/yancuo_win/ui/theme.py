@@ -1051,7 +1051,7 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 8px 14px;
         min-height: 20px;
     }}
-    QComboBox#SearchScopeCombo {{
+    QComboBox#SearchModeCombo, QComboBox#SearchScopeCombo {{
         background: {t.surface_subtle};
         border: 1px solid {t.divider};
         border-radius: {m.radius_control}px;
@@ -1177,7 +1177,7 @@ def app_stylesheet(theme: str = "light") -> str:
         min-width: 78px;
     }}
     QPushButton#LibraryViewButton {{
-        min-width: 92px;
+        min-width: 84px;
     }}
     QPushButton#SearchModeButton:hover:!checked:!disabled,
     QPushButton#LibraryViewButton:hover:!checked:!disabled {{

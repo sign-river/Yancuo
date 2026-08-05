@@ -926,6 +926,17 @@ def test_catalog_menu_and_editor_use_valid_full_paths(window: MainWindow) -> Non
     ]
 
 
+def test_library_search_combo_uses_scope_combo_style(window: MainWindow) -> None:
+    assert window.library_search_combo.objectName() == "SearchModeCombo"
+    assert window.library_search_combo.height() == window.search_scope_combo.height()
+
+
+def test_library_view_switch_fits_navigation_panel(window: MainWindow) -> None:
+    switch = window.library_browse_button.parentWidget()
+    needed = switch.layout().minimumSize().width()
+    assert needed <= window.library_navigation_panel.minimumWidth()
+
+
 def test_library_view_buttons_are_separate_and_aligned_with_tree(window: MainWindow) -> None:
     switch = window.library_browse_button.parentWidget()
     # 两个按钮并排放在同一个切换框内，不再使用下拉框

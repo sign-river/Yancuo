@@ -1096,6 +1096,7 @@ class MainWindow(QMainWindow):
             button.clicked.connect(self._on_search_mode_changed)
         self.local_search_button.setChecked(True)
         self.library_search_combo = QComboBox()
+        self.library_search_combo.setObjectName("SearchModeCombo")
         self.library_search_combo.setAccessibleName("\u9898\u5e93\u641c\u7d22\u65b9\u5f0f")
         self.library_search_combo.addItem("\u666e\u901a\u641c\u7d22", "local")
         self.library_search_combo.addItem("AI \u641c\u7d22", "ai")
