@@ -85,6 +85,8 @@ _PAGE_AI_CONFIRM = 3
 _PAGE_DONE = 4
 _PAGE_AI_ANSWER_CAPTURE = 5
 
+_AI_PROCESSING_HINT = "正在识别并整理题目，请稍候…"
+
 
 class ContentBlocksEditor(QWidget):
     """Ordered editor for AI-recognized text, formula, table, and figure blocks."""
@@ -2557,14 +2559,12 @@ class IntakePage(QWidget):
             return
         self.progress_bar.setRange(0, max(1, progress.total))
         self.progress_bar.setValue(progress.done + progress.failed)
-        stage_label = self._ai_live_stage_label or progress.stage_label
         self.processing_status.setText(
-            f"{stage_label} · "
-            f"完成 {progress.done} / {progress.total} · 失败 {progress.failed}"
+            f"已完成 {progress.done}/{progress.total} · 失败 {progress.failed}"
         )
         self.ai_task_surface.show()
         self.ai_task_status.setText(
-            f"{stage_label} · 完成 {progress.done}/{progress.total} · 失败 {progress.failed}"
+            f"已完成 {progress.done}/{progress.total} · 失败 {progress.failed}"
         )
         timing_labels = (
             ("queue_wait", "任务排队"),
@@ -2606,17 +2606,17 @@ class IntakePage(QWidget):
                 if progress.cache_hits
                 else ""
             )
-            self.processing_steps.setText(
+            timing_text = (
                 f"已完成 {progress.timing_samples} 张的实测平均："
                 + " · ".join(measured)
                 + retry_text
                 + cache_text
             )
+            if self.processing_steps.text() != timing_text:
+                self.processing_steps.setText(timing_text)
         else:
-            self.processing_steps.setText(
-                f"当前真实阶段：{progress.stage_label}。"
-                "每张图片只发起一次主 AI 请求；完成首张后显示实测耗时。"
-            )
+            if self.processing_steps.text() != _AI_PROCESSING_HINT:
+                self.processing_steps.setText(_AI_PROCESSING_HINT)
         if progress.status == "cancelled":
             self.progress_timer.stop()
             self._cancelled_ai_jobs.add(progress.job_id)
@@ -2639,10 +2639,11 @@ class IntakePage(QWidget):
             if not self._ai_live_stage_history or self._ai_live_stage_history[-1] != label:
                 self._ai_live_stage_history.append(label)
                 self._ai_live_stage_history = self._ai_live_stage_history[-4:]
-            self.processing_status.setText(label)
-            self.processing_steps.setText(" · ".join(self._ai_live_stage_history))
+            if self.processing_steps.text() != _AI_PROCESSING_HINT:
+                self.processing_steps.setText(_AI_PROCESSING_HINT)
             self.ai_task_surface.show()
-            self.ai_task_status.setText(label)
+            if self.ai_task_status.text() != label:
+                self.ai_task_status.setText(label)
         text_delta = event.get("text_delta")
         if isinstance(text_delta, str) and text_delta:
             cursor = self.processing_preview.textCursor()
