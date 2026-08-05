@@ -268,6 +268,10 @@ def test_combo_popup_clips_native_shell_and_uses_shared_item_delegate() -> None:
     assert isinstance(combo.view().itemDelegate(), widgets_module.SoftItemDelegate)
     assert combo.view().property("yancuoDropdownDelegate") is True
     assert popup.property("yancuoRoundedPopupShell") is True
+    # 弹层列表视图移至触发框下方约 6px，不再覆盖触发框
+    combo_bottom = combo.mapToGlobal(combo.rect().bottomLeft()).y()
+    view_top = combo.view().mapToGlobal(combo.view().rect().topLeft()).y()
+    assert view_top >= combo_bottom + 4
 
     combo.hidePopup()
     combo.close()

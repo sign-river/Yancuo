@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPalette, QRegion
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QFrame, QWidget
 
@@ -1570,6 +1570,8 @@ class ThemeManager(QObject):
             and watched.metaObject().className() == "QComboBoxPrivateContainer"
         ):
             self._style_combo_popup(watched)
+            if event.type() == QEvent.Type.Show:
+                self._offset_combo_popup(watched)
         return super().eventFilter(watched, event)
 
     @staticmethod
@@ -1606,6 +1608,44 @@ class ThemeManager(QObject):
             view.setMouseTracking(True)
             view.setProperty("yancuoDropdownDelegate", True)
         popup.setProperty("yancuoRoundedPopupShell", True)
+
+    @staticmethod
+    def _offset_combo_popup(popup: QWidget) -> None:
+        """Keep a small gap between the trigger and its combo popup.
+
+        Qt places the private popup container at the trigger's top-left
+        corner, so the list view starts over the combo box and visually
+        covers it.  Shift the whole popup so the list view starts just
+        below (or above) the trigger with a 6px gap.
+        """
+
+        def apply() -> None:
+            if not popup.isVisible():
+                return
+            combo = popup.parentWidget()
+            if combo is None:
+                return
+            view = popup.findChild(QAbstractItemView)
+            if view is None:
+                return
+            gap = 6
+            combo_top = combo.mapToGlobal(combo.rect().topLeft()).y()
+            combo_bottom = combo.mapToGlobal(combo.rect().bottomLeft()).y()
+            view_top = view.mapToGlobal(view.rect().topLeft()).y()
+            view_bottom = view.mapToGlobal(view.rect().bottomLeft()).y()
+            if view_bottom <= combo_top + 2:
+                # opened above the trigger: shift up so the gap stays below the list
+                shift = combo_top - view_bottom + gap
+                target_y = popup.y() - max(0, shift)
+            else:
+                # opened below (or over) the trigger: shift down so the list
+                # starts below the trigger with a visible gap
+                shift = combo_bottom - view_top + gap
+                target_y = popup.y() + max(0, shift)
+            if abs(target_y - popup.y()) > 0.5:
+                popup.move(popup.x(), round(target_y))
+
+        QTimer.singleShot(0, apply)
 
     def set_mode(self, mode: str) -> str:
         self.mode = normalize_theme_mode(mode)
