@@ -1175,8 +1175,10 @@ class MainWindow(QMainWindow):
         self.library_view_combo.currentIndexChanged.connect(
             self._on_library_view_combo_changed
         )
-        view_switch_layout.addWidget(self.library_view_combo)
-        tabs.addWidget(view_switch)
+        # \u4e0b\u62c9\u6846\u4ec5\u4fdd\u7559\u540e\u7aef\u517c\u5bb9\uff0c\u4e0d\u518d\u5c55\u793a\uff1b\u76f4\u63a5\u5c55\u793a\u4e24\u4e2a\u5207\u6362\u6309\u94ae
+        self.library_view_combo.setVisible(False)
+        view_switch_layout.addWidget(self.library_browse_button)
+        view_switch_layout.addWidget(self.library_process_button)
         tabs.addWidget(search_bar, 1)
         outer.addLayout(tabs)
 
@@ -1194,6 +1196,7 @@ class MainWindow(QMainWindow):
         nav_layout = QVBoxLayout(navigation)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(0)
+        nav_layout.addWidget(view_switch)
         nav_header = self._library_panel_header("\u77e5\u8bc6\u6d4f\u89c8", "")
         nav_header.setFixedHeight(48)
         self.library_nav_title = nav_header.findChild(QLabel, "PanelTitle")
