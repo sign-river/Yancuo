@@ -15,7 +15,16 @@ from time import perf_counter
 from typing import Any
 
 from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QImage,
+    QPainter,
+    QPen,
+    QPixmap,
+    QTextCursor,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
@@ -88,6 +97,23 @@ _PAGE_AI_ANSWER_CAPTURE = 5
 _AI_PROCESSING_HINT = "正在识别并整理题目，请稍候…"
 
 
+class FocusAwareTextEdit(QTextEdit):
+    """文本编辑框只在获得焦点（被点击/选中）时才响应滚轮。
+
+    未聚焦时把滚轮事件透传给父级滚动区域，避免滚动经过容器时
+    被文本容器截获、变成容器内滚动。
+    """
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        if not self.hasFocus():
+            event.ignore()
+            return
+        if self.verticalScrollBar().maximum() == 0:
+            event.ignore()
+            return
+        super().wheelEvent(event)
+
+
 class ContentBlocksEditor(QWidget):
     """Ordered editor for AI-recognized text, formula, table, and figure blocks."""
 
@@ -125,10 +151,10 @@ class ContentBlocksEditor(QWidget):
         self.kind = QComboBox()
         for label, value in (("文本", "text"), ("公式", "formula"), ("表格", "table"), ("题图", "figure")):
             self.kind.addItem(label, value)
-        self.content = QTextEdit()
+        self.content = FocusAwareTextEdit()
         self.content.setMaximumHeight(100)
         self.content.setPlaceholderText("文本、公式或题图说明")
-        self.table_rows = QTextEdit()
+        self.table_rows = FocusAwareTextEdit()
         self.table_rows.setMaximumHeight(130)
         self.table_rows.setPlaceholderText(
             "每行一行、制表符分隔；合并单元格可直接填写 rows JSON"
@@ -987,7 +1013,7 @@ class ProblemForm(QWidget):
 
     @staticmethod
     def _text_area(placeholder: str, height: int) -> QTextEdit:
-        editor = QTextEdit()
+        editor = FocusAwareTextEdit()
         editor.setPlaceholderText(placeholder)
         editor.setProperty("contentMaxHeight", max(150, height * 2))
         editor.setUndoRedoEnabled(True)
@@ -1703,7 +1729,7 @@ class IntakePage(QWidget):
             self._edit_figure_crop
         )
         form_layout.addWidget(self.ai_form)
-        self.ai_result_tabs.addTab(self._scroll(form_host), "编辑字段")
+        self.ai_result_tabs.addTab(form_host, "编辑字段")
         self.ai_result_tabs.addTab(
             self._build_image_tools_tab(), "原图范围与重识别"
         )
