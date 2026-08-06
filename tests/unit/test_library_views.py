@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -30,6 +31,7 @@ import yancuo_win.ui.settings_dialog as settings_dialog_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
+from yancuo_win.data.models import Asset
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
 from yancuo_win.ui.math_content import MathContentView
@@ -44,6 +46,9 @@ class _ReaderStub(QWidget):
     def set_accessible_content(self, name, description="") -> None:
         self.setAccessibleName(name)
         self.setAccessibleDescription(description)
+
+    def set_compact(self, *_args, **_kwargs) -> None:
+        pass
 
     def set_fit_content_height(self, *_args, **_kwargs) -> None:
         self.fit_content_height_args = _args
@@ -471,6 +476,102 @@ def test_problem_detail_reference_canvas_stays_embedded_and_keeps_normalized_reg
     assert page.reference_previews.count() == 1
     assert page.reference_summary.text() == "本次引用 1 个区域"
     assert not page.reference_canvas.isWindow()
+
+
+def test_problem_detail_box_select_disabled_without_figure_sources(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    page = window.problem_detail_page
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
+    window._open_problem_detail(problem.id)
+    app.processEvents()
+
+    assert page._reference_sources == []
+    assert page.reference_source_combo.count() == 0
+    assert not page.add_reference_button.isEnabled()
+    assert "没有可框选的题图" in page.add_reference_button.toolTip()
+
+    captured = []
+    monkeypatch.setattr(
+        problem_detail_module,
+        "show_dropdown_menu",
+        lambda menu, _anchor: captured.append(menu),
+    )
+    page._show_attach_menu()
+    assert len(captured) == 1
+    actions = {action.text(): action for action in captured[0].actions()}
+    assert not actions["框选题图"].isEnabled()
+    assert "没有可框选的题图" in actions["框选题图"].toolTip()
+    assert not actions["清除全部引用"].isEnabled()
+    assert not actions["删除选中引用"].isEnabled()
+    assert not actions["退出框选"].isEnabled()
+
+    messages: list[str] = []
+    page.status_message.connect(messages.append)
+    page._enable_reference_mode()
+    assert messages == ["本题没有可框选的题图；将按整题文字提问"]
+    assert page.reader_stack.currentWidget() is page.reader
+
+
+def test_problem_detail_box_select_enabled_with_figure_sources(
+    window: MainWindow,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    page = window.problem_detail_page
+    source = tmp_path / "figure.png"
+    image = QImage(40, 30, QImage.Format.Format_RGB32)
+    image.fill(QColor("#FFFFFF"))
+    assert image.save(str(source), "PNG")
+    stored = window.services.store.store_copy(source, role="derived_figure")
+    problem = window.services.create_problem(title="有题图题", status="active")
+    with window.problem_chat._session() as session:
+        session.add(
+            Asset(
+                id="asset_figure",
+                problem_id=problem.id,
+                role="derived_figure",
+                sha256=stored.sha256,
+                relative_path=stored.relative_path,
+                mime_type="image/png",
+            )
+        )
+        stored_problem = session.get(type(problem), problem.id)
+        stored_problem.question_content_json = json.dumps(
+            [{"type": "figure", "derived_asset_id": "asset_figure"}]
+        )
+        session.commit()
+
+    window._open_problem_detail(problem.id)
+    app.processEvents()
+
+    assert len(page._reference_sources) == 1
+    assert page.reference_source_combo.count() == 1
+    assert page.add_reference_button.isEnabled()
+    assert "拖拽框选" in page.add_reference_button.toolTip()
+    assert page.reference_summary.text() == "未引用区域；将按整题提问"
+
+    captured = []
+    monkeypatch.setattr(
+        problem_detail_module,
+        "show_dropdown_menu",
+        lambda menu, _anchor: captured.append(menu),
+    )
+    page._show_attach_menu()
+    assert len(captured) == 1
+    actions = {action.text(): action for action in captured[0].actions()}
+    assert actions["框选题图"].isEnabled()
+
+    page._enable_reference_mode()
+    assert page.reader_stack.currentWidget() is page.reference_canvas
+    assert page.reference_canvas._selection_enabled
+    assert not page.reference_canvas._pixmap.isNull()
 
 
 def test_ai_completion_entry_opens_page_preparation_without_starting_job(

@@ -447,6 +447,7 @@ class MainWindow(QMainWindow):
             self._archive_problem_from_detail
         )
         self.problem_detail_page.trash_requested.connect(self._trash_problem_from_detail)
+        self.problem_detail_page.status_message.connect(self._show_status_toast)
         self.problem_detail_page.restore_requested.connect(
             self._restore_problem_from_detail
         )

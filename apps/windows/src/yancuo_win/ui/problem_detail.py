@@ -490,6 +490,7 @@ class ProblemDetailPage(QWidget):
     archive_requested = Signal(str)
     trash_requested = Signal(str)
     restore_requested = Signal(str)
+    status_message = Signal(str)
 
     @staticmethod
     def _toolbar_group() -> QWidget:
@@ -925,6 +926,9 @@ class ProblemDetailPage(QWidget):
         self._set_reference_source()
         enabled = bool(self._reference_sources)
         self.add_reference_button.setEnabled(enabled)
+        self.add_reference_button.setToolTip(
+            "在左侧题图上拖拽框选" if enabled else "本题没有可框选的题图"
+        )
         self.clear_references_button.setEnabled(enabled)
         self.reference_source_combo.setEnabled(enabled and len(self._reference_sources) > 1)
         self._update_reference_summary()
@@ -942,6 +946,7 @@ class ProblemDetailPage(QWidget):
 
     def _enable_reference_mode(self) -> None:
         if self.reference_source_combo.currentData() is None:
+            self.status_message.emit("本题没有可框选的题图；将按整题文字提问")
             return
         self.reader_stack.setCurrentWidget(self.reference_canvas)
         self.reference_canvas.show()
@@ -991,9 +996,13 @@ class ProblemDetailPage(QWidget):
     def _update_reference_summary(self) -> None:
         references = self.reference_canvas.references()
         count = len(references)
-        self.reference_summary.setText(
-            f"本次引用 {count} 个区域" if count else "未引用区域；将按整题提问"
-        )
+        if count:
+            summary = f"本次引用 {count} 个区域"
+        elif self._reference_sources:
+            summary = "未引用区域；将按整题提问"
+        else:
+            summary = "本题没有可框选的题图；将按整题文字提问"
+        self.reference_summary.setText(summary)
         self.reference_previews.clear()
         for index, reference in enumerate(references):
             item = QListWidgetItem(str(index + 1))
@@ -1207,10 +1216,17 @@ class ProblemDetailPage(QWidget):
 
     def _show_attach_menu(self) -> None:
         menu = QMenu(self)
-        menu.addAction("框选题图", self._enable_reference_mode)
-        menu.addAction("清除全部引用", self._clear_references)
-        menu.addAction("删除选中引用", self.reference_canvas.delete_selected)
-        menu.addAction("退出框选", self._finish_reference_mode)
+        box_action = menu.addAction("框选题图", self._enable_reference_mode)
+        box_action.setEnabled(bool(self._reference_sources))
+        box_action.setToolTip(
+            "在左侧题图上拖拽框选" if self._reference_sources else "本题没有可框选的题图"
+        )
+        clear_action = menu.addAction("清除全部引用", self._clear_references)
+        clear_action.setEnabled(bool(self.reference_canvas.references()))
+        delete_action = menu.addAction("删除选中引用", self.reference_canvas.delete_selected)
+        delete_action.setEnabled(self.reference_canvas._selected_index >= 0)
+        finish_action = menu.addAction("退出框选", self._finish_reference_mode)
+        finish_action.setEnabled(self.reader_stack.currentWidget() is self.reference_canvas)
         show_dropdown_menu(menu, self._attach_button)
 
     def _toggle_reference_card(self) -> None:
