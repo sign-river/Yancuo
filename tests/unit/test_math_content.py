@@ -47,6 +47,9 @@ class _DocumentStub(QObject):
     def pageCount(self) -> int:  # noqa: N802
         return 1 if self.loaded else 0
 
+    def pagePointSize(self, _page_number: int) -> QSizeF:  # noqa: N802
+        return QSizeF(794.0, 600.0)
+
 
 class _PdfViewStub(QWidget):
     class PageMode:
@@ -54,16 +57,23 @@ class _PdfViewStub(QWidget):
 
     class ZoomMode:
         FitToWidth = 1
+        Custom = 2
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.current_document = None
+
+    def viewport(self):
+        return self
 
     def setPageMode(self, _mode) -> None:  # noqa: ANN001, N802
         pass
 
     def setZoomMode(self, _mode) -> None:  # noqa: ANN001, N802
         pass
+
+    def setZoomFactor(self, factor) -> None:  # noqa: ANN001, N802
+        self.zoom_factor_value = factor
 
     def setPageSpacing(self, _spacing: int) -> None:  # noqa: N802
         pass
@@ -194,6 +204,19 @@ def test_adaptive_reader_fits_short_content_and_scrolls_long_content() -> None:
     )
     reader.close()
     app.processEvents()
+
+
+def test_reader_scroll_helpers_restore_position_and_follow_long_chat() -> None:
+    QApplication.instance() or QApplication([])
+    reader = MathContentView()
+    scrollbar = reader._view.verticalScrollBar()
+    scrollbar.setRange(0, 240)
+
+    reader.restore_scroll_position(73)
+    assert reader.scroll_position() == 73
+
+    reader.scroll_to_bottom()
+    assert reader.scroll_position() == 240
 
 
 def test_reserved_adaptive_reader_keeps_stable_height() -> None:
@@ -369,3 +392,112 @@ def test_note_document_renders_formula_concept_and_source_region() -> None:
     assert rendered.count("<math") >= 3
     assert "<mfrac>" in rendered
     assert r"\frac" not in rendered
+
+def test_classic_problem_card_three_part_layout() -> None:
+    rendered = build_problem_html(
+        {
+            "title": "含参数极限",
+            "content_blocks": [
+                {"type": "text", "content": "12. 已知"},
+                {"type": "formula", "content": r"\lim_{x\to 0}\frac{1-\cos x}{x^2}"},
+                {"type": "text", "content": "求 A 与 k 的值。"},
+            ],
+            "user_answer": "A=1",
+            "correct_answer": "A=1",
+            "solution_markdown": "由等价无穷小可得。",
+        },
+        classic=True,
+    )
+
+    assert 'class="classic-problem"' in rendered
+    assert 'class="content-card problem-card"' in rendered
+    assert '<h2 class="card-section-title">题目</h2>' in rendered
+    assert '<div class="problem-statement">' in rendered
+    assert '<div class="formula-block">' in rendered
+    assert '<div class="problem-ask">' in rendered
+    assert '<div class="problem-flow">' not in rendered
+    body_start = rendered.index("<body")
+    statement_index = rendered.index("problem-statement", body_start)
+    formula_index = rendered.index("formula-block", body_start)
+    ask_index = rendered.index("problem-ask", body_start)
+    assert statement_index < formula_index < ask_index
+    assert 'body.classic-problem .formula-block math[display="block"]' in rendered
+    assert "min-height: 280px" in rendered
+
+
+def test_classic_problem_card_separates_answer_cards() -> None:
+    rendered = build_problem_html(
+        {
+            "title": "经典题",
+            "content_blocks": [
+                {"type": "text", "content": "题干"},
+                {"type": "formula", "content": r"x^2+1"},
+                {"type": "text", "content": "求值。"},
+            ],
+            "user_answer": "我的作答内容",
+            "correct_answer": "正确答案内容",
+            "solution_markdown": "解析内容",
+        },
+        classic=True,
+    )
+
+    assert rendered.count('class="content-card detail-card"') == 3
+    assert rendered.count('class="content-card problem-card"') == 1
+    assert "我的作答" in rendered
+    assert "正确答案" in rendered
+    assert "解析" in rendered
+
+
+def test_classic_legacy_question_uses_centered_formula_card() -> None:
+    rendered = build_problem_html(
+        {
+            "title": "极限",
+            "question_markdown": "求下式",
+            "question_latex": r"x^2+1",
+        },
+        classic=True,
+    )
+
+    assert "题目公式" not in rendered
+    assert "formula-block" in rendered
+    assert "problem-statement" in rendered
+    assert 'class="content-card problem-card"' in rendered
+
+
+def test_classic_compact_preview_uses_tight_spacing() -> None:
+    rendered = build_problem_html(
+        {
+            "title": "预览题",
+            "content_blocks": [
+                {"type": "text", "content": "12. 已知"},
+                {"type": "formula", "content": r"x^2+1"},
+                {"type": "text", "content": "求值。"},
+            ],
+        },
+        classic=True,
+        compact=True,
+    )
+
+    # 紧凑模式：卡片不设最小高，公式上下距缩小，防止预览框留大片空白
+    assert "min-height: 0px" in rendered
+    assert "margin: 22px 0 26px" in rendered
+    assert "padding: 18px 22px" in rendered
+    assert '<div class="problem-statement">' in rendered
+    assert '<div class="formula-block">' in rendered
+    assert '<div class="problem-ask">' in rendered
+
+
+def test_classic_disabled_by_default_keeps_compact_flow() -> None:
+    rendered = build_problem_html(
+        {
+            "title": "普通题",
+            "content_blocks": [
+                {"type": "text", "content": "题干"},
+                {"type": "formula", "content": r"x^2+1"},
+            ],
+        }
+    )
+
+    assert 'class="classic-problem"' not in rendered
+    assert '<div class="problem-flow">' in rendered
+    assert 'class="content-card problem-card"' not in rendered

@@ -66,6 +66,7 @@ _CHANGED_IDS_KEY = "yancuo_search_changed_ids"
 _DELETED_IDS_KEY = "yancuo_search_deleted_ids"
 _REBUILD_KEY = "yancuo_search_rebuild"
 _HOOKS_INSTALLED_ATTR = "_yancuo_search_hooks_installed"
+_PROBLEM_REBUILD_BATCH_SIZE = 200
 
 
 class SearchIndexService:
@@ -125,6 +126,34 @@ class SearchIndexService:
         return {chapter.id: resolve(chapter) for chapter in chapters}
 
     @classmethod
+    def _document(
+        cls,
+        problem: Problem,
+        subject_names: dict[str, str],
+        chapter_paths: dict[str, str],
+    ) -> dict[str, Any]:
+        if problem.chapter_id:
+            knowledge_path = chapter_paths.get(
+                problem.chapter_id,
+                subject_names.get(problem.subject_id or "", "未分类"),
+            )
+        elif problem.subject_id:
+            knowledge_path = f"{subject_names.get(problem.subject_id, '未知科目')} / 未分类"
+        else:
+            knowledge_path = "未分类"
+        return {
+            "problem_id": problem.id,
+            "status": problem.status,
+            "subject_id": problem.subject_id,
+            "chapter_id": problem.chapter_id,
+            "knowledge_path": knowledge_path,
+            "title": (problem.title or "").strip(),
+            "body": cls._problem_body(problem),
+            "tags_text": " ".join(sorted(tag.name for tag in problem.tags)),
+            "updated_at": problem.updated_at,
+        }
+
+    @classmethod
     def _documents(
         cls,
         session: Session,
@@ -140,33 +169,21 @@ class SearchIndexService:
         problems = list(session.scalars(statement).all())
         subject_names = {subject.id: subject.name for subject in subjects}
         chapter_paths = cls._knowledge_paths(subjects, chapters)
-        documents: list[dict[str, Any]] = []
-        for problem in problems:
-            if problem.chapter_id:
-                knowledge_path = chapter_paths.get(
-                    problem.chapter_id,
-                    subject_names.get(problem.subject_id or "", "未分类"),
-                )
-            elif problem.subject_id:
-                knowledge_path = (
-                    f"{subject_names.get(problem.subject_id, '未知科目')} / 未分类"
-                )
-            else:
-                knowledge_path = "未分类"
-            documents.append(
-                {
-                    "problem_id": problem.id,
-                    "status": problem.status,
-                    "subject_id": problem.subject_id,
-                    "chapter_id": problem.chapter_id,
-                    "knowledge_path": knowledge_path,
-                    "title": (problem.title or "").strip(),
-                    "body": cls._problem_body(problem),
-                    "tags_text": " ".join(sorted(tag.name for tag in problem.tags)),
-                    "updated_at": problem.updated_at,
-                }
-            )
-        return documents
+        return [cls._document(problem, subject_names, chapter_paths) for problem in problems]
+
+    @classmethod
+    def _document_batches(cls, session: Session):
+        subjects = list(session.scalars(select(Subject)).all())
+        chapters = list(session.scalars(select(Chapter)).all())
+        subject_names = {subject.id: subject.name for subject in subjects}
+        chapter_paths = cls._knowledge_paths(subjects, chapters)
+        statement = select(Problem).options(selectinload(Problem.tags))
+        problems = session.scalars(statement).yield_per(_PROBLEM_REBUILD_BATCH_SIZE)
+        for partition in problems.partitions(_PROBLEM_REBUILD_BATCH_SIZE):
+            yield [
+                cls._document(problem, subject_names, chapter_paths)
+                for problem in partition
+            ]
 
     @staticmethod
     def _delete_ids(session: Session, problem_ids: set[str]) -> None:
@@ -187,27 +204,36 @@ class SearchIndexService:
         *,
         problem_ids: set[str] | None = None,
     ) -> int:
-        documents = cls._documents(session, problem_ids)
         if problem_ids is None:
             session.execute(delete(SearchDocument))
             session.execute(text("DELETE FROM search_documents_fts"))
-        else:
-            cls._delete_ids(session, problem_ids)
-        if documents:
-            session.execute(SearchDocument.__table__.insert(), documents)
-            session.execute(
-                text(
-                    """
-                    INSERT INTO search_documents_fts(
-                        problem_id, title, body, tags_text, knowledge_path
-                    ) VALUES (
-                        :problem_id, :title, :body, :tags_text, :knowledge_path
-                    )
-                    """
-                ),
-                documents,
-            )
+            count = 0
+            for documents in cls._document_batches(session):
+                cls._insert_documents(session, documents)
+                count += len(documents)
+            return count
+        documents = cls._documents(session, problem_ids)
+        cls._delete_ids(session, problem_ids)
+        cls._insert_documents(session, documents)
         return len(documents)
+
+    @staticmethod
+    def _insert_documents(session: Session, documents: list[dict[str, Any]]) -> None:
+        if not documents:
+            return
+        session.execute(SearchDocument.__table__.insert(), documents)
+        session.execute(
+            text(
+                """
+                INSERT INTO search_documents_fts(
+                    problem_id, title, body, tags_text, knowledge_path
+                ) VALUES (
+                    :problem_id, :title, :body, :tags_text, :knowledge_path
+                )
+                """
+            ),
+            documents,
+        )
 
     def rebuild(self) -> int:
         """Atomically rebuild the projection and FTS table from canonical rows."""

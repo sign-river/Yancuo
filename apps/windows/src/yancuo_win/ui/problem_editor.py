@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
+
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -13,12 +15,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from yancuo_win.application.services import AppServices
+from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.data.models import Problem
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.widgets import (
@@ -43,6 +47,12 @@ class ProblemEditorDialog(QDialog):
         layout.addWidget(
             PageHeader("编辑题目", "修改题目内容、分类和复习状态；保存后立即同步到题库。")
         )
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # 左栏：实时渲染预览
+        self.preview_view = MathContentView()
+        self.preview_view.set_adaptive_content_height(1200, reserve_height=True)
+        splitter.addWidget(self.preview_view)
+        # 右栏：编辑控件
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -143,8 +153,11 @@ class ProblemEditorDialog(QDialog):
         body_layout.addWidget(analysis)
         body_layout.addStretch(1)
         scroll.setWidget(body)
-        layout.addWidget(scroll, stretch=1)
-
+        splitter.addWidget(scroll)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([380, 420])
+        layout.addWidget(splitter, stretch=1)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -178,7 +191,44 @@ class ProblemEditorDialog(QDialog):
             self.solution,
             self.notes,
         ):
-            w.setUndoRedoEnabled(True)
+            w.setUndoRedoEnabled(True)
+        # 左侧预览随编辑实时刷新
+        for w in (
+            self.title_edit,
+            self.question,
+            self.latex,
+            self.user_answer,
+            self.correct,
+            self.solution,
+            self.notes,
+        ):
+            signal = w.textChanged if isinstance(w, (QLineEdit, QTextEdit)) else None
+            if signal is not None:
+                signal.connect(self._refresh_preview)
+        for w in (self.priority, self.status, self.subject, self.chapter):
+            if isinstance(w, QSpinBox):
+                w.valueChanged.connect(self._refresh_preview)
+            else:
+                w.currentIndexChanged.connect(self._refresh_preview)
+        self._refresh_preview()
+
+
+    def _refresh_preview(self, *_args) -> None:
+        subject_name = self.subject.currentText() if self.subject.currentData() else ""
+        chapter_name = self.chapter.currentText() if self.chapter.currentData() else ""
+        self.preview_view.set_problem(
+            {
+                "title": self.title_edit.text() or "(无标题题目)",
+                "question_markdown": self.question.toPlainText(),
+                "question_latex": self.latex.toPlainText().strip(),
+                "user_answer": self.user_answer.toPlainText(),
+                "correct_answer": self.correct.toPlainText(),
+                "solution_markdown": self.solution.toPlainText(),
+                "notes": self.notes.toPlainText(),
+                "subject_name": subject_name,
+                "chapter_name": chapter_name,
+            },
+        )
 
     def _save(self) -> None:
         try:

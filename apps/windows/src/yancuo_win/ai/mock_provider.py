@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from yancuo_win.ai.base import AIProvider, ChatCompletionResult, JsonCompletionResult, ProviderCapabilities, StructuredResult
 
@@ -108,6 +108,38 @@ class MockProvider(AIProvider):
                 "semantic_intent": query,
                 "limit": 10,
             }
+        elif response_name == "yancuo_problem_completion":
+            try:
+                request_data = json.loads(user_content)
+            except (json.JSONDecodeError, TypeError):
+                request_data = {}
+            current = request_data.get("current_problem", {})
+            allowed = request_data.get("allowed_fields", [])
+            if not isinstance(current, dict):
+                current = {}
+            if not isinstance(allowed, list):
+                allowed = []
+            defaults = {
+                "title": "Mock 补全题目",
+                "question_markdown": "（Mock）根据现有结构化内容补全的题干",
+                "question_latex": "",
+                "user_answer": "",
+                "correct_answer": "（Mock）待核对答案",
+                "solution_markdown": "（Mock）待核对解析",
+                "error_analysis": "（Mock）待核对错因",
+                "notes": "",
+                "tags": ["Mock"],
+            }
+            payload = {
+                field: (
+                    f"（Mock）{current[field]}"
+                    if field == "question_markdown" and current.get(field)
+                    else current.get(field) or defaults.get(field, "")
+                )
+                for field in allowed
+                if field in defaults
+            }
+            payload["uncertain_fields"] = []
         elif response_name == "yancuo_search_rerank":
             ids: list[str] = []
             for line in user_content.splitlines():
@@ -136,11 +168,19 @@ class MockProvider(AIProvider):
         )
 
     def complete_chat(
-        self, *, messages: list[dict[str, Any]], model: str, timeout_seconds: int
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        timeout_seconds: int,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> ChatCompletionResult:
         del timeout_seconds
         question = str(messages[-1].get("content") or "") if messages else ""
+        reply = f"（Mock）针对当前题目的讨论：{question[:200]}"
+        if on_text_delta is not None:
+            on_text_delta(reply)
         return ChatCompletionResult(
-            content_markdown=f"（Mock）针对当前题目的讨论：{question[:200]}",
+            content_markdown=reply,
             model=model or "mock-v1",
         )

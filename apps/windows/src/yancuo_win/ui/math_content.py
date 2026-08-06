@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 import weakref
 from collections.abc import Iterable, Mapping
@@ -20,6 +21,9 @@ from PySide6.QtWebEngineCore import QWebEnginePage
 from yancuo_win.ui.theme import current_theme_name, get_theme_manager, theme_tokens
 
 
+_logger = logging.getLogger("yancuo.math_content")
+
+
 _PREVIEW_ZOOM_SCALE = 0.96
 _PREVIEW_VIEWS: weakref.WeakSet["MathContentView"] = weakref.WeakSet()
 _PDF_CSS_WIDTH = 794
@@ -33,7 +37,7 @@ def set_preview_zoom_scale(scale: float) -> None:
     """Apply the shared reader scale to both existing and future previews."""
 
     global _PREVIEW_ZOOM_SCALE
-    _PREVIEW_ZOOM_SCALE = max(0.8, min(1.0, float(scale)))
+    _PREVIEW_ZOOM_SCALE = max(0.8, min(1.5, float(scale)))
     for view in tuple(_PREVIEW_VIEWS):
         view.set_zoom_scale(_PREVIEW_ZOOM_SCALE)
 
@@ -175,13 +179,131 @@ def _section(
     *,
     empty: str = "（空）",
     allow_bare_latex: bool = True,
+    card_class: str = "",
+    section_key: str | None = None,
 ) -> str:
+    rendered = _render_markdown_tables(
+        value,
+        empty=empty,
+        allow_bare_latex=allow_bare_latex,
+    )
+    extra = f" {card_class}" if card_class else ""
+    data = f' data-section="{section_key}"' if section_key else ""
     return (
-        '<section class="content-card">'
+        f'<section class="content-card{extra}"{data}>'
         f"<h2>{html.escape(title)}</h2>"
-        f'<div class="rich-text">{render_math_text(value, empty=empty, allow_bare_latex=allow_bare_latex)}</div>'
+        f'<div class="rich-text">{rendered}</div>'
         "</section>"
     )
+
+
+def _classic_problem_card(parts: list[tuple[str, str]]) -> str:
+    """Render the classic textbook 题目 card: title, statement, centered formula, ask."""
+    text_indices = [index for index, (kind, _) in enumerate(parts) if kind == "text"]
+    first_text = text_indices[0] if text_indices else None
+    last_text = text_indices[-1] if text_indices else None
+    statement: list[str] = []
+    formulas: list[str] = []
+    ask: list[str] = []
+    for index, (kind, part) in enumerate(parts):
+        if kind == "formula":
+            formulas.append(f'<div class="formula-block">{part}</div>')
+        elif kind == "text":
+            if index == last_text and index != first_text:
+                ask.append(f'<div class="problem-ask">{part}</div>')
+            else:
+                statement.append(f'<div class="problem-statement">{part}</div>')
+        elif last_text is None or index < last_text:
+            statement.append(part)
+        else:
+            ask.append(part)
+    return (
+        '<section class="content-card problem-card" data-section="question">'
+        '<h2 class="card-section-title">题目</h2>'
+        f'<div class="problem-body">{"".join(statement)}{"".join(formulas)}{"".join(ask)}</div>'
+        "</section>"
+    )
+
+
+def _table_cells(line: str) -> list[str]:
+    value = line.strip()
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|"):
+        value = value[:-1]
+    return [cell.strip() for cell in value.split("|")]
+
+
+def _render_markdown_tables(
+    value: str | None,
+    *,
+    empty: str,
+    allow_bare_latex: bool,
+) -> str:
+    """Render conservative pipe tables while leaving ordinary Markdown untouched."""
+
+    text = value or ""
+    if not text.strip():
+        return f'<span class="empty">{html.escape(empty)}</span>'
+    lines = text.splitlines()
+    output: list[str] = []
+    plain: list[str] = []
+
+    def flush_plain() -> None:
+        if not plain:
+            return
+        output.append(
+            render_math_text(
+                "\n".join(plain),
+                empty="",
+                allow_bare_latex=allow_bare_latex,
+            )
+        )
+        plain.clear()
+
+    index = 0
+    while index < len(lines):
+        header = _table_cells(lines[index]) if "|" in lines[index] else []
+        separator = (
+            _table_cells(lines[index + 1])
+            if index + 1 < len(lines) and "|" in lines[index + 1]
+            else []
+        )
+        if (
+            len(header) >= 2
+            and len(separator) == len(header)
+            and all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator)
+        ):
+            flush_plain()
+            rows: list[list[str]] = []
+            index += 2
+            while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                cells = _table_cells(lines[index])
+                if len(cells) != len(header):
+                    break
+                rows.append(cells)
+                index += 1
+            head_html = "".join(
+                f"<th>{render_math_text(cell, empty='', allow_bare_latex=True)}</th>"
+                for cell in header
+            )
+            row_html = "".join(
+                "<tr>"
+                + "".join(
+                    f"<td>{render_math_text(cell, empty='', allow_bare_latex=True)}</td>"
+                    for cell in row
+                )
+                + "</tr>"
+                for row in rows
+            )
+            output.append(
+                f'<table class="problem-table"><thead><tr>{head_html}</tr></thead><tbody>{row_html}</tbody></table>'
+            )
+            continue
+        plain.append(lines[index])
+        index += 1
+    flush_plain()
+    return "".join(output)
 
 
 def build_problem_html(
@@ -193,6 +315,7 @@ def build_problem_html(
     show_answer_notice: bool = True,
     fit_content: bool = False,
     compact: bool = False,
+    classic: bool = False,
     theme: str = "light",
 ) -> str:
     """Build a complete, self-contained HTML problem document."""
@@ -240,33 +363,97 @@ def build_problem_html(
             raw_blocks = json.loads(str(fields.get("question_content_json") or "[]"))
         except json.JSONDecodeError:
             raw_blocks = []
-    block_html: list[str] = []
+    problem_parts: list[tuple[str, str]] = []
     for block in raw_blocks:
         if not isinstance(block, Mapping):
             continue
         kind = block.get("type")
         if kind in {"text", "formula"}:
-            block_html.append(_section("题目" if kind == "text" else "公式", str(block.get("content") or "")))
+            problem_parts.append(
+                (
+                    kind,
+                    f'<div class="rich-text">{_render_markdown_tables(str(block.get("content") or ""), empty="", allow_bare_latex=True)}</div>',
+                )
+            )
         elif kind == "table" and isinstance(block.get("rows"), list):
-            rows = "".join("<tr>" + "".join(f"<td>{render_math_text(str(cell), empty='', allow_bare_latex=True)}</td>" for cell in row) + "</tr>" for row in block["rows"] if isinstance(row, list))
-            block_html.append(f'<section class="content-card"><h2>表格</h2><table class="problem-table">{rows}</table></section>')
+            rendered_rows: list[str] = []
+            for row in block["rows"]:
+                if not isinstance(row, list):
+                    continue
+                cells: list[str] = []
+                for raw_cell in row:
+                    if isinstance(raw_cell, Mapping):
+                        content = str(raw_cell.get("content") or "")
+                        spans = "".join(
+                            f' {name}="{max(1, min(100, int(raw_cell.get(name, 1))))}"'
+                            for name in ("rowspan", "colspan")
+                            if str(raw_cell.get(name, "1")).isdigit()
+                            and int(raw_cell.get(name, 1)) > 1
+                        )
+                    else:
+                        content, spans = str(raw_cell or ""), ""
+                    cells.append(
+                        f"<td{spans}>{render_math_text(content, empty='', allow_bare_latex=True)}</td>"
+                    )
+                rendered_rows.append(f"<tr>{''.join(cells)}</tr>")
+            problem_parts.append(("table", f'<table class="problem-table">{"".join(rendered_rows)}</table>'))
         elif kind == "figure":
-            block_html.append(_section("题图", str(block.get("content") or "题图保留在可追溯原图区域中")))
-    body.extend(block_html or [_section("题目", question)])
-    if latex and not _contains_math(question, allow_bare_latex=True):
-        body.append(
-            '<section class="content-card formula-card"><h2>题目公式</h2>'
-            f'<div class="rich-text">{_formula_html(latex, display=True)}</div></section>'
-        )
+            source = str(block.get("image_data_uri") or block.get("image_src") or "")
+            caption = str(block.get("content") or "题图")
+            if source.startswith(("data:image/", "file:")):
+                problem_parts.append(
+                    (
+                        "figure",
+                        '<div class="figure-block">'
+                        f'<img class="problem-figure" src="{html.escape(source, quote=True)}" '
+                        f'alt="{html.escape(caption, quote=True)}">'
+                        f'<div class="figure-caption">{html.escape(caption)}</div></div>',
+                    )
+                )
+            else:
+                problem_parts.append(("text", f'<div class="rich-text">{html.escape(caption)}</div>'))
+    if problem_parts:
+        if latex and not _contains_math(question, allow_bare_latex=True):
+            problem_parts.append(
+                ("formula", f'<div class="rich-text">{_formula_html(latex, display=True)}</div>')
+            )
+        if classic:
+            body.append(_classic_problem_card(problem_parts))
+        else:
+            body.append(
+                '<section class="content-card" data-section="question">'
+                f'<div class="problem-flow">{"".join(part for _, part in problem_parts)}</div>'
+                "</section>"
+            )
+    elif classic:
+        legacy_parts: list[tuple[str, str]] = [
+            (
+                "text",
+                f'<div class="rich-text">{_render_markdown_tables(question, empty="（空）", allow_bare_latex=True)}</div>',
+            )
+        ]
+        if latex and not _contains_math(question, allow_bare_latex=True):
+            legacy_parts.append(
+                ("formula", f'<div class="rich-text">{_formula_html(latex, display=True)}</div>')
+            )
+        body.append(_classic_problem_card(legacy_parts))
+    else:
+        body.append(_section("题目", question, section_key="question"))
+        if latex and not _contains_math(question, allow_bare_latex=True):
+            body.append(
+                '<section class="content-card formula-card" data-section="question"><h2>题目公式</h2>'
+                f'<div class="rich-text">{_formula_html(latex, display=True)}</div></section>'
+            )
 
     user_answer = str(fields.get("user_answer") or "")
     correct_answer = str(fields.get("correct_answer") or "")
     solution = str(fields.get("solution_markdown") or "")
+    detail_class = "detail-card" if classic else ""
     if include_answers:
         if user_answer.strip():
-            body.append(_section("我的作答", user_answer))
-        body.append(_section("正确答案", correct_answer))
-        body.append(_section("解析", solution))
+            body.append(_section("我的作答", user_answer, card_class=detail_class, section_key="user_answer"))
+        body.append(_section("正确答案", correct_answer, card_class=detail_class, section_key="correct_answer"))
+        body.append(_section("解析", solution, card_class=detail_class, section_key="solution"))
     elif show_answer_notice:
         body.append(
             '<section class="answer-hidden">答案与解析已隐藏，完成思考后再显示。</section>'
@@ -274,7 +461,8 @@ def build_problem_html(
 
     notes = str(fields.get("notes") or "")
     if include_answers and notes.strip():
-        body.append(_section("备注", notes))
+        body.append(_section("备注", notes, card_class="detail-card" if classic else "", section_key="notes"))
+    classic_body = ' class="classic-problem"' if classic else ""
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -304,8 +492,14 @@ def build_problem_html(
     border: 1px solid {colors.border}; border-radius: 12px;
   }}
   .rich-text {{ white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }}
+  .problem-flow {{ display: block; }}
+  .problem-flow .rich-text {{ margin: 0 0 10px; }}
+  .problem-flow .rich-text:last-child {{ margin-bottom: 0; }}
   .problem-table {{ width: 100%; border-collapse: collapse; }}
   .problem-table td {{ border: 1px solid {colors.border}; padding: 7px 9px; vertical-align: top; }}
+  .problem-table th {{ border: 1px solid {colors.border}; padding: 7px 9px; text-align: left; background: {colors.chip_bg}; }}
+  .problem-figure {{ display: block; max-width: 100%; height: auto; margin: 4px auto 8px; }}
+  .figure-caption {{ color: {colors.muted}; font-size: .9em; text-align: center; }}
   .rich-text math {{
     font-family: "Cambria Math", "STIX Two Math", serif;
     font-size: {1.08 if compact else 1.18}em;
@@ -318,9 +512,49 @@ def build_problem_html(
   }}
   .math-fallback {{ padding: 2px 5px; border-radius: 4px; background: {colors.fallback_bg}; color: {colors.fallback_text}; }}
   .math-fallback-block {{ display: block; padding: 10px; overflow-x: auto; }}
+  body.classic-problem {{ padding: {18 if compact else 28}px {22 if compact else 32}px; }}
+  body.classic-problem .content-card {{
+    margin: 0 0 {14 if compact else 22}px; padding: {18 if compact else 26}px {22 if compact else 30}px;
+    border-radius: {12 if compact else 16}px; overflow: hidden;
+  }}
+  body.classic-problem .problem-card {{ min-height: {0 if compact else 280}px; }}
+  body.classic-problem .card-section-title {{
+    margin: 0 0 {12 if compact else 18}px; font-size: {16 if compact else 19}px;
+    line-height: 1.4; font-weight: 700;
+  }}
+  body.classic-problem .problem-statement,
+  body.classic-problem .problem-ask {{
+    font-size: {15 if compact else 17}px; line-height: {1.7 if compact else 1.85};
+  }}
+  body.classic-problem .problem-card .rich-text {{ overflow-x: hidden; }}
+  body.classic-problem .formula-block {{
+    text-align: center; margin: {22 if compact else 34}px 0 {26 if compact else 40}px;
+    max-width: 100%; overflow-x: auto; scrollbar-width: none;
+  }}
+  body.classic-problem .formula-block::-webkit-scrollbar {{ display: none; }}
+  body.classic-problem .formula-block .rich-text {{ overflow: visible; }}
+  body.classic-problem .formula-block math {{ font-size: {1.18 if compact else 1.28}em; }}
+  body.classic-problem .formula-block math[display="block"] {{
+    display: block; margin: 0 auto; text-align: center;
+  }}
+  body.classic-problem .detail-card h2 {{
+    margin: 0 0 {12 if compact else 18}px; font-size: {16 if compact else 19}px;
+    line-height: 1.4; font-weight: 700;
+  }}
+  body.classic-problem .detail-card .rich-text {{
+    font-size: {15 if compact else 17}px; line-height: {1.7 if compact else 1.85};
+    overflow-x: hidden;
+  }}
+  body.classic-problem .detail-card .rich-text math[display="block"] {{
+    display: block; margin: {'.6em' if compact else '0.85em'} auto; text-align: center;
+  }}
+  body.classic-problem .meta-chip, body.classic-problem .tag {{
+    padding: {4 if compact else 5}px {10 if compact else 12}px; border-radius: 999px;
+    font-size: {12 if compact else 13}px; line-height: 1.5;
+  }}
 </style>
 </head>
-<body>{''.join(body)}</body>
+<body{classic_body}>{''.join(body)}</body>
 </html>"""
 
 
@@ -518,6 +752,7 @@ class MathContentView(QWidget):
     """
 
     content_height_changed = Signal()
+    render_completed = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -539,6 +774,8 @@ class MathContentView(QWidget):
         self._compact = False
         self._zoom_scale = preview_zoom_scale()
         self._content_height: int | None = None
+        self._section_layout: dict[str, dict[str, int]] = {}
+        self._content_height_px = 0
         self._pdf_view_initialized = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -660,7 +897,7 @@ class MathContentView(QWidget):
 
     def set_zoom_scale(self, scale: float) -> None:
         """Apply a reader-only scale without changing the host container."""
-        normalized = max(0.5, min(1.0, float(scale)))
+        normalized = max(0.5, min(1.5, float(scale)))
         if self._zoom_scale == normalized:
             return
         self._zoom_scale = normalized
@@ -683,6 +920,8 @@ class MathContentView(QWidget):
             or self._render_scheduled
         ):
             return
+        self._section_layout = {}
+        self._content_height_px = 0
         self._render_scheduled = True
         QTimer.singleShot(0, self._start_render)
 
@@ -723,6 +962,36 @@ class MathContentView(QWidget):
         page.deleteLater()
         if self.last_html != rendered_html:
             self._schedule_render()
+        else:
+            self.render_completed.emit()
+
+    def scroll_position(self) -> int:
+        return self._view.verticalScrollBar().value()
+
+    def restore_scroll_position(self, value: int) -> None:
+        scrollbar = self._view.verticalScrollBar()
+        scrollbar.setValue(max(scrollbar.minimum(), min(int(value), scrollbar.maximum())))
+
+    def scroll_to_bottom(self) -> None:
+        scrollbar = self._view.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def scroll_to_section(self, key: str) -> None:
+        """把指定小节滚动到预览中间；在顶部/底部时尽量滚动、不越界。"""
+        if self._document is None or not self._section_layout or not self._content_height_px:
+            return
+        entry = self._section_layout.get(key)
+        if entry is None:
+            return
+        scrollbar = self._view.verticalScrollBar()
+        viewport_height = max(1, self._view.viewport().height())
+        total_px = scrollbar.maximum() + viewport_height
+        if total_px <= 0:
+            return
+        center = entry.get("top", 0) + entry.get("height", 0) / 2
+        fraction = center / self._content_height_px
+        target = int(fraction * total_px - viewport_height / 2)
+        scrollbar.setValue(max(scrollbar.minimum(), min(int(target), scrollbar.maximum())))
 
     def _html_loaded(
         self, page: QWebEnginePage, generation: int, loaded: bool
@@ -738,22 +1007,43 @@ class MathContentView(QWidget):
                     const width = {_PDF_CSS_WIDTH};
                     document.documentElement.style.width = `${{width}}px`;
                     document.body.style.width = `${{width}}px`;
-                    return Math.ceil(Math.max(
-                        document.body.scrollHeight,
-                        document.body.getBoundingClientRect().height
-                    ));
+                    const sections = {{}};
+                    document.querySelectorAll('section[data-section]').forEach((el) => {{
+                        const key = el.getAttribute('data-section');
+                        if (!(key in sections)) {{
+                            sections[key] = {{ top: el.offsetTop, height: el.offsetHeight }};
+                        }}
+                    }});
+                    return JSON.stringify({{
+                        height: Math.ceil(Math.max(
+                            document.body.scrollHeight,
+                            document.body.getBoundingClientRect().height
+                        )),
+                        sections,
+                    }});
                 }})()""",
-                lambda height, target=page, token=generation: self._print_content_pdf(
-                    target, token, height
+                lambda payload, target=page, token=generation: self._print_content_pdf(
+                    target, token, payload
                 ),
             )
             return
         self._print_pdf(page, generation)
 
-    def _print_content_pdf(self, page: QWebEnginePage, generation: int, height) -> None:  # noqa: ANN001
+    def _print_content_pdf(self, page: QWebEnginePage, generation: int, payload) -> None:  # noqa: ANN001
         if page is not self._renderer or generation != self._render_generation:
             return
-        content_height = max(80, int(height or 0))
+        content_height = 80
+        if isinstance(payload, str) and payload:
+            try:
+                parsed = json.loads(payload)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                self._section_layout = parsed.get("sections") or {}
+                self._content_height_px = max(80, int(parsed.get("height") or 0))
+                content_height = self._content_height_px
+        elif isinstance(payload, int):
+            content_height = max(80, payload)
         # Chromium uses 96 CSS pixels per inch. The custom page height removes
         # the PDF reader's otherwise independent vertical viewport.
         page_size = QPageSize(
@@ -826,20 +1116,34 @@ class MathContentView(QWidget):
     def _apply_zoom_scale(self) -> None:
         if self._document is None:
             return
-        self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
-        if self._zoom_scale == 1.0:
-            if self._fit_content_height:
-                self._update_content_height()
-            return
         QTimer.singleShot(0, self._apply_scaled_zoom)
 
     def _apply_scaled_zoom(self) -> None:
-        if self._document is None or self._zoom_scale == 1.0:
+        if self._document is None or self._document.pageCount() < 1:
             return
-        zoom_factor = getattr(self._view, "zoomFactor", None)
-        if not callable(zoom_factor):
+        page = self._document.pagePointSize(0)
+        if page.width() <= 0:
             return
-        fit_factor = zoom_factor()
+        viewport_getter = getattr(self._view, "viewport", None)
+        view_width = (
+            viewport_getter().width()
+            if callable(viewport_getter) and viewport_getter() is not None
+            else 0
+        )
+        if view_width <= 0:
+            view_width = max(1, self._view.width())
+        # QPdfView renders 1 page point as 96/72 px at 100% (96 dpi), so the
+        # fit factor that makes the page width equal the viewport is:
+        #   fit = viewport / (page_pt * 96/72)
+        fit_factor = view_width / (page.width() * (96.0 / 72.0))
+        _logger.debug(
+            "pdf zoom apply scale=%.3f fit=%.3f view_w=%d doc_w=%.1f page_h=%.1f",
+            self._zoom_scale,
+            fit_factor,
+            view_width,
+            page.width(),
+            page.height(),
+        )
         self._view.setZoomMode(QPdfView.ZoomMode.Custom)
         self._view.setZoomFactor(fit_factor * self._zoom_scale)
         if self._fit_content_height:
@@ -885,6 +1189,7 @@ class MathContentView(QWidget):
         show_header: bool = True,
         show_answer_notice: bool = True,
         compact: bool = False,
+        classic: bool = False,
     ) -> None:
         self._last_note_render = None
         self._last_fragment_render = None
@@ -895,6 +1200,7 @@ class MathContentView(QWidget):
             "show_header": show_header,
             "show_answer_notice": show_answer_notice,
             "compact": compact,
+            "classic": classic,
         }
         self._render_last()
 
@@ -949,6 +1255,7 @@ class MathContentView(QWidget):
             show_answer_notice=self._last_render["show_answer_notice"],
             fit_content=self._content_sized_pdf,
             compact=self._last_render["compact"] or self._compact,
+            classic=self._last_render.get("classic", False),
             theme=current_theme_name(),
         )
         self._schedule_render()

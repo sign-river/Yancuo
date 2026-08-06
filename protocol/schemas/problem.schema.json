@@ -18,7 +18,7 @@
     },
     "content_blocks": {
       "type": "array",
-      "items": {"type": "object", "required": ["type"], "properties": {"type": {"enum": ["text", "formula", "table", "figure"]}, "content": {"type": "string"}, "rows": {"type": "array", "items": {"type": "array"}}, "source_image_index": {"type": "integer", "minimum": 0}, "source_region": {"type": "object"}}}
+      "items": {"type": "object", "required": ["type"], "properties": {"type": {"enum": ["text", "formula", "table", "figure"]}, "content": {"type": "string"}, "rows": {"type": "array", "maxItems": 100, "items": {"type": "array", "maxItems": 50, "items": {"oneOf": [{"type": "string"}, {"type": "object", "required": ["content"], "properties": {"content": {"type": "string"}, "rowspan": {"type": "integer", "minimum": 1, "maximum": 100}, "colspan": {"type": "integer", "minimum": 1, "maximum": 100}}, "additionalProperties": false}]}}}, "source_image_index": {"type": "integer", "minimum": 0}, "source_region": {"type": "object", "required": ["x", "y", "width", "height"], "properties": {"x": {"type": "number", "minimum": 0, "maximum": 1}, "y": {"type": "number", "minimum": 0, "maximum": 1}, "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}, "height": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}}}, "source_asset_id": {"type": "string"}, "derived_asset_id": {"type": "string"}}, "additionalProperties": true}
     },
     "asset_files": {
       "type": "array",

@@ -50,7 +50,9 @@ def test_export_edit_import_diff_accept(bundle, tmp_path: Path) -> None:
     assert result["conflicts"] == []
     rid = result["items"][0]
     diffs = ai.review_diffs(rid)
-    assert any(d["field"] == "question_markdown" and "题目B" in str(d["after"]) for d in diffs)
+    assert any(
+        d["field"] == "question_markdown" and "题目B" in str(d["after"]) for d in diffs
+    )
 
     ai.accept_review_item(rid)
     got = services.get_problem(pid)
@@ -183,6 +185,38 @@ def test_missing_asset_fails(bundle, tmp_path: Path) -> None:
         workspace.import_workspace(root)
 
 
+def test_workspace_asset_reference_cannot_escape_the_problem_directory(
+    bundle, tmp_path: Path
+) -> None:
+    services, _ai, workspace = bundle
+    image = tmp_path / "source.jpg"
+    image.write_bytes(b"\xff\xd8\xffworkspace-traversal")
+    problem_id = services.import_images([image])["created"][0]
+    root = workspace.export_workspace([problem_id], dest_dir=tmp_path / "safe-ws")
+    metadata_path = root / "problems" / problem_id / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["asset_files"][0]["filename"] = "../../../../source.jpg"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(DomainError, match="资源文件路径非法"):
+        workspace.import_workspace(root)
+
+
+def test_workspace_text_reader_uses_bounded_binary_read(
+    bundle, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _services, _ai, workspace = bundle
+    source = tmp_path / "bounded.txt"
+    source.write_text("有界读取", encoding="utf-8")
+
+    def fail_unbounded_read(*_args, **_kwargs):
+        raise AssertionError("Path.read_text must not be used")
+
+    monkeypatch.setattr(Path, "read_text", fail_unbounded_read)
+
+    assert workspace._read_workspace_text(source, "bounded.txt", 1024) == "有界读取"
+
+
 def test_invalid_manifest(bundle, tmp_path: Path) -> None:
     _services, _ai, workspace = bundle
     bad = tmp_path / "badws"
@@ -198,7 +232,13 @@ def test_parse_problem_md_roundtrip() -> None:
     from yancuo_win.import_export.markdown_problem import render_problem_md
 
     md = render_problem_md(
-        front={"id": "problem_x", "revision": 2, "priority": 4, "title": "T", "tags": ["a"]},
+        front={
+            "id": "problem_x",
+            "revision": 2,
+            "priority": 4,
+            "title": "T",
+            "tags": ["a"],
+        },
         sections={"question_markdown": "Q", "correct_answer": "A"},
     )
     fm, sections = parse_problem_md(md)

@@ -265,11 +265,12 @@ def test_confirm_groups_creates_independent_notes_with_shared_source(intake_serv
     assert [note.status for note in notes] == ["active", "inbox"]
     assert (notes[0].subject_id, notes[0].chapter_id) == (subject.id, chapter.id)
     assert notes[0].tags[0].id == tag.id
-    assert notes[0].assets[0].relative_path == notes[1].assets[0].relative_path
-    assert notes[0].assets[0].sha256 == notes[1].assets[0].sha256
-    assert json.loads(notes[1].blocks[0].source_region_json)["width"] == 0.3
+    assert notes[0].assets == []
+    assert notes[1].assets == []
+    assert json.loads(notes[1].blocks[0].source_region_json) == {}
     assert json.loads(notes[1].blocks[0].uncertain_json)[0]["field"] == "latex"
     assert service.get_session(saved.id).status == "completed"
+    assert service.get_session(saved.id).assets == []
     assert [group.note_document_id is not None for group in service.get_session(saved.id).groups] == [
         True,
         True,

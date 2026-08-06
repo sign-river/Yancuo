@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from yancuo_win.ai.base import StructuredCandidate, StructuredResult
+from yancuo_win.ai.base import JsonCompletionResult, StructuredCandidate, StructuredResult
 from yancuo_win.application.ai_service import (
     AIService,
     _recognition_cache_payload,
@@ -167,6 +167,36 @@ def test_review_decisions_wait_for_final_apply_and_return_safe_presentation(
     assert services.get_problem(problem_id).revision == before.revision + 2  # type: ignore[union-attr]
 
 
+def test_review_applies_only_fields_explicitly_accepted(
+    services: AppServices, ai: AIService, tmp_path: Path
+) -> None:
+    image = tmp_path / "partial-apply.jpg"
+    image.write_bytes(b"\xff\xd8\xffpartial-apply")
+    problem_id = services.import_images([image])["created"][0]
+    before = services.get_problem(problem_id)
+    assert before is not None
+    job = ai.create_structure_job([problem_id])
+    ai.run_job(job.id)
+    item = ai.list_review_items_for_job(job.id)[0]
+    diffs = ai.review_presentation(item.id)["diffs"]
+    assert any(diff["field"] == "question_markdown" for diff in diffs)
+
+    decisions = {
+        str(diff["field"]): {
+            "decision": "accept"
+            if diff["field"] == "question_markdown"
+            else "reject"
+        }
+        for diff in diffs
+    }
+    ai.apply_review_decisions({item.id: decisions})
+
+    after = services.get_problem(problem_id)
+    assert after is not None
+    assert "Mock" in after.question_markdown
+    assert after.title == before.title
+
+
 def test_completion_review_overview_is_resumable_without_problem_details(
     services: AppServices, ai: AIService, tmp_path: Path
 ) -> None:
@@ -217,13 +247,16 @@ def test_failed_ai_item_can_retry_in_same_job_without_duplicate_problem(
 
     class FlakyProvider:
         should_fail = True
+        name = "flaky"
 
-        def structure_from_image(self, **_kwargs) -> StructuredResult:
+        def complete_json(self, **_kwargs) -> JsonCompletionResult:
             if self.should_fail:
                 raise DomainError("temporary disconnect")
-            return StructuredResult(
-                fields={"title": "重试成功", "question_markdown": "题目"},
-                raw_text="{}",
+            return JsonCompletionResult(
+                raw_text=(
+                    '{"title":"重试成功","question_markdown":"题目",'
+                    '"uncertain_fields":[]}'
+                ),
                 model="test-model",
             )
 
@@ -265,7 +298,7 @@ def test_failed_ai_item_can_retry_in_same_job_without_duplicate_problem(
     assert len(ai.list_review_items_for_job(job.id)) == 1
 
 
-def test_multi_candidate_recognition_cache_reuses_the_full_result(
+def test_formal_completion_is_text_only_and_never_clones_problem(
     services: AppServices,
     ai: AIService,
     tmp_path: Path,
@@ -275,27 +308,23 @@ def test_multi_candidate_recognition_cache_reuses_the_full_result(
     image.write_bytes(b"\xff\xd8\xffmulti-cache-image")
     problem_id = services.import_images([image])["created"][0]
 
-    class MultiProvider:
+    class TextProvider:
         calls = 0
+        name = "text"
 
-        def structure_from_image(self, **_kwargs) -> StructuredResult:
+        def complete_json(self, **kwargs) -> JsonCompletionResult:
             self.calls += 1
-            return StructuredResult(
-                fields={"title": "第一题", "question_markdown": "题干一"},
-                candidates=[
-                    StructuredCandidate(
-                        fields={"title": "第一题", "question_markdown": "题干一"},
-                        region={"x": 0.0, "y": 0.0, "width": 1.0, "height": 0.4},
-                    ),
-                    StructuredCandidate(
-                        fields={"title": "第二题", "question_markdown": "题干二"},
-                        region={"x": 0.0, "y": 0.5, "width": 1.0, "height": 0.4},
-                    ),
-                ],
-                raw_text='{"problems": ["first", "second"]}',
+            request_text = str(kwargs["request"])
+            assert "relative_path" not in request_text
+            assert "original" not in request_text
+            return JsonCompletionResult(
+                raw_text=(
+                    '{"title":"文本建议","question_markdown":"题干建议",'
+                    '"uncertain_fields":[]}'
+                )
             )
 
-    provider = MultiProvider()
+    provider = TextProvider()
     monkeypatch.setattr(
         "yancuo_win.application.ai_service.get_provider",
         lambda _settings: provider,
@@ -306,9 +335,11 @@ def test_multi_candidate_recognition_cache_reuses_the_full_result(
     second = ai.create_structure_job([problem_id])
     ai.run_job(second.id)
 
-    assert provider.calls == 1
-    assert len(ai.list_review_items_for_job(second.id)) == 2
-    assert ai.get_job_diagnostics(second.id)["cache_hits"] == 1
+    assert provider.calls == 2
+    assert len(ai.list_review_items_for_job(first.id)) == 1
+    assert len(ai.list_review_items_for_job(second.id)) == 1
+    assert services.count_problems() == 1
+    assert ai.get_job_diagnostics(second.id)["cache_hits"] == 0
 
 
 def test_ai_job_events_are_ordered_and_interrupted_jobs_requeue(ai: AIService) -> None:

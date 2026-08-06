@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QSizePolicy,
     QWidget,
 )
@@ -24,6 +25,7 @@ import yancuo_win.ui.intake_page as intake_page_module
 import yancuo_win.ui.note_page as note_page_module
 import yancuo_win.ui.problem_detail as problem_detail_module
 import yancuo_win.ui.review_page as review_page_module
+import yancuo_win.ui.review_plan_builder as review_plan_builder_module
 import yancuo_win.ui.settings_dialog as settings_dialog_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
@@ -31,11 +33,14 @@ from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
 from yancuo_win.ui.math_content import MathContentView
-from yancuo_win.ui.task_center import TaskCenterDialog
-from yancuo_win.ui.widgets import SoftItemDelegate, ThemedTreeBranchStyle
+from yancuo_win.ui.widgets import ChevronComboBox, SoftItemDelegate, ThemedTreeBranchStyle
 
 
 class _ReaderStub(QWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._scroll_position = 0
+
     def set_accessible_content(self, name, description="") -> None:
         self.setAccessibleName(name)
         self.setAccessibleDescription(description)
@@ -64,6 +69,15 @@ class _ReaderStub(QWidget):
 
     def set_note(self, *_args, **_kwargs) -> None:
         pass
+
+    def scroll_position(self) -> int:
+        return self._scroll_position
+
+    def restore_scroll_position(self, value: int) -> None:
+        self._scroll_position = value
+
+    def scroll_to_bottom(self) -> None:
+        self._scroll_position = 999
 
 
 @pytest.fixture()
@@ -128,17 +142,22 @@ def _nav_modes(window: MainWindow) -> list[str]:
     ]
 
 
-def test_settings_page_consolidates_account_services_and_data(window: MainWindow) -> None:
-    labels = [window.main_nav.item(row).text() for row in range(window.main_nav.count())]
-    assert labels == ["工作台", "题库", "笔记", "复习", "设置"]
+def test_settings_page_consolidates_account_services_and_data(
+    window: MainWindow,
+) -> None:
+    labels = [
+        window.main_nav.item(row).text() for row in range(window.main_nav.count())
+    ]
+    assert labels == ["工作台", "题库", "笔记", "复习", "任务队列", "设置"]
 
     items = window.main_nav.findItems("设置", Qt.MatchFlag.MatchExactly)
     assert len(items) == 1
 
     window.main_nav.setCurrentItem(items[0])
-    assert [window.settings_nav.item(index).text() for index in range(window.settings_nav.count())] == [
-        "账户与设备", "AI 服务", "外观与显示", "本地数据", "云端同步"
-    ]
+    assert [
+        window.settings_nav.item(index).text()
+        for index in range(window.settings_nav.count())
+    ] == ["账户与设备", "AI 服务", "外观与显示", "本地数据", "云端同步"]
 
     window.settings_nav.setCurrentRow(0)
 
@@ -168,14 +187,10 @@ def test_data_transfer_actions_are_grouped_in_accessible_dropdowns(
     assert backup_actions == [
         "导出完整备份",
         "导入完整备份",
-        "",
-        "创建 ZIP 备份（旧版兼容）",
-        "从 ZIP 恢复（旧版兼容）",
     ]
     assert transfer_actions == [
         "导出分享包",
         "导出工作区",
-        "",
         "导入分享包",
         "导入工作区",
     ]
@@ -215,7 +230,7 @@ def test_navigation_shortcuts_and_search_focus_are_discoverable(
     shortcuts = {
         shortcut.key().toString(): shortcut for shortcut in window.navigation_shortcuts
     }
-    assert set(shortcuts) == {"Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+,"}
+    assert set(shortcuts) == {"Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+,"}
     assert window.main_nav.item(1).toolTip() == "题库（Ctrl+2）"
 
     QTest.keyClick(window, Qt.Key.Key_3, Qt.KeyboardModifier.ControlModifier)
@@ -353,7 +368,7 @@ def test_problem_detail_toolbar_groups_actions_and_keeps_priority_controls(
     assert page._toolbar_priority_layout.itemAt(2).widget() is page.management_group
 
 
-def test_problem_detail_chat_prefers_reader_width_and_selection_overlay(
+def test_problem_detail_chat_prefers_reader_width_and_image_reference_canvas(
     window: MainWindow,
 ) -> None:
     app = QApplication.instance()
@@ -368,11 +383,65 @@ def test_problem_detail_chat_prefers_reader_width_and_selection_overlay(
     assert left > right
     assert page.chat_card.minimumWidth() == 360
 
-    page.reference_overlay.setGeometry(page.reader.rect())
-    assert page.reference_overlay.geometry().size() == page.reader.size()
+    assert page.reader_stack.count() == 2
+    assert page.reader_stack.currentWidget() is page.reader
+    assert page.reference_canvas.parentWidget() is page.reader_stack
 
 
-def test_problem_detail_reference_canvas_never_opens_as_window(
+def test_problem_detail_chat_preserves_focus_layout_scroll_and_conversation(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    window.show()
+    app.processEvents()
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
+    first = window.problem_chat.create_conversation(problem.id, title="第一段讨论")
+    second = window.problem_chat.create_conversation(problem.id, title="当前讨论")
+    window._open_problem_detail(problem.id)
+    page = window.problem_detail_page
+    window.resize(1366, 760)
+    app.processEvents()
+    page.chat_button.setFocus()
+    page._toggle_chat()
+    app.processEvents()
+
+    assert page.workspace.orientation() == Qt.Orientation.Horizontal
+    assert page.reader.isVisible()
+    assert page.chat_card.isVisible()
+    assert app.focusWidget() is page.chat_input
+    page.conversation_combo.setCurrentIndex(page.conversation_combo.findData(second.id))
+    page.reader._scroll_position = 47
+
+    window.resize(760, 760)
+    app.processEvents()
+    assert page.workspace.orientation() == Qt.Orientation.Vertical
+    assert page.reader.isHidden()
+    assert page.chat_button.text() == "查看题目"
+    page._toggle_chat()
+    app.processEvents()
+    assert page.chat_card.isHidden()
+    assert page.reader.isVisible()
+    assert app.focusWidget() is page.reader
+
+    window._close_problem_detail()
+    window._open_problem_detail(problem.id)
+    page._restore_reader_scroll()
+    assert page.conversation_combo.currentData() == second.id
+    assert page.reader.scroll_position() == 47
+
+    window.resize(1920, 900)
+    page._toggle_chat()
+    app.processEvents()
+    assert page.workspace.orientation() == Qt.Orientation.Horizontal
+    assert page.reader.isVisible()
+    assert page.chat_card.isVisible()
+    assert page.conversation_combo.findData(first.id) >= 0
+
+
+def test_problem_detail_reference_canvas_stays_embedded_and_keeps_normalized_regions(
     window: MainWindow,
     tmp_path: Path,
 ) -> None:
@@ -384,9 +453,36 @@ def test_problem_detail_reference_canvas_never_opens_as_window(
 
     page.reference_canvas.set_source("asset_reference", 0, image_path)
 
-    assert page.reference_canvas.parentWidget() is page.chat_card
-    assert page.reference_canvas.isHidden()
+    page.reader_stack.setCurrentWidget(page.reference_canvas)
+    page.reference_canvas.add_normalized_region(0.1, 0.2, 0.3, 0.4)
+    before = page.reference_canvas.references()
+    page.reference_canvas.resize(640, 480)
+
+    assert page.reference_canvas.parentWidget() is page.reader_stack
+    assert page.reader_stack.currentWidget() is page.reference_canvas
+    assert page.reference_canvas.references() == before
+    assert page.reference_previews.count() == 1
+    assert page.reference_summary.text() == "本次引用 1 个区域"
     assert not page.reference_canvas.isWindow()
+
+
+def test_ai_completion_entry_opens_page_preparation_without_starting_job(
+    window: MainWindow,
+) -> None:
+    item = window.problem_list.item(0)
+    assert item is not None
+    window.problem_list.setCurrentItem(item)
+    before = len(window.ai.list_jobs(limit=100))
+
+    window._ai_recognize()
+
+    page = window.ai_completion_page
+    assert window.stack.currentWidget() is page
+    assert page.stack.currentWidget() is page.prepare_page
+    assert page.new_task_panel.isVisibleTo(page)
+    assert page.start_analysis_button.text() == "开始分析"
+    assert len(window.ai.list_jobs(limit=100)) == before
+    assert page.review_back_button.accessibleName() == "返回上一页"
 
 
 def test_service_settings_use_a_compact_aligned_form_surface(
@@ -399,8 +495,17 @@ def test_service_settings_use_a_compact_aligned_form_surface(
     for page in (ai_settings, appearance_settings, cloud_settings):
         assert page.settings_content.maximumWidth() == 800
 
-    assert all(button.isCheckable() for button in appearance_settings.theme_buttons.values())
-    assert ai_settings.fetch_ai_models.parentWidget() is ai_settings.ai_model.parentWidget()
+    assert all(
+        button.isCheckable() for button in appearance_settings.theme_buttons.values()
+    )
+    assert (
+        ai_settings.fetch_ai_models.parentWidget()
+        is ai_settings.ai_model.parentWidget()
+    )
+    assert isinstance(ai_settings.ai_model, ChevronComboBox)
+    assert ai_settings.ai_model.isEditable()
+    assert ai_settings.ai_model.property("visibleChevron") is True
+    assert ai_settings.fetch_ai_models.text() == "获取可用模型名称"
     assert ai_settings.clear_ai_button.objectName() == "DangerButton"
     assert cloud_settings.clear_cloud_token_button.objectName() == "DangerButton"
 
@@ -435,8 +540,41 @@ def test_review_plan_builder_warns_before_creating_an_empty_plan(
     builder._confirm_create()
 
     assert messages == ["请先从左侧选择题目或笔记，并加入计划草稿。"]
-    assert not builder.toast.isHidden()
-    assert builder.toast.label.text() == messages[0]
+    assert builder.toast._toasts
+    assert builder.toast._toasts[-1].body_label.text() == messages[0]
+    assert builder.draft_back_button.text() == ""
+    assert builder.draft_back_button.accessibleName() == "返回资料"
+
+
+def test_review_plan_builder_materializes_sources_and_queue_in_batches(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    builder = window.review_page.plan_builder_page
+    monkeypatch.setattr(review_plan_builder_module, "_LIST_BATCH_SIZE", 2)
+    builder.content_type = "note"
+    builder._source_entries = [
+        ("note-1", "第一篇", False),
+        ("note-2", "第二篇", True),
+        ("note-3", "第三篇", False),
+    ]
+    builder._source_visible_count = 0
+    builder.source_list.clear()
+
+    builder._append_source_batch()
+
+    assert builder.source_list.count() == 2
+    assert builder.source_list.item(1).data(Qt.ItemDataRole.UserRole + 1) is True
+    builder._append_source_batch()
+    assert builder.source_list.count() == 3
+
+    builder._queue_ids = ["note-1", "note-2", "note-3"]
+    builder._queue_labels = {source_id: source_id for source_id in builder._queue_ids}
+    builder._queue_visible_count = 0
+    builder.queue_list.clear()
+    builder._append_queue_batch()
+    assert builder.queue_list.count() == 2
+    builder._append_queue_batch()
+    assert builder.queue_list.count() == 3
 
 
 def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
@@ -448,6 +586,9 @@ def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
     assert page.ai_processing_steps_bar.current_step == 0
     assert page.ai_confirmation_steps.current_step == 1
     assert page.ai_confirmation_surface.objectName() == "IntakeConfirmationSurface"
+    processing_buttons = page.stack.widget(2).findChildren(QPushButton)
+    assert any(button.accessibleName() == "返回上传页" for button in processing_buttons)
+    assert not any(button.text() == "返回上传页" for button in processing_buttons)
     assert page.ai_confirmation_action_bar.objectName() == "IntakeActionBar"
     assert isinstance(page.ai_file_list.itemDelegate(), SoftItemDelegate)
     assert page.ai_upload_content_host.minimumHeight() == 0
@@ -455,8 +596,7 @@ def test_intake_workflow_uses_steps_surfaces_and_inset_file_selection(
     assert page.ai_upload_file_actions.itemAt(0).spacerItem() is not None
     assert page.ai_upload_file_actions.itemAt(3).spacerItem() is not None
     assert (
-        page.ai_upload_content_layout.itemAt(1).alignment()
-        == Qt.AlignmentFlag.AlignTop
+        page.ai_upload_content_layout.itemAt(1).alignment() == Qt.AlignmentFlag.AlignTop
     )
 
 
@@ -535,7 +675,13 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
     window._set_library_view("process")
     assert window.library_process_button.isChecked()
     assert _nav_modes(window) == [
-        "active", "due", "favorite", "recent", "inbox", "archived", "trashed"
+        "active",
+        "due",
+        "favorite",
+        "recent",
+        "inbox",
+        "archived",
+        "trashed",
     ]
     assert _problem_titles(window) == ["待整理题"]
     assert window.new_subject_button.isHidden()
@@ -543,7 +689,9 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
     _select_mode(window, "archived")
     assert _problem_titles(window) == ["归档题"]
     window._set_library_view("browse")
-    _select_mode(window, next(mode for mode in _nav_modes(window) if mode.startswith("subject:")))
+    _select_mode(
+        window, next(mode for mode in _nav_modes(window) if mode.startswith("subject:"))
+    )
     assert set(_problem_titles(window)) == {
         "未分类极限题",
         "积分基础题",
@@ -580,8 +728,7 @@ def test_question_delete_action_is_next_to_edit_and_not_in_more_menu(
     )
     assert window.question_delete_button.objectName() == "DangerButton"
     assert "删除" not in {
-        action.text()
-        for action in window._build_question_more_menu().actions()
+        action.text() for action in window._build_question_more_menu().actions()
     }
 
 
@@ -680,7 +827,9 @@ def test_question_preview_toggle_does_not_rebuild_problem_list(
     assert expanded is not None
     reader = expanded.findChild(MathContentView)
     assert reader is not None
-    assert reader.height() == 420
+    # 预览框随内容自适应高度（不再固定为 420）
+    assert reader._content_height_limit is None
+    assert reader._reserve_content_height is False
 
 
 def test_formula_content_surfaces_use_bounded_adaptive_height(
@@ -692,17 +841,15 @@ def test_formula_content_surfaces_use_bounded_adaptive_height(
     assert expanded is not None
     inline_reader = expanded.findChild(MathContentView)
     assert inline_reader is not None
-    assert inline_reader._content_height_limit == 420
+    assert inline_reader._content_height_limit is None
 
     assert window.problem_detail_page.reader.fit_content_height_args == ()
     assert window.problem_detail_page.reader.fit_content_height_kwargs == {
         "expand_widget": False,
     }
     assert window.intake_page.ai_result_preview.adaptive_height_limit == 520
-    assert {
-        preview.adaptive_height_limit
-        for _label, preview in window.intake_page.ai_form._field_previews.values()
-    } == {320}
+    assert window.intake_page.ai_form.render_view is not None
+    assert window.intake_page.ai_form.render_view.adaptive_height_limit == 1200
 
 
 def test_due_navigation_returns_to_processing_center(window: MainWindow) -> None:
@@ -722,9 +869,7 @@ def test_knowledge_tree_aggregates_descendants_and_preserves_expansion(
     subject_mode = next(
         mode for mode in _nav_modes(window) if mode.startswith("subject:")
     )
-    chapter_modes = [
-        mode for mode in _nav_modes(window) if mode.startswith("chapter:")
-    ]
+    chapter_modes = [mode for mode in _nav_modes(window) if mode.startswith("chapter:")]
     parent_mode = next(
         mode
         for mode in chapter_modes
@@ -762,44 +907,95 @@ def test_knowledge_tree_aggregates_descendants_and_preserves_expansion(
 
 
 def test_catalog_menu_and_editor_use_valid_full_paths(window: MainWindow) -> None:
-    child_mode = next(mode for mode in _nav_modes(window) if mode.startswith("chapter:"))
+    child_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("chapter:")
+    )
     _select_mode(window, child_mode)
     assert [spec.action_id for spec in window.get_create_actions()] == [
-        "create_chapter", "create_tag"
+        "create_chapter",
+        "create_tag",
     ]
     assert [spec.action_id for spec in window.get_manage_actions()] == [
-        "rename_node", "move_node_up", "move_node_down", "delete_node"
+        "rename_node",
+        "move_node_up",
+        "move_node_down",
+        "delete_node",
     ]
 
 
-def test_catalog_actions_follow_selected_node_type_and_position(window: MainWindow) -> None:
+def test_library_search_combo_uses_scope_combo_style(window: MainWindow) -> None:
+    assert window.library_search_combo.objectName() == "SearchModeCombo"
+    assert window.library_search_combo.height() == window.search_scope_combo.height()
+
+
+def test_library_view_switch_fits_navigation_panel(window: MainWindow) -> None:
+    switch = window.library_browse_button.parentWidget()
+    needed = switch.layout().minimumSize().width()
+    assert needed <= window.library_navigation_panel.minimumWidth()
+
+
+def test_library_view_buttons_are_separate_and_aligned_with_tree(window: MainWindow) -> None:
+    switch = window.library_browse_button.parentWidget()
+    # 两个按钮并排放在同一个切换框内，不再使用下拉框
+    assert switch is window.library_process_button.parentWidget()
+    # 切换框放在左侧导航面板顶部，与下方知识文件树共用宽度
+    assert switch.parent() is window.library_navigation_panel
+    assert not window.library_browse_button.isHidden()
+    assert not window.library_process_button.isHidden()
+
+
+def test_library_intake_button_is_primary_and_opens_intake(window: MainWindow) -> None:
+    button = window.new_subject_button
+    assert button.text() == "录入题目"
+    assert button.objectName() == "PrimaryButton"
+    button.click()
+    assert window.stack.currentIndex() == 1  # _PAGE_INTAKE
+
+
+def test_catalog_actions_follow_selected_node_type_and_position(
+    window: MainWindow,
+) -> None:
     window.knowledge_tree.setCurrentItem(None)
     window._update_catalog_action_buttons()
     assert [spec.action_id for spec in window.get_create_actions()] == [
-        "create_subject", "create_tag"
+        "create_subject",
+        "create_tag",
     ]
     assert window.get_manage_actions() == ()
-    assert not window.catalog_menu_button.isEnabled()
+    # 管理菜单现包含新建动作，根节点下也可用
+    assert window.catalog_menu_button.isEnabled()
 
-    subject_mode = next(mode for mode in _nav_modes(window) if mode.startswith("subject:"))
+    subject_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("subject:")
+    )
     _select_mode(window, subject_mode)
     assert [spec.action_id for spec in window.get_create_actions()] == [
-        "create_chapter", "create_tag"
+        "create_chapter",
+        "create_tag",
     ]
     subject_actions = window.get_manage_actions()
     assert [spec.label for spec in subject_actions] == [
-        "重命名科目", "科目上移", "科目下移", "删除科目"
+        "重命名科目",
+        "科目上移",
+        "科目下移",
+        "删除科目",
     ]
     assert not subject_actions[1].enabled
     assert not subject_actions[-1].enabled
 
-    chapter_mode = next(mode for mode in _nav_modes(window) if mode.startswith("chapter:"))
+    chapter_mode = next(
+        mode for mode in _nav_modes(window) if mode.startswith("chapter:")
+    )
     _select_mode(window, chapter_mode)
     assert [spec.action_id for spec in window.get_create_actions()] == [
-        "create_chapter", "create_tag"
+        "create_chapter",
+        "create_tag",
     ]
     assert [spec.label for spec in window.get_manage_actions()] == [
-        "重命名章节", "章节上移", "章节下移", "删除章节"
+        "重命名章节",
+        "章节上移",
+        "章节下移",
+        "删除章节",
     ]
 
     uncategorized_mode = next(
@@ -813,7 +1009,8 @@ def test_catalog_actions_follow_selected_node_type_and_position(window: MainWind
     assert "不是实际章节" in uncategorized_item.toolTip(0)
     assert [spec.action_id for spec in window.get_create_actions()] == ["create_tag"]
     assert window.get_manage_actions() == ()
-    assert not window.catalog_menu_button.isEnabled()
+    # 管理菜单现包含新建动作，根节点下也可用
+    assert window.catalog_menu_button.isEnabled()
     assert "不是实际章节" in window.catalog_menu_button.toolTip()
 
 
@@ -835,9 +1032,7 @@ def test_empty_uncategorized_filter_is_hidden(window: MainWindow) -> None:
     )
     window.refresh_nav()
 
-    assert not any(
-        mode.startswith("uncategorized:") for mode in _nav_modes(window)
-    )
+    assert not any(mode.startswith("uncategorized:") for mode in _nav_modes(window))
 
 
 def test_smart_views_and_search_scopes_are_stable(window: MainWindow) -> None:
@@ -979,13 +1174,17 @@ def test_low_risk_selection_and_intake_hints_do_not_open_message_box(
     )
     window.problem_list.clearSelection()
     assert window._require_one() is None
-    assert window.toast.label.text() == "请先选择一道题"
+    assert window.toast._toasts
+    assert window.toast._toasts[-1].body_label.text() == "请先选择一道题"
 
     messages: list[str] = []
     window.intake_page.status_message.connect(messages.append)
     window.intake_page.answer_image = None
     window.intake_page._start_answer_recognition()
-    assert window.intake_page.answer_recognition_status.text() == "请先选择包含作答的图片。"
+    assert (
+        window.intake_page.answer_recognition_status.text()
+        == "请先选择包含作答的图片。"
+    )
     window.intake_page.answer_recognition_result.clear()
     window.intake_page._apply_answer_recognition()
     assert messages[-2:] == ["请先选择包含作答的图片", "没有可填入的作答内容"]
@@ -1007,10 +1206,20 @@ def test_mock_provider_hint_and_task_selection_are_non_blocking(
     settings._test_ai_connection()
     assert messages[-1] == "Mock 不访问网络；连接测试请先选择 Faro API"
 
-    dialog = TaskCenterDialog(window.ai)
-    dialog._run_selected()
-    assert dialog.summary.text() == "请先选择一个后台任务"
-    dialog.close()
+    page = window.task_queue_page
+    assert page.tabs.count() == 4
+    assert page.summary.text() != ""
+    page._run_selected()  # no selection; must not crash
+    page.active_pane.refresh()
+
+
+def test_task_queue_opens_as_embedded_page_not_dialog(
+    window: MainWindow,
+) -> None:
+    window._open_task_queue()
+    assert window.stack.currentWidget() is window.task_queue_page
+    assert window.stack.currentIndex() == window.stack.indexOf(window.task_queue_page)
+    assert window.main_nav.currentItem().text() == "任务队列"
 
 
 def test_settings_expose_loading_failure_disabled_and_permission_states(
@@ -1026,10 +1235,10 @@ def test_settings_expose_loading_failure_disabled_and_permission_states(
     assert ai_settings.ai_model_status.property("state") == "error"
 
     monkeypatch.setattr(settings_dialog_module, "get_secret", lambda _key: None)
+    monkeypatch.setattr(settings_dialog_module, "load_stored_session", lambda _key: None)
     cloud_settings = window.cloud_settings_page
-    cloud_settings.provider.setCurrentIndex(
-        cloud_settings.provider.findData("github")
-    )
+    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("cloudbase"))
+    cloud_settings._refresh_token_ui()
     assert cloud_settings.cloud_permission_notice.property("state") == "permission"
     assert "当前不可用" in cloud_settings.cloud_permission_notice.text()
     cloud_settings.provider.setCurrentIndex(
@@ -1044,7 +1253,10 @@ def test_settings_dirty_state_only_updates_the_attached_save_button(
 ) -> None:
     pages = (
         (window.ai_settings_page, window.ai_settings_page.apply_ai_button),
-        (window.appearance_settings_page, window.appearance_settings_page.apply_theme_button),
+        (
+            window.appearance_settings_page,
+            window.appearance_settings_page.apply_theme_button,
+        ),
         (window.cloud_settings_page, window.cloud_settings_page.apply_cloud_button),
     )
     for page, save_button in pages:
@@ -1062,16 +1274,16 @@ def test_settings_show_field_level_validation_errors(window: MainWindow) -> None
     assert not ai_settings._field_errors["ai_model"].isHidden()
 
     cloud_settings = window.cloud_settings_page
-    cloud_settings.provider.setCurrentIndex(
-        cloud_settings.provider.findData("github")
-    )
-    cloud_settings.owner_edit.clear()
-    cloud_settings.repo_edit.clear()
+    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("cloudbase"))
+    cloud_settings.cloudbase_environment_edit.setText("test-environment")
+    cloud_settings.cloudbase_gateway_edit.setText("https://gateway.example.test")
+    cloud_settings.cloudbase_environment_edit.clear()
     cloud_settings._save_cloud_settings()
-    assert not cloud_settings._field_errors["cloud_owner"].isHidden()
-    cloud_settings.owner_edit.setText("owner")
-    cloud_settings._test_cloud()
-    assert not cloud_settings._field_errors["cloud_repo"].isHidden()
+    assert not cloud_settings._field_errors["cloudbase_environment"].isHidden()
+    cloud_settings.cloudbase_environment_edit.setText("test-environment")
+    cloud_settings.cloudbase_gateway_edit.clear()
+    cloud_settings._save_cloud_settings()
+    assert not cloud_settings._field_errors["cloudbase_gateway"].isHidden()
 
 
 def test_settings_secrets_are_hidden_by_default_and_can_be_revealed(
@@ -1084,9 +1296,7 @@ def test_settings_secrets_are_hidden_by_default_and_can_be_revealed(
     assert ai_settings.ai_token_visibility_button.text() == "隐藏"
 
     cloud_settings = window.cloud_settings_page
-    cloud_settings.provider.setCurrentIndex(
-        cloud_settings.provider.findData("github")
-    )
+    cloud_settings.provider.setCurrentIndex(cloud_settings.provider.findData("cloudbase"))
     assert cloud_settings.token_edit.echoMode() == QLineEdit.EchoMode.Password
     cloud_settings.token_visibility_button.click()
     assert cloud_settings.token_edit.echoMode() == QLineEdit.EchoMode.Normal
@@ -1096,7 +1306,7 @@ def test_unsaved_settings_require_confirmation_before_leaving(
     window: MainWindow,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window.main_nav.setCurrentRow(4)
+    window.main_nav.setCurrentRow(5)
     settings = window.ai_settings_page
     assert not settings.apply_ai_button.isEnabled()
     settings.ai_model.setCurrentText("changed-model")
@@ -1112,3 +1322,23 @@ def test_unsaved_settings_require_confirmation_before_leaving(
 
     assert window.stack.currentIndex() == 5
     assert settings.has_unsaved_changes
+
+def test_inline_question_summary_does_not_shift_on_expand(window: MainWindow) -> None:
+    app = QApplication.instance()
+    first = window.problem_list.item(0)
+    problem_id = str(first.data(Qt.ItemDataRole.UserRole))
+    if window._expanded_question_id == problem_id:
+        window._toggle_question_expansion(first)
+        app.processEvents()
+    collapsed = window.problem_list.itemWidget(first)
+    assert collapsed is not None
+    summary_height = collapsed._summary.height()
+    summary_y = collapsed._summary.mapTo(window, collapsed._summary.rect().topLeft()).y()
+    window._toggle_question_expansion(first)
+    app.processEvents()
+    expanded = window.problem_list.itemWidget(first)
+    assert expanded is not None
+    assert expanded._summary.height() == summary_height
+    assert expanded._summary.mapTo(window, expanded._summary.rect().topLeft()).y() == summary_y
+    window._toggle_question_expansion(first)
+    app.processEvents()

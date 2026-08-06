@@ -14,6 +14,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from yancuo_win.ai.base import (
     AIProvider,
@@ -26,9 +27,16 @@ from yancuo_win.ai.base import (
 )
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.credentials import get_secret
+from yancuo_win.infrastructure.safe_http import safe_urlopen
 
 
 _MAX_REQUEST_ATTEMPTS = 3
+_MAX_AI_RESPONSE_BYTES = 16 * 1024 * 1024
+_MAX_ERROR_RESPONSE_BYTES = 4 * 1024
+_MAX_AI_IMAGE_COUNT = 20
+_MAX_AI_IMAGE_BYTES = 32 * 1024 * 1024
+_MAX_AI_IMAGE_TOTAL_BYTES = 64 * 1024 * 1024
+_MAX_EMBEDDED_JSON_CANDIDATES = 128
 _RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 _TRANSIENT_NETWORK_ERRORS = (
     urllib.error.URLError,
@@ -40,6 +48,13 @@ _TRANSIENT_NETWORK_ERRORS = (
     TimeoutError,
     socket.timeout,
 )
+
+
+def _read_limited(response: Any, limit: int, *, label: str) -> bytes:
+    payload = response.read(limit + 1)
+    if len(payload) > limit:
+        raise DomainError(f"{label}过大（上限 {limit} 字节）")
+    return payload
 
 
 class OpenAICompatibleProvider(AIProvider):
@@ -72,9 +87,60 @@ class OpenAICompatibleProvider(AIProvider):
         )
 
     def validate_configuration(self) -> None:
-        if not self.base_url.startswith(("https://", "http://")):
-            raise DomainError("AI Base URL 无效")
+        self._validate_base_url()
         self._api_key()
+
+    def _validate_base_url(self) -> None:
+        parsed = urlparse(self.base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise DomainError("AI Base URL 必须是无内嵌凭据、查询参数或片段的 HTTPS 地址")
+
+    @staticmethod
+    def _encode_image_content(image_paths: list[str]) -> list[dict[str, Any]]:
+        if not image_paths:
+            raise DomainError("未选择图片")
+        if len(image_paths) > _MAX_AI_IMAGE_COUNT:
+            raise DomainError(f"单次 AI 请求最多 {_MAX_AI_IMAGE_COUNT} 张图片")
+        image_content: list[dict[str, Any]] = []
+        total_bytes = 0
+        for image_path in image_paths:
+            path = Path(image_path)
+            if not path.is_file():
+                raise DomainError(f"图片不存在：{path}")
+            try:
+                size = path.stat().st_size
+            except OSError as exc:
+                raise DomainError(f"无法读取图片：{path}") from exc
+            if size <= 0 or size > _MAX_AI_IMAGE_BYTES:
+                raise DomainError("单张 AI 图片必须在 1 字节到 32 MiB 之间")
+            total_bytes += size
+            if total_bytes > _MAX_AI_IMAGE_TOTAL_BYTES:
+                raise DomainError("单次 AI 请求的图片总大小不能超过 64 MiB")
+            try:
+                with path.open("rb") as stream:
+                    payload = stream.read(_MAX_AI_IMAGE_BYTES + 1)
+            except OSError as exc:
+                raise DomainError(f"无法读取图片：{path}") from exc
+            if len(payload) != size or len(payload) > _MAX_AI_IMAGE_BYTES:
+                raise DomainError("图片在读取期间发生变化或超过 32 MiB 上限")
+            mime = {".png": "image/png", ".webp": "image/webp"}.get(
+                path.suffix.lower(), "image/jpeg"
+            )
+            encoded = base64.b64encode(payload).decode("ascii")
+            image_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                }
+            )
+        return image_content
 
     def list_models(self, *, timeout_seconds: int = 20) -> list[str]:
         """Validate Faro/OpenAI-compatible authentication and return model IDs."""
@@ -104,6 +170,7 @@ class OpenAICompatibleProvider(AIProvider):
         retry_attempts: int | None = None,
         retry_instruction: str = "请检查网络后点击“重新尝试失败项”",
     ) -> dict[str, Any]:
+        self._validate_base_url()
         key = self._api_key()
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         body: Any = None
@@ -124,7 +191,7 @@ class OpenAICompatibleProvider(AIProvider):
                 method=method,
             )
             try:
-                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                with safe_urlopen(request, timeout=timeout_seconds) as response:
                     headers = getattr(response, "headers", None)
                     if headers is not None:
                         for header in (
@@ -135,13 +202,23 @@ class OpenAICompatibleProvider(AIProvider):
                             value = headers.get(header)
                             if value:
                                 self._last_server_timing[header.lower()] = str(value)
-                    body = json.loads(response.read().decode("utf-8"))
+                    body = json.loads(
+                        _read_limited(
+                            response,
+                            _MAX_AI_RESPONSE_BYTES,
+                            label="AI 响应",
+                        ).decode("utf-8")
+                    )
                 break
             except urllib.error.HTTPError as exc:
                 if exc.code in _RETRYABLE_HTTP_CODES and attempt < max_attempts:
                     time.sleep(0.6 * attempt)
                     continue
-                detail = exc.read().decode("utf-8", errors="replace")
+                detail = _read_limited(
+                    exc,
+                    _MAX_ERROR_RESPONSE_BYTES,
+                    label="AI 错误响应",
+                ).decode("utf-8", errors="replace")
                 detail = detail.replace(key, "***")
                 hints = {
                     400: "请检查模型 ID 与请求兼容性",
@@ -162,7 +239,7 @@ class OpenAICompatibleProvider(AIProvider):
                     "AI 服务连接中断，程序已自动重试 2 次仍未恢复。"
                     f"{retry_instruction}。详情：{reason}"
                 ) from exc
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
                 raise DomainError("AI 服务返回了无法解析的响应") from exc
         if not isinstance(body, dict):
             raise DomainError("AI 响应格式无效")
@@ -198,6 +275,7 @@ class OpenAICompatibleProvider(AIProvider):
     ) -> dict[str, Any]:
         """Read an OpenAI-compatible SSE response and rebuild its final body."""
 
+        self._validate_base_url()
         key = self._api_key()
         stream_payload = dict(payload)
         stream_payload["stream"] = True
@@ -219,11 +297,17 @@ class OpenAICompatibleProvider(AIProvider):
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                with safe_urlopen(request, timeout=timeout_seconds) as response:
                     headers = getattr(response, "headers", None)
                     content_type = str(headers.get("Content-Type") if headers else "")
                     if "text/event-stream" not in content_type.lower():
-                        body = json.loads(response.read().decode("utf-8"))
+                        body = json.loads(
+                            _read_limited(
+                                response,
+                                _MAX_AI_RESPONSE_BYTES,
+                                label="AI 响应",
+                            ).decode("utf-8")
+                        )
                         content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
                         if isinstance(content, str) and content:
                             on_text_delta(content)
@@ -232,7 +316,16 @@ class OpenAICompatibleProvider(AIProvider):
                     parts: list[str] = []
                     model_name = str(payload.get("model") or "")
                     usage: dict[str, Any] = {}
-                    for raw_line in response:
+                    received_bytes = 0
+                    while raw_line := response.readline(
+                        _MAX_AI_RESPONSE_BYTES - received_bytes + 1
+                    ):
+                        received_bytes += len(raw_line)
+                        if received_bytes > _MAX_AI_RESPONSE_BYTES:
+                            raise DomainError(
+                                "AI 流式响应过大"
+                                f"（上限 {_MAX_AI_RESPONSE_BYTES} 字节）"
+                            )
                         line = raw_line.decode("utf-8").strip()
                         if not line.startswith("data:"):
                             continue
@@ -266,14 +359,18 @@ class OpenAICompatibleProvider(AIProvider):
                 if exc.code in _RETRYABLE_HTTP_CODES and attempt < max_attempts and not emitted:
                     time.sleep(0.6 * attempt)
                     continue
-                detail = exc.read().decode("utf-8", errors="replace").replace(key, "***")
+                detail = _read_limited(
+                    exc,
+                    _MAX_ERROR_RESPONSE_BYTES,
+                    label="AI 错误响应",
+                ).decode("utf-8", errors="replace").replace(key, "***")
                 raise DomainError(f"AI 流式请求失败 HTTP {exc.code}：{detail[:240]}") from exc
             except _TRANSIENT_NETWORK_ERRORS as exc:
                 if attempt < max_attempts and not emitted:
                     time.sleep(0.6 * attempt)
                     continue
                 raise DomainError("AI 流式连接中断，已接收内容会保留，可重新尝试任务") from exc
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
                 raise DomainError("AI 流式响应格式无效") from exc
         raise DomainError("AI 流式请求未完成")
 
@@ -304,23 +401,7 @@ class OpenAICompatibleProvider(AIProvider):
         retry_attempts: int | None = None,
     ) -> StructuredResult:
         encode_started = time.perf_counter()
-        if not image_paths:
-            raise DomainError("未选择图片")
-        image_content: list[dict[str, Any]] = []
-        for image_path in image_paths:
-            path = Path(image_path)
-            if not path.is_file():
-                raise DomainError(f"图片不存在：{path}")
-            mime = "image/jpeg"
-            suffix = path.suffix.lower()
-            if suffix == ".png":
-                mime = "image/png"
-            elif suffix == ".webp":
-                mime = "image/webp"
-            b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-            image_content.append(
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-            )
+        image_content = self._encode_image_content(image_paths)
         image_encode_ms = (time.perf_counter() - encode_started) * 1000
         payload = {
             "model": model or "gpt-4o-mini",
@@ -360,20 +441,7 @@ class OpenAICompatibleProvider(AIProvider):
         retry_attempts: int | None = None,
     ) -> StructuredResult:
         encode_started = time.perf_counter()
-        if not image_paths:
-            raise DomainError("未选择图片")
-        image_content: list[dict[str, Any]] = []
-        for image_path in image_paths:
-            path = Path(image_path)
-            if not path.is_file():
-                raise DomainError(f"图片不存在：{path}")
-            mime = {".png": "image/png", ".webp": "image/webp"}.get(
-                path.suffix.lower(), "image/jpeg"
-            )
-            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-            image_content.append(
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
-            )
+        image_content = self._encode_image_content(image_paths)
         image_encode_ms = (time.perf_counter() - encode_started) * 1000
         payload = {
             "model": model or "gpt-4o-mini",
@@ -515,13 +583,13 @@ class OpenAICompatibleProvider(AIProvider):
         messages: list[dict[str, Any]],
         model: str,
         timeout_seconds: int,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> ChatCompletionResult:
-        body = self._request_json(
+        body = self._request_stream_json(
             "/chat/completions",
-            method="POST",
             timeout_seconds=timeout_seconds,
             payload={"model": model or "gpt-4o-mini", "temperature": 0.2, "messages": messages},
-            retry_instruction="请检查网络后重新发送问题",
+            on_text_delta=on_text_delta or (lambda _text: None),
         )
         try:
             content = body["choices"][0]["message"]["content"]
@@ -553,15 +621,16 @@ def _extract_json(text: str) -> dict[str, Any]:
         data = json.loads(text)
         if isinstance(data, dict):
             return data
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         pass
-    match = re.search(r"\{[\s\S]*\}", text)
-    if not match:
-        raise DomainError("无法从 AI 输出解析 JSON")
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise DomainError("AI 返回了无效 JSON") from exc
-    if not isinstance(data, dict):
-        raise DomainError("AI JSON 根节点必须是对象")
-    return data
+    decoder = json.JSONDecoder()
+    for candidate_index, match in enumerate(re.finditer(r"\{", text), start=1):
+        if candidate_index > _MAX_EMBEDDED_JSON_CANDIDATES:
+            raise DomainError("AI 输出包含过多 JSON 起始候选")
+        try:
+            data, _end = decoder.raw_decode(text, match.start())
+        except (json.JSONDecodeError, RecursionError):
+            continue
+        if isinstance(data, dict):
+            return data
+    raise DomainError("无法从 AI 输出解析 JSON")

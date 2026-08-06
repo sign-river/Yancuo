@@ -101,9 +101,7 @@ def validate_zip_members(
         raise ValueError("ZIP 安全上限必须为非负值")
     infos = zf.infolist()
     if len(infos) > max_members:
-        raise ArchiveSecurityError(
-            f"ZIP 条目数过多（{len(infos)}，上限 {max_members}）"
-        )
+        raise ArchiveSecurityError(f"ZIP 条目数过多（{len(infos)}，上限 {max_members}）")
 
     seen: set[str] = set()
     total = 0
@@ -124,20 +122,11 @@ def validate_zip_members(
         if size < 0 or compressed < 0:
             raise ArchiveSecurityError(f"ZIP 条目大小无效：{normalized}")
         if size > max_member_size:
-            raise ArchiveSecurityError(
-                f"ZIP 条目过大：{normalized}（{size} 字节）"
-            )
+            raise ArchiveSecurityError(f"ZIP 条目过大：{normalized}（{size} 字节）")
         total += size
         if total > max_total_size:
-            raise ArchiveSecurityError(
-                f"ZIP 解压总大小过大（超过 {max_total_size} 字节）"
-            )
-        if (
-            max_compression_ratio is not None
-            and not info.is_dir()
-            and size > 0
-            and compressed == 0
-        ):
+            raise ArchiveSecurityError(f"ZIP 解压总大小过大（超过 {max_total_size} 字节）")
+        if max_compression_ratio is not None and not info.is_dir() and size > 0 and compressed == 0:
             raise ArchiveSecurityError(f"ZIP 条目压缩大小无效：{normalized}")
         if (
             max_compression_ratio is not None
@@ -147,6 +136,48 @@ def validate_zip_members(
         ):
             raise ArchiveSecurityError(f"ZIP 条目压缩比异常：{normalized}")
     return infos
+
+
+def read_zip_member_limited(zf: zipfile.ZipFile, name: str, *, max_bytes: int) -> bytes:
+    """Read one validated ZIP member without trusting its declared size alone."""
+
+    if max_bytes < 0:
+        raise ValueError("ZIP 成员读取上限必须为非负数")
+    try:
+        info = zf.getinfo(name)
+    except KeyError as exc:
+        raise ArchiveSecurityError(f"ZIP 缺少条目：{name}") from exc
+    if info.file_size > max_bytes:
+        raise ArchiveSecurityError(f"ZIP 条目过大：{name}")
+    try:
+        with zf.open(info, "r") as stream:
+            payload = stream.read(max_bytes + 1)
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise ArchiveSecurityError(f"ZIP 条目读取失败：{name}") from exc
+    if len(payload) != info.file_size or len(payload) > max_bytes:
+        raise ArchiveSecurityError(f"ZIP 条目实际大小与声明不一致或超限：{name}")
+    return payload
+
+
+def read_regular_file_limited(path: Path, *, max_bytes: int) -> bytes:
+    """Read one ordinary file with symlink, size, and replacement checks."""
+
+    path = Path(path)
+    if max_bytes < 0:
+        raise ValueError("文件读取上限必须为非负数")
+    if path.is_symlink() or not path.is_file():
+        raise ArchiveSecurityError(f"文件不存在或不是普通文件：{path.name}")
+    try:
+        size = path.stat().st_size
+        if size > max_bytes:
+            raise ArchiveSecurityError(f"文件过大：{path.name}")
+        with path.open("rb") as stream:
+            payload = stream.read(max_bytes + 1)
+    except OSError as exc:
+        raise ArchiveSecurityError(f"文件读取失败：{path.name}") from exc
+    if len(payload) != size or len(payload) > max_bytes:
+        raise ArchiveSecurityError(f"文件在读取期间发生变化或超限：{path.name}")
+    return payload
 
 
 def _ensure_no_symlink_components(root: Path, target: Path) -> None:
@@ -232,9 +263,7 @@ def safe_extract_zip(
                     written += len(chunk)
                     written_total += len(chunk)
                     if written > max_member_size:
-                        raise ArchiveSecurityError(
-                            f"ZIP 条目实际解压大小超限：{normalized}"
-                        )
+                        raise ArchiveSecurityError(f"ZIP 条目实际解压大小超限：{normalized}")
                     if written_total > max_total_size:
                         raise ArchiveSecurityError("ZIP 实际解压总大小超限")
                     output.write(chunk)

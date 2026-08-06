@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +24,8 @@ class StoredObject:
 
 
 class ObjectStore:
+    MAX_OBJECT_BYTES = 128 * 1024 * 1024
+
     def __init__(self, objects_root: Path) -> None:
         self.objects_root = objects_root
         self.objects_root.mkdir(parents=True, exist_ok=True)
@@ -43,17 +47,50 @@ class ObjectStore:
     def store_copy(self, source: Path, *, role: str = "original") -> StoredObject:
         if not source.is_file():
             raise DomainError(f"文件不存在：{source}")
+        try:
+            source_size = source.stat().st_size
+        except OSError as exc:
+            raise DomainError(f"无法读取文件大小：{source}") from exc
+        if source_size <= 0:
+            raise DomainError("不能存储空文件")
+        if source_size > self.MAX_OBJECT_BYTES:
+            raise DomainError(
+                f"单个资源不能超过 {self.MAX_OBJECT_BYTES // (1024 * 1024)} MiB"
+            )
         sha = self.hash_file(source)
         suffix = source.suffix.lower() or ".bin"
         dest = self.object_path(sha, suffix)
         rel = self.relative_of(sha, suffix)
+        root = self.objects_root.resolve()
+        try:
+            dest.resolve(strict=False).relative_to(root)
+        except ValueError as exc:
+            raise DomainError("对象写入路径超出对象库") from exc
+        if dest.is_symlink():
+            raise DomainError("对象写入目标不能是符号链接")
         already = dest.is_file()
         if already:
             # 内容寻址：相同哈希视为同一对象，不覆盖写入
-            pass
+            if self.hash_file(dest) != sha:
+                raise DomainError("对象库中的同名文件内容已损坏")
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, dest)
+            resolved_parent = dest.parent.resolve()
+            try:
+                resolved_parent.relative_to(root)
+            except ValueError as exc:
+                raise DomainError("对象写入目录超出对象库") from exc
+            temporary = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                with source.open("rb") as src, temporary.open("xb") as out:
+                    shutil.copyfileobj(src, out, length=1024 * 1024)
+                    out.flush()
+                    os.fsync(out.fileno())
+                if self.hash_file(temporary) != sha:
+                    raise DomainError("对象写入后哈希校验失败")
+                os.replace(temporary, dest)
+            finally:
+                temporary.unlink(missing_ok=True)
             # 原图只读保护（文件系统层尽力而为）
             if role == "original":
                 try:
@@ -74,10 +111,23 @@ class ObjectStore:
     def resolve(self, relative_path: str) -> Path:
         # relative_path 形如 objects/ab/ab….jpg，根为 asset_dir
         # objects_root 即 asset_dir/objects，故相对路径若含 objects/ 前缀需剥掉
+        if not isinstance(relative_path, str) or not relative_path.strip():
+            raise DomainError("资源相对路径为空")
         rel = relative_path.replace("\\", "/")
+        if "\x00" in rel or Path(rel).is_absolute() or ":" in rel:
+            raise DomainError("资源相对路径无效")
+        root = self.objects_root.resolve()
         if rel.startswith("objects/"):
-            return (self.objects_root.parent / rel).resolve()
-        return (self.objects_root / rel).resolve()
+            candidate = (root.parent / rel).resolve(strict=False)
+        else:
+            candidate = (root / rel).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise DomainError("资源路径超出对象库") from exc
+        if candidate == root:
+            raise DomainError("资源路径必须指向对象文件")
+        return candidate
 
     def assert_can_replace(self, role: str, is_immutable: bool) -> None:
         assert_asset_writable(role, is_immutable)

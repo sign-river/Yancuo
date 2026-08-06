@@ -1,5 +1,6 @@
 package cn.yancuo.android.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -11,6 +12,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -29,6 +32,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import cn.yancuo.android.ui.AppViewModel
 
@@ -39,9 +44,13 @@ fun SettingsScreen(
     onBack: () -> Unit,
 ) {
     val state by viewModel.settings.collectAsState()
-    var gitLink by remember { mutableStateOf("") }
-    var gitHub by remember { mutableStateOf("") }
+    val busy by viewModel.busy.collectAsState()
+    var cloudBaseToken by remember { mutableStateOf("") }
+    var showCloudBaseToken by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { viewModel.refreshSettings() }
+    BackHandler(enabled = busy) {
+        // 恢复替换期间保持当前页面，避免并发访问正在重开的数据库。
+    }
 
     val openEbpack = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -54,7 +63,7 @@ fun SettingsScreen(
             TopAppBar(
                 title = { Text("设置") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onBack, enabled = !busy) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
@@ -86,8 +95,9 @@ fun SettingsScreen(
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
             ) {
-                Text("选择 .ebpack 文件")
+                Text(if (busy) "正在导入，请稍候…" else "选择 .ebpack 文件")
             }
             Text(
                 "将校验 manifest（graduate-mistake-book-ebpack v1、未加密）与 checksums.sha256，然后全量替换本地库。",
@@ -95,36 +105,40 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            Text("云 Token（仅本地加密存储，阶段 I 不自动下载）", style = MaterialTheme.typography.titleSmall)
+            Text("CloudBase Token（仅本地加密存储，阶段 I 不自动下载）", style = MaterialTheme.typography.titleSmall)
             OutlinedTextField(
-                value = gitLink,
-                onValueChange = { gitLink = it },
+                value = cloudBaseToken,
+                onValueChange = { cloudBaseToken = it },
                 label = {
                     Text(
-                        if (state.hasGitLink) "GitLink Token（已保存，输入新值覆盖）"
-                        else "GitLink Token",
+                        if (state.hasCloudBaseToken) "CloudBase 网关 Token（已保存，输入新值覆盖）"
+                        else "CloudBase 网关 Token",
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-            )
-            OutlinedTextField(
-                value = gitHub,
-                onValueChange = { gitHub = it },
-                label = {
-                    Text(
-                        if (state.hasGitHub) "GitHub Token（已保存，输入新值覆盖）"
-                        else "GitHub Token",
-                    )
+                visualTransformation = if (showCloudBaseToken) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
                 },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
+                trailingIcon = {
+                    IconButton(onClick = { showCloudBaseToken = !showCloudBaseToken }) {
+                        Icon(
+                            imageVector = if (showCloudBaseToken) {
+                                Icons.Default.VisibilityOff
+                            } else {
+                                Icons.Default.Visibility
+                            },
+                            contentDescription = if (showCloudBaseToken) "隐藏 Token" else "显示 Token",
+                        )
+                    }
+                },
             )
             Button(
                 onClick = {
-                    viewModel.saveTokens(gitLink, gitHub)
-                    gitLink = ""
-                    gitHub = ""
+                    viewModel.saveToken(cloudBaseToken)
+                    cloudBaseToken = ""
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {

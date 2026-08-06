@@ -8,21 +8,46 @@ dialog to finish recording a new problem.
 from __future__ import annotations
 
 import math
+import json
+import base64
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtCore import (
+    QBuffer,
+    QEvent,
+    QIODevice,
+    QObject,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QImage,
+    QPainter,
+    QPen,
+    QPixmap,
+    QTextCursor,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -33,6 +58,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QSpinBox,
     QStackedWidget,
     QTabWidget,
@@ -46,6 +72,7 @@ from yancuo_win.application.intake_service import (
     ProblemIntakeService,
     RegionRecognitionProposal,
 )
+from yancuo_win.ai.base import normalize_content_blocks
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.tasks.worker import (
@@ -59,6 +86,8 @@ from yancuo_win.ui.widgets import (
     CardFrame,
     IconButton,
     PageHeader,
+    ScrollSafeDoubleSpinBox,
+    ScrollSafeSpinBox,
     SoftItemDelegate,
     WorkflowStepBar,
     danger_button,
@@ -76,6 +105,300 @@ _PAGE_AI_CONFIRM = 3
 _PAGE_DONE = 4
 _PAGE_AI_ANSWER_CAPTURE = 5
 
+_AI_PROCESSING_HINT = "正在识别并整理题目，请稍候…"
+
+
+class FocusAwareTextEdit(QTextEdit):
+    """文本编辑框只在获得焦点（被点击/选中）时才响应滚轮。
+
+    未聚焦时把滚轮事件透传给父级滚动区域，避免滚动经过容器时
+    被文本容器截获、变成容器内滚动。
+    """
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        if not self.hasFocus():
+            event.ignore()
+            return
+        if self.verticalScrollBar().maximum() == 0:
+            event.ignore()
+            return
+        super().wheelEvent(event)
+
+
+class ContentBlocksEditor(QWidget):
+    """Ordered editor for AI-recognized text, formula, table, and figure blocks."""
+
+    changed = Signal()
+    figure_crop_requested = Signal(int)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._blocks: list[dict[str, Any]] = []
+        self._source_images: list[Path] = []
+        self._loading = False
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
+        self.block_list = QListWidget()
+        self.block_list.setAccessibleName("题目结构化内容块顺序")
+        self.block_list.setMinimumHeight(110)
+        root.addWidget(self.block_list)
+        actions = QGridLayout()
+        for column, (label, kind) in enumerate((("添加文本", "text"), ("添加公式", "formula"), ("添加表格", "table"), ("添加题图", "figure"))):
+            button = ghost_button(label)
+            button.clicked.connect(lambda _checked=False, value=kind: self._add(value))
+            actions.addWidget(button, 0, column)
+        for column, (label, delta) in enumerate((("上移", -1), ("下移", 1))):
+            button = ghost_button(label)
+            button.clicked.connect(lambda _checked=False, value=delta: self._move(value))
+            actions.addWidget(button, 1, column)
+        remove = danger_button("删除块")
+        remove.clicked.connect(self._remove)
+        actions.addWidget(remove, 1, 2)
+        actions.setColumnStretch(3, 1)
+        root.addLayout(actions)
+
+        form = QFormLayout()
+        self.kind = QComboBox()
+        for label, value in (("文本", "text"), ("公式", "formula"), ("表格", "table"), ("题图", "figure")):
+            self.kind.addItem(label, value)
+        self.content = FocusAwareTextEdit()
+        self.content.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.content.setPlaceholderText("文本、公式或题图说明")
+        self.table_rows = FocusAwareTextEdit()
+        self.table_rows.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table_rows.setPlaceholderText(
+            "每行一行、制表符分隔；合并单元格可直接填写 rows JSON"
+        )
+        self.source_image_index = ScrollSafeSpinBox()
+        self.source_image_index.setRange(0, 999)
+        self.region_row = QWidget()
+        region_layout = QHBoxLayout(self.region_row)
+        region_layout.setContentsMargins(0, 0, 0, 0)
+        self.region_values: list[QDoubleSpinBox] = []
+        for label, default in (("x", 0.0), ("y", 0.0), ("宽", 1.0), ("高", 1.0)):
+            region_layout.addWidget(QLabel(label))
+            spin = ScrollSafeDoubleSpinBox()
+            spin.setRange(0.0, 1.0)
+            spin.setDecimals(4)
+            spin.setSingleStep(0.01)
+            spin.setValue(default)
+            region_layout.addWidget(spin)
+            self.region_values.append(spin)
+        describe_field(self.kind, "内容块类型", "可将误识别的表格或题图降级为文本")
+        describe_field(self.content, "内容块文本或说明")
+        describe_field(self.table_rows, "表格单元格内容")
+        describe_field(self.source_image_index, "题图来源图片序号")
+        for spin, name in zip(self.region_values, ("题图区域横坐标", "题图区域纵坐标", "题图区域宽度", "题图区域高度"), strict=True):
+            describe_field(spin, name, "范围 0 到 1")
+        form.addRow("类型", self.kind)
+        form.addRow("内容 / 说明", self.content)
+        form.addRow("表格行列", self.table_rows)
+        form.addRow("来源图片序号", self.source_image_index)
+        form.addRow("归一化裁剪区域", self.region_row)
+        root.addLayout(form)
+
+        self.figure_panel = QFrame()
+        self.figure_panel.setObjectName("FigureBlockEditor")
+        figure_layout = QVBoxLayout(self.figure_panel)
+        figure_layout.setContentsMargins(12, 10, 12, 10)
+        self.figure_preview = QLabel("选择来源图片并调整裁剪区域")
+        self.figure_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.figure_preview.setMinimumHeight(120)
+        self.figure_preview.setObjectName("ImagePreview")
+        figure_layout.addWidget(self.figure_preview)
+        self.crop_figure_button = ghost_button("在原图上调整裁剪")
+        self.crop_figure_button.setAccessibleName("调整当前题图裁剪区域")
+        self.crop_figure_button.clicked.connect(self._request_figure_crop)
+        figure_layout.addWidget(self.crop_figure_button)
+        root.addWidget(self.figure_panel)
+
+        self.block_list.currentRowChanged.connect(self._select)
+        self.kind.currentIndexChanged.connect(self._write_current)
+        self.content.textChanged.connect(self._write_current)
+        self.table_rows.textChanged.connect(self._write_current)
+        self.source_image_index.valueChanged.connect(self._write_current)
+        for spin in self.region_values:
+            spin.valueChanged.connect(self._write_current)
+        self._sync_editor_visibility()
+
+    @staticmethod
+    def _label(block: dict[str, Any], index: int) -> str:
+        labels = {"text": "文本", "formula": "公式", "table": "表格", "figure": "题图"}
+        content = str(block.get("content") or "").replace("\n", " ").strip()
+        if block.get("type") == "table":
+            content = f"{len(block.get('rows') or [])} 行"
+        return f"{index + 1}. {labels.get(str(block.get('type')), '内容')} · {content[:36]}".rstrip(" ·")
+
+    def _refresh_list(self, selected: int | None = None) -> None:
+        self._loading = True
+        self.block_list.clear()
+        for index, block in enumerate(self._blocks):
+            self.block_list.addItem(self._label(block, index))
+        if self._blocks:
+            row = min(selected if selected is not None else 0, len(self._blocks) - 1)
+            self.block_list.setCurrentRow(max(0, row))
+        self._loading = False
+        self._select(self.block_list.currentRow())
+
+    def _add(self, kind: str) -> None:
+        block: dict[str, Any] = {"type": kind, "content": "", "source_region": {}}
+        if kind == "table":
+            block["rows"] = [[""]]
+        if kind == "figure":
+            block.update(source_image_index=0, source_region={"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0})
+        row = self.block_list.currentRow()
+        insert_at = len(self._blocks) if row < 0 else row + 1
+        self._blocks.insert(insert_at, block)
+        self._refresh_list(insert_at)
+        self.changed.emit()
+
+    def _remove(self) -> None:
+        row = self.block_list.currentRow()
+        if 0 <= row < len(self._blocks):
+            self._blocks.pop(row)
+            self._refresh_list(min(row, len(self._blocks) - 1))
+            self.changed.emit()
+
+    def _move(self, delta: int) -> None:
+        row = self.block_list.currentRow()
+        target = row + delta
+        if 0 <= row < len(self._blocks) and 0 <= target < len(self._blocks):
+            self._blocks[row], self._blocks[target] = self._blocks[target], self._blocks[row]
+            self._refresh_list(target)
+            self.changed.emit()
+
+    def _select(self, row: int) -> None:
+        if self._loading or not 0 <= row < len(self._blocks):
+            return
+        block = self._blocks[row]
+        self._loading = True
+        self.kind.setCurrentIndex(max(0, self.kind.findData(block.get("type"))))
+        self.content.setPlainText(str(block.get("content") or ""))
+        rows = block.get("rows") or []
+        if any(isinstance(cell, dict) for cells in rows if isinstance(cells, list) for cell in cells):
+            table_text = json.dumps(rows, ensure_ascii=False, indent=2)
+        else:
+            table_text = "\n".join("\t".join(str(cell) for cell in cells) for cells in rows if isinstance(cells, list))
+        self.table_rows.setPlainText(table_text)
+        self.source_image_index.setValue(int(block.get("source_image_index", 0)))
+        region = block.get("source_region") or {}
+        for spin, key, default in zip(self.region_values, ("x", "y", "width", "height"), (0.0, 0.0, 1.0, 1.0), strict=True):
+            spin.setValue(float(region.get(key, default)))
+        self._loading = False
+        self._sync_editor_visibility()
+
+    def _write_current(self, *_args) -> None:
+        if self._loading:
+            return
+        row = self.block_list.currentRow()
+        if not 0 <= row < len(self._blocks):
+            return
+        kind = str(self.kind.currentData())
+        block: dict[str, Any] = {"type": kind, "content": self.content.toPlainText(), "source_region": {}}
+        if kind == "table":
+            raw = self.table_rows.toPlainText().strip()
+            try:
+                rows = json.loads(raw) if raw.startswith("[") else [line.split("\t") for line in raw.splitlines()]
+            except json.JSONDecodeError:
+                rows = [[raw]]
+            block["rows"] = rows if isinstance(rows, list) else [[raw]]
+        if kind == "figure":
+            block["source_image_index"] = self.source_image_index.value()
+            block["source_region"] = dict(zip(("x", "y", "width", "height"), (spin.value() for spin in self.region_values), strict=True))
+        self._blocks[row] = block
+        self.block_list.item(row).setText(self._label(block, row))
+        self._sync_editor_visibility()
+        self.changed.emit()
+
+    def _sync_editor_visibility(self) -> None:
+        kind = self.kind.currentData()
+        self.table_rows.setVisible(kind == "table")
+        self.source_image_index.setVisible(kind == "figure")
+        self.region_row.setVisible(kind == "figure")
+        self.figure_panel.setVisible(kind == "figure")
+        self._refresh_figure_preview()
+
+    def _request_figure_crop(self) -> None:
+        row = self.block_list.currentRow()
+        if 0 <= row < len(self._blocks):
+            self.figure_crop_requested.emit(row)
+
+    def set_source_images(self, paths: list[Path]) -> None:
+        self._source_images = [Path(path) for path in paths]
+        self.source_image_index.setMaximum(max(0, len(self._source_images) - 1))
+        self.crop_figure_button.setEnabled(bool(self._source_images))
+        self._refresh_figure_preview()
+
+    def apply_figure_crop(
+        self,
+        row: int,
+        source_image_index: int,
+        region: dict[str, float],
+    ) -> None:
+        if not 0 <= row < len(self._blocks):
+            raise DomainError("题图内容块已经不存在")
+        block = dict(self._blocks[row])
+        if block.get("type") != "figure":
+            raise DomainError("当前内容块不是题图")
+        block["source_image_index"] = source_image_index
+        block["source_region"] = dict(region)
+        self._blocks[row] = block
+        self._refresh_list(row)
+        self.changed.emit()
+
+    def _refresh_figure_preview(self) -> None:
+        if not hasattr(self, "figure_preview"):
+            return
+        row = self.block_list.currentRow()
+        if not 0 <= row < len(self._blocks):
+            self.figure_preview.setPixmap(QPixmap())
+            self.figure_preview.setText("请选择题图内容块")
+            return
+        block = self._blocks[row]
+        index = int(block.get("source_image_index", 0))
+        region = block.get("source_region") or {}
+        if not 0 <= index < len(self._source_images):
+            self.figure_preview.setPixmap(QPixmap())
+            self.figure_preview.setText("当前题图没有可用的审核期来源图片")
+            return
+        image = QImage(str(self._source_images[index]))
+        if image.isNull() or not region:
+            self.figure_preview.setPixmap(QPixmap())
+            self.figure_preview.setText("题图来源或裁剪区域无效")
+            return
+        rect = QRectF(
+            image.width() * float(region.get("x", 0)),
+            image.height() * float(region.get("y", 0)),
+            image.width() * float(region.get("width", 0)),
+            image.height() * float(region.get("height", 0)),
+        ).toAlignedRect().intersected(image.rect())
+        crop = QPixmap.fromImage(image.copy(rect))
+        self.figure_preview.setText("")
+        self.figure_preview.setPixmap(
+            crop.scaled(
+                QSize(640, 220),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def blocks(self) -> list[dict[str, Any]]:
+        return normalize_content_blocks(self._blocks)
+
+    def set_blocks(self, blocks: Any) -> None:
+        self._blocks = normalize_content_blocks(blocks)
+        self._refresh_list()
+
+
+def _ellipsize_middle(text: str, max_len: int = 30) -> str:
+    """Shorten a long file name while keeping both ends, e.g. abc…xyz.jpg."""
+    if len(text) <= max_len:
+        return text
+    keep = max(4, max_len - 1)
+    left = keep * 2 // 3
+    right = keep - left
+    return f"{text[:left]}…{text[-right:]}"
 
 class ImagePreviewLabel(QLabel):
     """Aspect-ratio-preserving preview that follows the available panel size."""
@@ -93,6 +416,7 @@ class ImagePreviewLabel(QLabel):
         self._region_before_drag: dict[str, float] = {}
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(QSize(360, 260))
+        self.padding = 12
         self.setObjectName("ImagePreview")
 
     def set_path(self, path: Path | None) -> bool:
@@ -366,7 +690,7 @@ class ImagePreviewLabel(QLabel):
             self.setPixmap(QPixmap())
             self.setText(self.empty_text)
             return
-        target = self.size() - QSize(24, 24)
+        target = self.size() - QSize(self.padding * 2, self.padding * 2)
         self.setText("")
         self.setPixmap(
             self.source.scaled(
@@ -513,6 +837,37 @@ class ProblemForm(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
+        self._form_target: QVBoxLayout = root
+        self.render_view: MathContentView | None = None
+        if self.show_render_previews:
+            # 左右分栏：左侧实时渲染，右侧专注文字修改
+            self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+            root.addWidget(self.splitter)
+
+            render_panel = QWidget()
+            render_panel.setObjectName("ProblemRenderPanel")
+            render_layout = QVBoxLayout(render_panel)
+            render_layout.setContentsMargins(0, 0, 12, 0)
+            render_layout.setSpacing(8)
+            self.render_view = MathContentView()
+            self.render_view.set_adaptive_content_height(1200)
+            render_layout.addWidget(self.render_view)
+            self.splitter.addWidget(render_panel)
+
+            editor_panel = QScrollArea()
+            editor_panel.setWidgetResizable(True)
+            editor_panel.setFrameShape(QScrollArea.Shape.NoFrame)
+            editor_host = QWidget()
+            self._form_target = QVBoxLayout(editor_host)
+            self._form_target.setContentsMargins(0, 0, 0, 0)
+            self._form_target.setSpacing(12)
+            editor_panel.setWidget(editor_host)
+            self.splitter.addWidget(editor_panel)
+            # 题目预览占 2 份、编辑字段占 1 份
+            self.splitter.setStretchFactor(0, 2)
+            self.splitter.setStretchFactor(1, 1)
+            self.splitter.setSizes([720, 360])
+
         basic = CardFrame()
         basic.add_title("基本归属")
         form = QFormLayout()
@@ -560,7 +915,7 @@ class ProblemForm(QWidget):
         form.addRow("原题题号", self.original_number)
         form.addRow("标签", self.tags)
         basic.body.addLayout(form)
-        root.addWidget(basic)
+        self._form_target.addWidget(basic)
 
         content = CardFrame()
         content.add_title("题目内容")
@@ -569,9 +924,15 @@ class ProblemForm(QWidget):
         describe_field(self.question, "题干")
         content.body.addWidget(QLabel("题干"))
         content.body.addWidget(self.question)
+        self.content_blocks = ContentBlocksEditor()
+        if not self.show_render_previews:
+            self.content_blocks.hide()
         if self.show_render_previews:
-            self._add_field_preview(content.body, "question", "题目内容预览")
-        root.addWidget(content)
+            blocks_label = QLabel("结构化内容块（按原题顺序，可编辑表格、题图区域并拖动顺序）")
+            blocks_label.setObjectName("MutedLabel")
+            content.body.addWidget(blocks_label)
+            content.body.addWidget(self.content_blocks)
+        self._form_target.addWidget(content)
 
         answer = CardFrame()
         answer.add_title("作答与解析")
@@ -605,15 +966,21 @@ class ProblemForm(QWidget):
             else:
                 answer.body.addWidget(QLabel(label))
             answer.body.addWidget(editor)
-            if self.show_render_previews and label in {"我的作答", "正确答案", "解析"}:
-                key = {
-                    "我的作答": "user_answer",
-                    "正确答案": "correct_answer",
-                    "解析": "solution",
-                }[label]
-                self._add_field_preview(answer.body, key, f"{label}预览")
-        root.addWidget(answer)
-        root.addStretch(1)
+        self._form_target.addWidget(answer)
+        self._form_target.addStretch(1)
+
+        if self.show_render_previews and self.render_view is not None:
+            self._preview_scroll_filters: list[QObject] = []
+            for widget, key in (
+                (self.title_edit, "question"),
+                (self.question, "question"),
+                (self.user_answer, "user_answer"),
+                (self.correct_answer, "correct_answer"),
+                (self.solution, "solution"),
+                (self.notes, "notes"),
+                (self.tags, "question"),
+            ):
+                self._connect_preview_scroll(widget, key)
 
         self.subject.currentIndexChanged.connect(self._reload_chapters)
         self.chapter.currentIndexChanged.connect(
@@ -643,6 +1010,7 @@ class ProblemForm(QWidget):
     def _connect_change_signals(self) -> None:
         def notify(*_args) -> None:
             self.changed.emit()
+            self.refresh_render_previews()
 
         for editor in (
             self.title_edit,
@@ -665,10 +1033,12 @@ class ProblemForm(QWidget):
         self.subject.currentIndexChanged.connect(notify)
         self.chapter.currentIndexChanged.connect(notify)
         self.priority.valueChanged.connect(notify)
+        self.content_blocks.changed.connect(notify)
+        self.content_blocks.changed.connect(self.refresh_render_previews)
 
     @staticmethod
     def _text_area(placeholder: str, height: int) -> QTextEdit:
-        editor = QTextEdit()
+        editor = FocusAwareTextEdit()
         editor.setPlaceholderText(placeholder)
         editor.setProperty("contentMaxHeight", max(150, height * 2))
         editor.setUndoRedoEnabled(True)
@@ -694,25 +1064,26 @@ class ProblemForm(QWidget):
         layout.addWidget(preview)
 
     def refresh_render_previews(self) -> None:
-        if not self.show_render_previews:
+        if not self.show_render_previews or self.render_view is None:
             return
         question = self.question.toPlainText()
         latex = self._question_latex.strip()
         if latex:
             question = f"{question}\n\n\\[{latex}\\]".strip()
-        values = {
-            "question": ("题目内容", question),
-            "user_answer": ("我的作答", self.user_answer.toPlainText()),
-            "correct_answer": ("正确答案", self.correct_answer.toPlainText()),
-            "solution": ("解析", self.solution.toPlainText()),
-        }
-        for key, (title, value) in values.items():
-            label, preview = self._field_previews[key]
-            visible = bool(value.strip())
-            label.setVisible(visible)
-            preview.setVisible(visible)
-            if visible:
-                preview.set_fragment(title, value)
+        blocks = self.content_blocks.blocks
+        tags = [tag.strip() for tag in self.tags.text().split(",") if tag.strip()]
+        self.render_view.set_problem(
+            {
+                "title": self.title_edit.text(),
+                "question": question,
+                "content_blocks": blocks,
+                "user_answer": self.user_answer.toPlainText(),
+                "correct_answer": self.correct_answer.toPlainText(),
+                "solution_markdown": self.solution.toPlainText(),
+                "notes": self.notes.toPlainText(),
+            },
+            tag_names=tags,
+        )
 
     def _resize_text_areas_to_content(self) -> None:
         for editor in (
@@ -733,12 +1104,10 @@ class ProblemForm(QWidget):
             )
             one_line_height = line_height + 24
             target_height = max(one_line_height, content_height + 24)
-            maximum = int(editor.property("contentMaxHeight"))
-            editor.setFixedHeight(min(maximum, target_height))
+            # 文本框随内容长高，由外层面板滚动；不再出现内嵌滚动条
+            editor.setFixedHeight(target_height)
             editor.setVerticalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAsNeeded
-                if target_height > maximum
-                else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
             )
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
@@ -758,6 +1127,21 @@ class ProblemForm(QWidget):
         else:
             button.setMinimumSize(0, 0)
             button.setMaximumSize(16777215, 16777215)
+
+    def _connect_preview_scroll(self, widget: QWidget, key: str) -> None:
+        """点击编辑框时，把左侧预览滚动到该字段对应的小节。"""
+        preview = self.render_view
+
+        class _FocusScrollFilter(QObject):
+            def eventFilter(self, obj, event):  # noqa: N802, ANN001
+                if event.type() == QEvent.Type.FocusIn:
+                    preview.scroll_to_section(key)
+                return False
+
+        if preview is not None:
+            filter_obj = _FocusScrollFilter(self)
+            widget.installEventFilter(filter_obj)
+            self._preview_scroll_filters.append(filter_obj)
 
     def reload_catalog(self) -> None:
         current = self.subject.currentData()
@@ -814,6 +1198,7 @@ class ProblemForm(QWidget):
             "original_number": self._optional(self.original_number.text()),
             "question_markdown": self.question.toPlainText(),
             "question_latex": self._question_latex,
+            "content_blocks": self.content_blocks.blocks(),
             "user_answer": self.user_answer.toPlainText(),
             "correct_answer": self.correct_answer.toPlainText(),
             "solution_markdown": self.solution.toPlainText(),
@@ -905,6 +1290,7 @@ class ProblemForm(QWidget):
         self.original_number.setText(str(values.get("original_number") or ""))
         self.question.setPlainText(str(values.get("question_markdown") or ""))
         self._question_latex = str(values.get("question_latex") or "")
+        self.content_blocks.set_blocks(values.get("content_blocks") or [])
         self.user_answer.setPlainText(
             ""
             if self.clear_user_answer_on_load
@@ -919,6 +1305,76 @@ class ProblemForm(QWidget):
 
     def clear(self) -> None:
         self.set_values({})
+
+
+class FigureCropDialog(QDialog):
+    """Visual review-only crop editor for one formal figure block."""
+
+    def __init__(
+        self,
+        source_images: list[Path],
+        *,
+        source_image_index: int = 0,
+        region: dict[str, float] | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        if not source_images:
+            raise DomainError("当前候选没有可用于裁剪的来源图片")
+        self.source_images = [Path(path) for path in source_images]
+        self.setWindowTitle("调整题图裁剪")
+        self.setMinimumSize(760, 620)
+        root = QVBoxLayout(self)
+        hint = QLabel(
+            "拖动蓝框内部可移动，拖动边缘控制柄可缩放；在框外拖拽可重新绘制。"
+        )
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("来源图片"))
+        self.source = QComboBox()
+        for index, path in enumerate(self.source_images):
+            self.source.addItem(f"第 {index + 1} 张 · {path.name}", index)
+        source_row.addWidget(self.source, stretch=1)
+        root.addLayout(source_row)
+        self.preview = ImagePreviewLabel("无法读取来源图片")
+        self.preview.set_editable(True)
+        root.addWidget(self.preview, stretch=1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("采用此裁剪")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self._accept_crop)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+        self.source.currentIndexChanged.connect(self._source_changed)
+        initial = max(0, min(source_image_index, len(self.source_images) - 1))
+        self.source.setCurrentIndex(initial)
+        self.preview.set_path(self.source_images[initial])
+        self.preview.set_region(
+            region
+            or {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
+        )
+
+    def _source_changed(self, index: int) -> None:
+        if not 0 <= index < len(self.source_images):
+            return
+        self.preview.set_path(self.source_images[index])
+        self.preview.set_region(
+            {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
+        )
+
+    def _accept_crop(self) -> None:
+        region = self.preview.region
+        if not region or region.get("width", 0) <= 0 or region.get("height", 0) <= 0:
+            return
+        self.accept()
+
+    def result_crop(self) -> tuple[int, dict[str, float]]:
+        return self.source.currentIndex(), dict(self.preview.region)
 
 
 class IntakePage(QWidget):
@@ -942,6 +1398,9 @@ class IntakePage(QWidget):
         self.ai_files: list[Path] = []
         self.ai_job_id: str | None = None
         self._cancelled_ai_jobs: set[str] = set()
+        self._from_task_queue = False
+        self._pending_answer_job_id: str | None = None
+        self.coordinator.register_handler("user_answer", self._run_user_answer_job)
         self.region_worker: RegionRecognitionWorker | None = None
         self.answer_recognition_worker: UserAnswerRecognitionWorker | None = None
         self.answer_image: Path | None = None
@@ -1215,16 +1674,24 @@ class IntakePage(QWidget):
         layout.addLayout(start_row)
         return page
 
+    def _processing_back(self) -> None:
+        """返回：从任务队列进入时直接回任务列表，否则回到上传页。"""
+        if self._from_task_queue:
+            self._from_task_queue = False
+            self.library_requested.emit()
+            return
+        self.show_ai_upload()
+
     def _build_processing(self) -> QWidget:
         page, layout = self._page()
-        layout.addWidget(
-            self._header(
-                "AI 输出实时预览",
-                "这里展示模型公开输出和处理阶段；返回上传页不会中断任务。",
-                self.show_ai_upload,
-                back_tooltip="返回上传页",
-            )
+        processing_header = self._header(
+            "AI 输出实时预览",
+            "这里展示模型公开输出和处理阶段；返回上传页不会中断任务。",
+            self._processing_back,
+            back_tooltip="返回上传页",
         )
+        self.processing_back = processing_header.findChild(IconButton)
+        layout.addWidget(processing_header)
         self.ai_processing_steps_bar = self._ai_step_bar(0)
         layout.addWidget(self.ai_processing_steps_bar)
         card = CardFrame()
@@ -1255,13 +1722,8 @@ class IntakePage(QWidget):
         self.processing_retry = primary_button("重新尝试失败项")
         self.processing_retry.clicked.connect(self._retry_failed_ai)
         self.processing_retry.setVisible(False)
-        self.processing_back = QPushButton("返回修改上传内容")
-        self.processing_back.clicked.connect(self.show_ai_upload)
-        self.processing_back.setText("返回上传页")
-        self.processing_back.setVisible(True)
         actions.addWidget(self.processing_cancel_button)
         actions.addWidget(self.processing_retry)
-        actions.addWidget(self.processing_back)
         actions.addStretch(1)
         card.body.addLayout(actions)
         layout.addWidget(card)
@@ -1301,8 +1763,11 @@ class IntakePage(QWidget):
         )
         self.ai_form.changed.connect(self._queue_ai_preview)
         self.ai_form.answer_capture_requested.connect(self._open_answer_capture)
+        self.ai_form.content_blocks.figure_crop_requested.connect(
+            self._edit_figure_crop
+        )
         form_layout.addWidget(self.ai_form)
-        self.ai_result_tabs.addTab(self._scroll(form_host), "编辑字段")
+        self.ai_result_tabs.addTab(form_host, "编辑字段")
         self.ai_result_tabs.addTab(
             self._build_image_tools_tab(), "原图范围与重识别"
         )
@@ -1345,74 +1810,120 @@ class IntakePage(QWidget):
 
     def _build_image_tools_tab(self) -> QScrollArea:
         """Build the dedicated source-image and recognition adjustment tab."""
-        # The image tools can be taller than the available confirmation pane.
-        # Keep them in a single scrollable work area so controls never paint
-        # over the preview when the window height is constrained.
         image_tools = QWidget()
-        image_tools_layout = QVBoxLayout(image_tools)
-        image_tools_layout.setContentsMargins(12, 12, 12, 12)
-        image_tools_layout.setSpacing(12)
+        root = QVBoxLayout(image_tools)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(10)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal, image_tools)
+        root.addWidget(splitter, stretch=1)
+
+        # 左栏：原图与题目选区
+        left_panel = QWidget()
+        left_panel.setObjectName("ImageToolsPreviewPanel")
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 10, 0)
+        left_layout.setSpacing(8)
         self.image_preview = ImagePreviewLabel("无原图预览")
-        self.image_preview.setMinimumHeight(280)
-        self.image_preview.setMaximumHeight(360)
+        self.image_preview.padding = 28
+        self.image_preview.setMinimumHeight(320)
         self.image_preview.set_editable(True)
         self.image_preview.region_drawn.connect(self._save_drawn_region)
-        image_tools_layout.addWidget(self.image_preview)
+        left_layout.addWidget(self.image_preview, stretch=1)
+        splitter.addWidget(left_panel)
 
+        # 右栏：来源图片 / 题目区域 / AI 校对
+        right_panel = QWidget()
+        right_panel.setObjectName("ImageToolsSidePanel")
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(10, 0, 0, 0)
+        right_layout.setSpacing(14)
+        right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 7)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([720, 300])
+        self._image_tools_splitter = splitter
+
+        # —— 来源图片 ——
+        source_section = QVBoxLayout()
+        source_section.setSpacing(8)
         source_title = QLabel("来源图片")
         source_title.setObjectName("SectionTitle")
-        image_tools_layout.addWidget(source_title)
+        source_section.addWidget(source_title)
         self.source_image_list = QListWidget()
         self.source_image_list.setObjectName("CandidateSourceImages")
         self.source_image_list.setAccessibleName("候选题来源图片")
-        self.source_image_list.setFixedHeight(72)
-        image_tools_layout.addWidget(self.source_image_list)
+        self.source_image_list.setIconSize(QSize(24, 24))
+        self.source_image_list.setFixedHeight(104)
+        source_section.addWidget(self.source_image_list)
         source_actions = QHBoxLayout()
+        source_actions.setSpacing(8)
         source_up = QPushButton("来源图上移")
+        source_up.setObjectName("RegionOutlineButton")
         source_up.clicked.connect(lambda: self._move_source_image(-1))
         source_down = QPushButton("来源图下移")
+        source_down.setObjectName("RegionOutlineButton")
         source_down.clicked.connect(lambda: self._move_source_image(1))
         source_actions.addWidget(source_up)
         source_actions.addWidget(source_down)
         source_actions.addStretch(1)
-        image_tools_layout.addLayout(source_actions)
+        source_section.addLayout(source_actions)
+        right_layout.addLayout(source_section)
 
+        # —— 题目区域 ——
+        region_section = QVBoxLayout()
+        region_section.setSpacing(8)
         region_title = QLabel("题目区域")
         region_title.setObjectName("SectionTitle")
-        image_tools_layout.addWidget(region_title)
+        region_section.addWidget(region_title)
         self.region_label = QLabel("")
-        self.region_label.setObjectName("PageHint")
-        image_tools_layout.addWidget(self.region_label)
-        region_secondary_actions = QHBoxLayout()
+        self.region_label.setObjectName("RegionStatusLabel")
+        self.region_label.setWordWrap(True)
+        region_section.addWidget(self.region_label)
         reset_region = QPushButton("恢复整图")
+        reset_region.setObjectName("RegionOutlineButton")
         reset_region.clicked.connect(self._reset_candidate_region)
-        self.rerecognize_region = primary_button("按当前区域重新识别")
-        self.rerecognize_region.clicked.connect(
-            self._start_region_rerecognition
-        )
         self.undo_region_recognition = QPushButton("撤回上次重识别")
+        self.undo_region_recognition.setObjectName("RegionOutlineButton")
         self.undo_region_recognition.clicked.connect(
             self._undo_region_rerecognition
         )
-        region_secondary_actions.addWidget(reset_region)
-        region_secondary_actions.addWidget(self.undo_region_recognition)
-        region_secondary_actions.addWidget(self.rerecognize_region)
-        region_secondary_actions.addStretch(1)
-        image_tools_layout.addLayout(region_secondary_actions)
+        self.rerecognize_region = QPushButton("按当前区域重新识别")
+        self.rerecognize_region.setObjectName("RegionAccentButton")
+        self.rerecognize_region.clicked.connect(
+            self._start_region_rerecognition
+        )
+        region_section.addWidget(reset_region)
+        region_section.addWidget(self.undo_region_recognition)
+        region_section.addWidget(self.rerecognize_region)
+        right_layout.addLayout(region_section)
 
+        # —— AI 校对（紧凑状态卡）——
+        self.uncertain_card = QFrame()
+        self.uncertain_card.setObjectName("UncertainCard")
+        uncertain_card_layout = QVBoxLayout(self.uncertain_card)
+        uncertain_card_layout.setContentsMargins(12, 10, 12, 10)
+        uncertain_card_layout.setSpacing(8)
+        uncertain_header = QHBoxLayout()
+        uncertain_header.setSpacing(8)
+        warn_icon = QLabel("⚠")
+        warn_icon.setObjectName("UncertainWarnIcon")
         self.uncertain_title = QLabel("AI 核对")
         self.uncertain_title.setObjectName("SectionTitle")
-        self.uncertain_title.hide()
-        image_tools_layout.addWidget(self.uncertain_title)
+        uncertain_header.addWidget(warn_icon)
+        uncertain_header.addWidget(self.uncertain_title)
+        uncertain_header.addStretch(1)
+        uncertain_card_layout.addLayout(uncertain_header)
         self.uncertain_label = QLabel("")
         self.uncertain_label.setWordWrap(True)
         self.uncertain_label.setObjectName("PageHint")
-        self.uncertain_label.hide()
-        image_tools_layout.addWidget(self.uncertain_label)
+        uncertain_card_layout.addWidget(self.uncertain_label)
         self.uncertain_actions = QVBoxLayout()
-        self.uncertain_actions.setSpacing(4)
-        image_tools_layout.addLayout(self.uncertain_actions)
-        image_tools_layout.addStretch(1)
+        self.uncertain_actions.setSpacing(6)
+        uncertain_card_layout.addLayout(self.uncertain_actions)
+        right_layout.addWidget(self.uncertain_card)
+        right_layout.addStretch(1)
         return self._scroll(image_tools)
 
     def _build_answer_capture(self) -> QWidget:
@@ -1512,6 +2023,17 @@ class IntakePage(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
         self._apply_image_intake_layout()
+        self._update_image_tools_orientation()
+
+    def _update_image_tools_orientation(self) -> None:
+        splitter = getattr(self, "_image_tools_splitter", None)
+        if splitter is None:
+            return
+        splitter.setOrientation(
+            Qt.Orientation.Vertical
+            if self.width() < 900
+            else Qt.Orientation.Horizontal
+        )
 
     def _apply_image_intake_layout(self) -> None:
         narrow = self.width() < 860
@@ -1556,36 +2078,81 @@ class IntakePage(QWidget):
         self.answer_recognition_result.clear()
         self.answer_apply_button.setEnabled(False)
 
+    def _run_user_answer_job(
+        self, job_id: str, emit_progress, should_cancel
+    ) -> dict[str, str]:
+        """Background handler for the user_answer domain job."""
+        job = self.intake.ai.get_job(job_id)
+        if job is None:
+            raise DomainError("作答识别任务不存在")
+        try:
+            config = json.loads(job.config_json or "{}")
+        except (ValueError, TypeError):
+            config = {}
+        paths = [Path(str(value)) for value in config.get("image_paths") or []]
+        keywords = str(config.get("keywords") or "")
+        self.intake.ai.append_job_event(
+            job_id,
+            "status",
+            text_value="正在识别作答内容…",
+            payload={"stage": "started"},
+        )
+        answer = self.intake.recognize_user_answer_images(
+            paths, keywords=keywords
+        )
+        if should_cancel():
+            raise DomainError("作答识别任务已取消")
+        self.intake.ai.append_job_event(
+            job_id, "text_delta", text_value=answer, append_response=True
+        )
+        return {"user_answer": answer}
+
+    def _on_answer_job_done(self, job_id: str) -> None:
+        self._pending_answer_job_id = None
+        self.answer_recognize_button.setEnabled(True)
+        self.answer_recognize_button.setText("开始识别")
+        job = self.intake.ai.get_job(job_id)
+        answer = ""
+        if job is not None:
+            try:
+                result = json.loads(job.result_json or "{}")
+                answer = str(result.get("user_answer") or "")
+            except (ValueError, TypeError):
+                answer = job.response_text or ""
+        if answer:
+            self.answer_recognition_result.setPlainText(answer)
+            self.answer_recognition_status.setText("识别完成，请核对并修改结果。")
+        else:
+            self.answer_recognition_status.setText("AI 未识别出作答内容，请重试或手动填写。")
+
+    def _on_answer_job_failed(self, job_id: str, error: str) -> None:
+        self._pending_answer_job_id = None
+        self.answer_recognize_button.setEnabled(True)
+        self.answer_recognize_button.setText("开始识别")
+        self.answer_recognition_status.setText(f"识别失败：{error}")
+        self.status_message.emit(f"作答识别失败：{error}")
     def _start_answer_recognition(self) -> None:
         if not self.answer_images:
             self.answer_recognition_status.setText("请先选择包含作答的图片。")
             self.status_message.emit("请先选择包含作答的图片")
             return
-        if (
-            self.answer_recognition_worker
-            and self.answer_recognition_worker.isRunning()
-        ):
+        if self._pending_answer_job_id is not None:
             return
+        try:
+            job = self.intake.start_user_answer_job(
+                self.answer_images,
+                keywords=self.answer_keywords.toPlainText(),
+            )
+        except DomainError as exc:
+            self.answer_recognition_status.setText(str(exc))
+            return
+        self._pending_answer_job_id = job.id
         self.answer_recognize_button.setEnabled(False)
-        self.answer_recognize_button.setText("正在识别…")
-        self.answer_apply_button.setEnabled(False)
-        self.answer_recognition_status.setText("正在识别作答内容…")
-        self.answer_recognition_worker = UserAnswerRecognitionWorker(
-            self.intake,
-            [str(path) for path in self.answer_images],
-            self.answer_keywords.toPlainText(),
-            self,
+        self.answer_recognize_button.setText("已加入队列")
+        self.coordinator.enqueue(job.id)
+        self.answer_recognition_status.setText(
+            "已加入 AI 队列，正在识别作答内容，可到任务队列查看进度。"
         )
-        self.answer_recognition_worker.finished_ok.connect(
-            self._on_answer_recognition_done
-        )
-        self.answer_recognition_worker.failed.connect(
-            self._on_answer_recognition_failed
-        )
-        self.answer_recognition_worker.finished.connect(
-            self._on_answer_recognition_finished
-        )
-        self.answer_recognition_worker.start()
 
     def _on_answer_recognition_done(self, answer: str) -> None:
         self.answer_recognition_result.setPlainText(answer)
@@ -1882,10 +2449,15 @@ class IntakePage(QWidget):
             "",
             "Images (*.png *.jpg *.jpeg *.webp);;All (*.*)",
         )
+        self.add_ai_files([Path(value) for value in files])
+
+    def add_ai_files(self, paths: list[Path]) -> int:
+        """Add user-selected sources to the temporary AI intake surface."""
+
         invalid: list[str] = []
         first_added_row: int | None = None
-        for value in files:
-            path = Path(value)
+        added = 0
+        for path in paths:
             if path in self.ai_files:
                 continue
             pixmap = QPixmap(str(path))
@@ -1902,6 +2474,7 @@ class IntakePage(QWidget):
             item.setToolTip(str(path))
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             self.ai_file_list.addItem(item)
+            added += 1
             if first_added_row is None:
                 first_added_row = self.ai_file_list.count() - 1
         if first_added_row is not None:
@@ -1912,6 +2485,7 @@ class IntakePage(QWidget):
                 "部分图片无法读取",
                 "以下文件不是有效图片或格式不受支持：\n" + "\n".join(invalid),
             )
+        return added
 
     def _remove_ai_files(self) -> None:
         rows = sorted({self.ai_file_list.row(item) for item in self.ai_file_list.selectedItems()}, reverse=True)
@@ -2049,14 +2623,12 @@ class IntakePage(QWidget):
             return
         self.progress_bar.setRange(0, max(1, progress.total))
         self.progress_bar.setValue(progress.done + progress.failed)
-        stage_label = self._ai_live_stage_label or progress.stage_label
         self.processing_status.setText(
-            f"{stage_label} · "
-            f"完成 {progress.done} / {progress.total} · 失败 {progress.failed}"
+            f"已完成 {progress.done}/{progress.total} · 失败 {progress.failed}"
         )
         self.ai_task_surface.show()
         self.ai_task_status.setText(
-            f"{stage_label} · 完成 {progress.done}/{progress.total} · 失败 {progress.failed}"
+            f"已完成 {progress.done}/{progress.total} · 失败 {progress.failed}"
         )
         timing_labels = (
             ("queue_wait", "任务排队"),
@@ -2098,17 +2670,17 @@ class IntakePage(QWidget):
                 if progress.cache_hits
                 else ""
             )
-            self.processing_steps.setText(
+            timing_text = (
                 f"已完成 {progress.timing_samples} 张的实测平均："
                 + " · ".join(measured)
                 + retry_text
                 + cache_text
             )
+            if self.processing_steps.text() != timing_text:
+                self.processing_steps.setText(timing_text)
         else:
-            self.processing_steps.setText(
-                f"当前真实阶段：{progress.stage_label}。"
-                "每张图片只发起一次主 AI 请求；完成首张后显示实测耗时。"
-            )
+            if self.processing_steps.text() != _AI_PROCESSING_HINT:
+                self.processing_steps.setText(_AI_PROCESSING_HINT)
         if progress.status == "cancelled":
             self.progress_timer.stop()
             self._cancelled_ai_jobs.add(progress.job_id)
@@ -2131,10 +2703,11 @@ class IntakePage(QWidget):
             if not self._ai_live_stage_history or self._ai_live_stage_history[-1] != label:
                 self._ai_live_stage_history.append(label)
                 self._ai_live_stage_history = self._ai_live_stage_history[-4:]
-            self.processing_status.setText(label)
-            self.processing_steps.setText(" · ".join(self._ai_live_stage_history))
+            if self.processing_steps.text() != _AI_PROCESSING_HINT:
+                self.processing_steps.setText(_AI_PROCESSING_HINT)
             self.ai_task_surface.show()
-            self.ai_task_status.setText(label)
+            if self.ai_task_status.text() != label:
+                self.ai_task_status.setText(label)
         text_delta = event.get("text_delta")
         if isinstance(text_delta, str) and text_delta:
             cursor = self.processing_preview.textCursor()
@@ -2195,6 +2768,9 @@ class IntakePage(QWidget):
         self.status_message.emit("正在重新尝试失败的 AI 录题项")
 
     def _on_ai_done(self, job_id: str) -> None:
+        if job_id == self._pending_answer_job_id:
+            self._on_answer_job_done(job_id)
+            return
         if job_id in self._cancelled_ai_jobs:
             return
         if job_id != self.ai_job_id:
@@ -2243,6 +2819,9 @@ class IntakePage(QWidget):
         self.ai_review_ready.emit(job_id, len(self.ai_candidates))
 
     def _on_ai_failed(self, job_id: str, error: str) -> None:
+        if job_id == self._pending_answer_job_id:
+            self._on_answer_job_failed(job_id, error)
+            return
         if job_id in self._cancelled_ai_jobs:
             return
         if job_id != self.ai_job_id:
@@ -2259,14 +2838,27 @@ class IntakePage(QWidget):
             return
         self.candidate_index %= len(self.ai_candidates)
         candidate = self.ai_candidates[self.candidate_index]
+        self.ai_form.content_blocks.set_source_images(candidate.source_images)
         self.ai_form.set_values(candidate.fields)
         self._refresh_ai_preview()
         self.image_preview.set_path(candidate.original_image)
         self.source_image_list.clear()
         for path in candidate.source_images:
-            item = QListWidgetItem(path.name)
+            item = QListWidgetItem(_ellipsize_middle(path.name))
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             item.setToolTip(str(path))
+            thumbnail = QPixmap(str(path))
+            if not thumbnail.isNull():
+                item.setIcon(
+                    QIcon(
+                        thumbnail.scaled(
+                            28,
+                            28,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+                )
             self.source_image_list.addItem(item)
         if self.source_image_list.count():
             self.source_image_list.setCurrentRow(0)
@@ -2372,11 +2964,42 @@ class IntakePage(QWidget):
     def _on_ai_result_tab_changed(self, index: int) -> None:
         if index == 0:
             self._refresh_ai_preview()
+        elif index == 1:
+            self.ai_form.refresh_render_previews()
 
     def _refresh_ai_preview(self) -> None:
         if not hasattr(self, "ai_result_preview") or not hasattr(self, "ai_form"):
             return
         fields = self.ai_form.values()
+        if self.ai_candidates:
+            candidate = self.ai_candidates[self.candidate_index]
+            paths = self.intake.candidate_source_images(candidate.review_item_id)
+            blocks = normalize_content_blocks(fields.get("content_blocks"))
+            for block in blocks:
+                if block.get("type") != "figure":
+                    continue
+                index = int(block.get("source_image_index", 0))
+                region = block.get("source_region") or {}
+                if not (0 <= index < len(paths) and region):
+                    continue
+                image = QImage(str(paths[index]))
+                if image.isNull():
+                    continue
+                rect = QRectF(
+                    image.width() * float(region.get("x", 0)),
+                    image.height() * float(region.get("y", 0)),
+                    image.width() * float(region.get("width", 0)),
+                    image.height() * float(region.get("height", 0)),
+                ).toAlignedRect().intersected(image.rect())
+                crop = image.copy(rect)
+                payload = QBuffer()
+                payload.open(QIODevice.OpenModeFlag.WriteOnly)
+                if crop.save(payload, "PNG"):
+                    block["image_data_uri"] = (
+                        "data:image/png;base64,"
+                        + base64.b64encode(bytes(payload.data())).decode("ascii")
+                    )
+            fields["content_blocks"] = blocks
         if self.ai_form.subject.currentData():
             fields["subject_name"] = self.ai_form.subject.currentText()
         if self.ai_form.chapter.currentData():
@@ -2416,7 +3039,54 @@ class IntakePage(QWidget):
             QMessageBox.warning(self, "无法调整来源图", str(exc))
             self._load_candidate()
             return
+        self.ai_form.content_blocks.set_source_images(paths)
+        blocks = self.ai_form.content_blocks.blocks()
+        for block in blocks:
+            if block.get("type") != "figure":
+                continue
+            index = int(block.get("source_image_index", 0))
+            if index == row:
+                block["source_image_index"] = target
+            elif row < target and row < index <= target:
+                block["source_image_index"] = index - 1
+            elif target < row and target <= index < row:
+                block["source_image_index"] = index + 1
+        self.ai_form.content_blocks.set_blocks(blocks)
+        self._queue_ai_preview()
         self.status_message.emit("来源图片顺序已保存；不会自动重新识别")
+
+    def _edit_figure_crop(self, row: int) -> None:
+        if not self.ai_candidates:
+            return
+        candidate = self.ai_candidates[self.candidate_index]
+        sources = self.intake.candidate_source_images(candidate.review_item_id)
+        blocks = self.ai_form.content_blocks.blocks()
+        if not 0 <= row < len(blocks) or blocks[row].get("type") != "figure":
+            self.status_message.emit("当前题图内容块已经变化，请重新选择")
+            return
+        block = blocks[row]
+        try:
+            dialog = FigureCropDialog(
+                sources,
+                source_image_index=int(block.get("source_image_index", 0)),
+                region=block.get("source_region") or None,
+                parent=self,
+            )
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        source_index, region = dialog.result_crop()
+        try:
+            self.ai_form.content_blocks.apply_figure_crop(
+                row, source_index, region
+            )
+        except DomainError as exc:
+            self.status_message.emit(str(exc))
+            return
+        self._queue_ai_preview()
+        self.status_message.emit("题图裁剪已更新，确认入库前仍可继续调整")
 
     def _show_region_label(self, region: dict[str, float]) -> None:
         if region:

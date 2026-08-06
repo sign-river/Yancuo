@@ -14,7 +14,7 @@ WINDOWS_APP = ROOT / "apps" / "windows"
 MATRIX_MODULES = (
     "../../tests/unit/test_phase_f_ebpack.py",
     "../../tests/unit/test_phase_g_cloud.py",
-    "../../tests/unit/test_phase_h_github.py",
+    "../../tests/unit/test_cloudbase_provider.py",
     "../../tests/unit/test_phase_j_sync.py",
     "../../tests/unit/test_archive_security.py",
 )

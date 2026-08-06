@@ -21,7 +21,8 @@
 - `last_snapshot_id` 是本机最后确认的云端共同祖先；若当前云端资料头不同，客户端必须暂停上传并要求恢复或合并确认。
 - `user_id` 记录本地创建者审计来源，资料绑定或合并时不得重写历史值。
 - `device_id` 标识写入设备，不能用于推断用户身份。
-- GitHub/GitLink 私有仓库权限及其系统凭据 token 是唯一云端读写边界。
+- 跨设备恢复 `.ebpack` 时继承资料的 `user_id`、`database_id` 与 `profile_id`，但必须保留目标安装自己的 `device_id`，并清空尚未由目标设备确认的 `last_snapshot_id`；不得把来源设备标识克隆到新设备。
+- CloudBase 网关按令牌主体执行命名空间授权；客户端只保存系统凭据中的受限网关 token，不持有云存储或 PostgreSQL 管理凭据。
 
 旧身份文件缺少 `profile_id` 时，客户端生成随机 ID 并写回；不得从昵称、手机号或设备信息推导。
 

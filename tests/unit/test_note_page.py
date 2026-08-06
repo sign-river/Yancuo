@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 import yancuo_win.ui.note_page as note_page_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
@@ -20,7 +20,7 @@ from yancuo_win.application.note_intake_service import (
     NoteDraftBlockInput,
     NoteDraftGroupInput,
 )
-from yancuo_win.application.note_service import NoteService
+from yancuo_win.application.note_service import NoteListRow, NoteService
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.ui.note_page import NotePage
 from yancuo_win.ui.widgets import ReadingCanvas, SoftItemDelegate
@@ -50,6 +50,30 @@ def note_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NotePage:
     app.processEvents()
     yield page
     page.close()
+
+
+def test_note_page_does_not_show_header_during_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("YANCUO_DATA_ROOT", str(tmp_path / "visibility-data"))
+    monkeypatch.setenv("YANCUO_CONFIG_FILE", str(default_toml_path()))
+    monkeypatch.setattr(note_page_module, "MathContentView", _ReaderStub)
+    app = QApplication.instance() or QApplication([])
+    runtime = bootstrap_runtime()
+    shown_labels: list[QLabel] = []
+    original_show = QLabel.show
+
+    def track_show(label: QLabel) -> None:
+        shown_labels.append(label)
+        original_show(label)
+
+    monkeypatch.setattr(QLabel, "show", track_show)
+    page = NotePage(NoteService(runtime))
+
+    assert page.note_status not in shown_labels
+    page.close()
+    runtime.engine.dispose()
+    app.processEvents()
 
 
 def test_note_page_creates_edits_and_reads_blocks(note_page: NotePage) -> None:
@@ -94,6 +118,31 @@ def test_note_library_uses_space_and_expanded_list_hierarchy(note_page: NotePage
     assert note_page.more_button.text() == "更多"
     assert not note_page.more_button.icon().isNull()
     assert note_page.collection_list.uniformItemSizes()
+
+
+def test_note_list_materializes_long_results_in_batches(
+    note_page: NotePage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [
+        NoteListRow(
+            id=f"note-{index}",
+            title=f"笔记 {index}",
+            summary="摘要",
+            status="active",
+            subject_id=None,
+            chapter_id=None,
+        )
+        for index in range(501)
+    ]
+    monkeypatch.setattr(note_page.notes, "list_note_summaries", lambda **_kwargs: rows)
+    monkeypatch.setattr(note_page, "_reload_collections", lambda: None)
+
+    note_page.reload()
+
+    assert note_page.note_list.count() == 500
+    assert note_page.note_count_label.text() == "501 篇"
+    note_page._append_note_batch()
+    assert note_page.note_list.count() == 501
     assert note_page.note_list.uniformItemSizes()
     assert note_page.collection_list.accessibleName() == "笔记合集"
     assert note_page.note_list.accessibleName() == "笔记列表"
@@ -179,6 +228,55 @@ def test_note_library_narrow_breakpoint_keeps_list_and_discloses_space(
     assert not note_page.note_library_pane.isHidden()
     assert note_page.workspace.count() == 2
     assert isinstance(note_page.space_back_button, note_page_module.IconButton)
+
+
+def test_note_library_real_sizes_long_list_and_status_labels(
+    note_page: NotePage,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    for index in range(10):
+        note_page.notes.create_note(
+            title=f"第 {index + 1} 篇超长笔记标题 " + "函数极限与连续性综合整理" * 4,
+            summary="长笔记摘要 " + "用于验证列表无横向滚动与文字遮挡" * 4,
+            status="active",
+        )
+    note_page.notes.create_note(title="待整理草稿", status="inbox")
+    note_page.notes.create_note(title="历史归档", status="archived")
+    note_page.notes.create_note(title="已删除笔记", status="trashed")
+    note_page.status_filter.setCurrentIndex(note_page.status_filter.findData(None))
+    note_page.reload()
+    note_page.show()
+
+    note_page.resize(760, 700)
+    app.processEvents()
+    assert note_page._narrow_layout
+    assert note_page.space_pane.isHidden()
+    assert not note_page.note_library_pane.isHidden()
+
+    for width in (1366, 1920):
+        note_page.resize(width, 800)
+        app.processEvents()
+        assert not note_page._narrow_layout
+        assert not note_page.space_pane.isHidden()
+        assert not note_page.note_library_pane.isHidden()
+        navigation, listing = note_page.workspace.sizes()
+        assert 200 <= navigation <= 260
+        assert listing >= 320
+
+    texts = [
+        note_page.note_list.item(row).text()
+        for row in range(note_page.note_list.count())
+    ]
+    assert any("草稿 ·" in text for text in texts)
+    assert any("已归档 ·" in text for text in texts)
+    assert any("回收站 ·" in text for text in texts)
+    assert note_page.note_list.count() == 13
+    assert not note_page.note_list.wordWrap()
+    assert (
+        note_page.note_list.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
 
 
 def test_narrow_note_layout_discloses_space_separately(note_page: NotePage) -> None:
@@ -291,10 +389,7 @@ def test_note_page_moves_a_note_to_the_recycle_bin(note_page: NotePage) -> None:
     assert note_page.status_filter.currentData() == "active"
 
 
-def test_note_page_opens_original_on_demand_with_source_regions(
-    note_page: NotePage,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_confirmed_note_has_no_original_view_entry(note_page: NotePage) -> None:
     source_path = note_page.notes.runtime.paths.root / "note-source.png"
     source = QPixmap(24, 24)
     source.fill(Qt.GlobalColor.white)
@@ -317,29 +412,10 @@ def test_note_page_opens_original_on_demand_with_source_regions(
         ],
     )
     note = note_page.note_ai.commit_draft(draft)
-    opened: dict = {}
-
-    class _ViewerStub:
-        def __init__(self, pixmap, parent=None, *, source_regions=()) -> None:
-            opened["valid"] = not pixmap.isNull()
-            opened["regions"] = list(source_regions)
-
-        def exec(self) -> None:
-            opened["executed"] = True
-
-    monkeypatch.setattr(note_page_module, "ImageViewerDialog", _ViewerStub)
     note_page.reload(select_note_id=note.id)
 
-    assert not note_page.original_button.isHidden()
-    assert note_page.original_button.isEnabled()
-    note_page._open_original()
-    assert opened == {
-        "valid": True,
-        "regions": [
-            {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}
-        ],
-        "executed": True,
-    }
+    assert note.assets == []
+    assert not hasattr(note_page, "original_button")
 
 
 def test_draft_preview_moves_a_block_between_groups(note_page: NotePage) -> None:

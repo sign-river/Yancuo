@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QListWidget, QTreeWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFrame,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QTreeWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 import yancuo_win.ui.widgets as widgets_module
 from yancuo_win.ui.theme import (
     DARK_THEME,
     LIGHT_THEME,
+    ThemeManager,
     UI_METRICS,
     app_stylesheet,
     normalize_theme_mode,
@@ -215,6 +226,60 @@ def test_soft_visual_tokens_and_library_surfaces_are_rendered() -> None:
     assert 'QFrame#StateNotice[state="loading"]' in rendered
     assert 'QFrame#StateNotice[state="error"]' in rendered
     assert 'QFrame#StateNotice[state="permission"]' in rendered
+
+
+@pytest.mark.parametrize(("mode", "tokens"), [("light", LIGHT_THEME), ("dark", DARK_THEME)])
+def test_dropdown_surfaces_share_spacious_floating_panel_states(mode, tokens) -> None:
+    rendered = app_stylesheet(mode)
+
+    assert "QMenu::item" in rendered
+    assert "min-height: 40px" in rendered
+    assert "padding: 0 16px" in rendered
+    assert "margin: 8px 10px" in rendered
+    assert "QMenu::item:selected" in rendered
+    assert "QComboBox:on" in rendered
+    assert "QComboBox:on::drop-down" in rendered
+    assert "QComboBox QAbstractItemView::item:disabled" in rendered
+    assert "padding: 0 14px" in rendered
+    assert tokens.border_strong in rendered
+    assert tokens.list_hover in rendered
+
+
+def test_combo_popup_clips_native_shell_and_uses_shared_item_delegate() -> None:
+    app = QApplication.instance() or QApplication([])
+    original_stylesheet = app.styleSheet()
+    original_palette = app.palette()
+    manager = ThemeManager(app, "light")
+    combo = QComboBox()
+    combo.addItems(["正式笔记", "待整理", "归档"])
+    combo.show()
+    combo.showPopup()
+    app.processEvents()
+
+    popup = combo.view().window()
+    assert popup.metaObject().className() == "QComboBoxPrivateContainer"
+    assert not popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert not popup.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert popup.autoFillBackground()
+    assert popup.frameShape() == QFrame.Shape.NoFrame
+    assert not popup.mask().isEmpty()
+    assert popup.mask().boundingRect() == combo.view().geometry()
+    assert popup.mask().boundingRect() != popup.rect()
+    assert isinstance(combo.view().itemDelegate(), widgets_module.SoftItemDelegate)
+    assert combo.view().property("yancuoDropdownDelegate") is True
+    assert popup.property("yancuoRoundedPopupShell") is True
+    # 弹层列表视图移至触发框下方约 6px，不再覆盖触发框
+    combo_bottom = combo.mapToGlobal(combo.rect().bottomLeft()).y()
+    view_top = combo.view().mapToGlobal(combo.view().rect().topLeft()).y()
+    assert view_top >= combo_bottom + 4
+
+    combo.hidePopup()
+    combo.close()
+    app.removeEventFilter(manager)
+    manager.deleteLater()
+    app.setStyleSheet(original_stylesheet)
+    app.setPalette(original_palette)
+    app.processEvents()
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])

@@ -49,11 +49,8 @@ class ObjectStore(private val objectsRoot: File) {
     fun relativeOf(sha256: String, suffix: String): String =
         "objects/${sha256.take(2)}/$sha256$suffix"
 
-    /**
-     * 复制源文件入对象库。role=original 时尽力设为只读。
-     * 若目标已存在（同哈希），不覆盖写入。
-     */
-    fun storeCopy(source: File, role: String = "original"): StoredObject {
+    /** 复制已获准持久化的文件入对象库；若同哈希目标已存在则不覆盖。 */
+    fun storeCopy(source: File): StoredObject {
         require(source.isFile) { "文件不存在：$source" }
         val sha = hashFile(source)
         val suffix = source.extension.let { if (it.isBlank()) ".bin" else ".${it.lowercase()}" }
@@ -63,12 +60,10 @@ class ObjectStore(private val objectsRoot: File) {
         if (!already) {
             dest.parentFile?.mkdirs()
             source.copyTo(dest, overwrite = false)
-            if (role == "original") {
-                try {
-                    dest.setWritable(false)
-                } catch (_: Exception) {
-                    // 尽力而为
-                }
+            try {
+                dest.setWritable(false)
+            } catch (_: Exception) {
+                // 尽力而为
             }
         }
         val mime = guessMime(source.name)

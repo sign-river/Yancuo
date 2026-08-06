@@ -2,7 +2,7 @@
 
 > 状态：跨端字段语义 v1 稳定基线。变更前须说明原因与兼容性影响。
 > 权威实现：Windows `yancuo_win.data.models` 与 Android `cn.yancuo.android.data.db`。
-> 当前版本：Windows 数据库 `schema_version=10`；Android 新建本地核心库为 schema v7，可导入并保留加法式 Windows v10 快照；跨端字段语义 `data_format_version=1`。这些版本含义不同，不能互换。
+> 当前版本：Windows 数据库 `schema_version=22`；Android 仍只承诺其本地核心兼容范围；跨端字段语义 `data_format_version=1`。数据库版本与跨端格式版本含义不同，不能互换。
 
 ---
 
@@ -14,7 +14,7 @@
 4. 题目修改通过 `revision` + `versions` 追溯；AI/外部导入不得静默覆盖。  
 5. 未在本文标注为 MVP 的字段，实现方可延后写入，但不得占用冲突语义。
 
-题目可加法保存有序 `content_blocks`（`text`、`formula`、`table`、`figure`）。图像来源块必须携带 `source_image_index` 和归一化 `source_region`；未可靠识别的单元格或图形标注不得猜造。旧题缺失内容块时安全回退到 `question_markdown` / `question_latex`。
+题目可在 `problems.question_content_json` 中加法保存有序 `content_blocks`（`text`、`formula`、`table`、`figure`）。表格单元格可以是字符串，或带 `content`、`rowspan`、`colspan` 的对象。图像来源块必须携带 `source_image_index` 和归一化 `source_region`；确认入库后还应记录不可变的 `source_asset_id` 与 `derived_asset_id`。派生裁剪使用 `role=derived_figure`，只能从不可变原图裁切，不得覆盖或重绘原图。未可靠识别的单元格或图形标注不得猜造。旧题缺失或损坏内容块时安全回退到 `question_markdown` / `question_latex`。
 
 ---
 
@@ -25,6 +25,8 @@
 | `user_id` | `usr_` + hex | 本地用户，不依赖云 |
 | `device_id` | `dev_win_` / `dev_android_` + hex | 设备 |
 | `database_id` | `db_` + hex | 本库实例 |
+| `profile_id` | `profile_` + hex | 可跨设备恢复/绑定的资料命名空间 |
+| `last_snapshot_id` | `snapshot_` + hex 或空 | 本设备最后确认的云端共同祖先 |
 | 实体 `id` | 前缀 + hex（如 `problem_`） | 全局唯一字符串主键 |
 
 本地身份文件示例（`identity.json`）：
@@ -34,6 +36,8 @@
   "user_id": "usr_…",
   "device_id": "dev_win_…",
   "database_id": "db_…",
+  "profile_id": "profile_…",
+  "last_snapshot_id": "",
   "display_name": "本地用户",
   "created_at": "2026-07-21T10:00:00+00:00"
 }

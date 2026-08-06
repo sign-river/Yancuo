@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
 from yancuo_win.config.settings import PathsConfig
-from yancuo_win.domain.identity import load_or_create_identity
+from yancuo_win.domain.identity import (
+    MAX_IDENTITY_BYTES,
+    load_or_create_identity,
+    read_identity,
+)
 from yancuo_win.infrastructure.paths import build_data_paths, resolve_data_root
 
 
@@ -46,3 +51,54 @@ def test_legacy_identity_receives_persistent_profile_id(tmp_path: Path) -> None:
     assert identity.profile_id.startswith("profile_")
     assert identity.last_snapshot_id == ""
     assert identity.profile_id in path.read_text(encoding="utf-8")
+
+
+def test_read_identity_validates_without_upgrading_legacy_file(tmp_path: Path) -> None:
+    path = tmp_path / "identity.json"
+    original = b'{"user_id":"usr_old","device_id":"dev_win_old","database_id":"db_old"}'
+    path.write_bytes(original)
+
+    identity = read_identity(path)
+
+    assert identity.profile_id.startswith("profile_")
+    assert path.read_bytes() == original
+
+
+def test_identity_write_is_atomic_and_leaves_no_temporary_file(tmp_path: Path) -> None:
+    path = tmp_path / "identity.json"
+
+    identity = load_or_create_identity(path)
+
+    assert (
+        json.loads(path.read_text(encoding="utf-8"))["profile_id"]
+        == identity.profile_id
+    )
+    assert list(tmp_path.glob(".identity-*.tmp")) == []
+
+
+def test_identity_rejects_oversized_file(tmp_path: Path) -> None:
+    path = tmp_path / "identity.json"
+    path.write_bytes(b" " * (MAX_IDENTITY_BYTES + 1))
+
+    with pytest.raises(ValueError, match="过大"):
+        load_or_create_identity(path)
+
+
+def test_identity_rejects_invalid_root_and_identifiers(tmp_path: Path) -> None:
+    path = tmp_path / "identity.json"
+    path.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="根节点"):
+        load_or_create_identity(path)
+
+    path.write_text(
+        json.dumps(
+            {
+                "user_id": "../outside",
+                "device_id": "dev_win_valid",
+                "database_id": "db_valid",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="user_id"):
+        load_or_create_identity(path)

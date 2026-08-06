@@ -19,6 +19,17 @@ python tools/performance_baseline.py --samples 5
 样本数、中位数、范围与 Tukey 异常值。冷启动表示新解释器内的第一次
 `bootstrap_runtime`，不会尝试清空操作系统文件缓存。
 
+UI-203 的万级笔记/复习列表专项采样使用：
+
+```powershell
+python tools/performance_baseline.py --ui203 --notes 10000 --samples 3 --output "$env:TEMP\yancuo-ui203-performance.json"
+```
+
+专项模式生成文本、公式、概念、提示、Markdown 表格和原图裁切引用混合笔记，
+并创建同规模复习草稿队列；额外测量笔记页与复习计划构建器的加载、刷新、
+滚动、进程工作集增量和 QWidget 数量。`--ui203` 拒绝少于 10000 篇笔记，
+隔离和清理规则与普通基线相同。
+
 ## `sync_release_matrix.py`
 
 发布前从仓库根目录运行：
@@ -27,24 +38,8 @@ python tools/performance_baseline.py --samples 5
 python tools/sync_release_matrix.py
 ```
 
-该入口只使用临时数据目录和测试内的 LocalFolder/GitHub 模拟实现，不读取真实用户资料，也不访问远端仓库。它覆盖完整 `.ebpack` 快照的发布失败、校验与恢复回滚，以及 LocalFolder/GitHub Operation 的重复拉取、附件篡改、配置索引异常和跨资料档案隔离。
-
-## `probe_gitlink.py`
-
-运行：
-
-```powershell
-python tools/probe_gitlink.py
-```
-
-令牌按以下顺序读取：
-
-1. 环境变量 `YANCUO_GITLINK_TOKEN`；
-2. 环境变量 `GITLINK_TOKEN`；
-3. 系统凭据 `Yancuo / yancuo_gitlink_token`（需要安装 `keyring`）。
-
-脚本只输出脱敏状态和 HTTP 结果，不输出令牌明文或长度。成功运行会覆盖生成 [`gitlink_compat_report.md`](gitlink_compat_report.md)；未配置令牌时返回非零退出码并写出提示。探测需要网络，建议在 API 或配置变更后手动运行。
+该入口只使用临时数据目录和测试内的 LocalFolder/CloudBase 模拟实现，不读取真实用户资料，也不访问远端服务。它覆盖完整 `.ebpack` 快照的发布失败、校验与恢复回滚，以及 LocalFolder/CloudBase Operation 的重复拉取、附件篡改、配置索引异常和跨资料档案隔离。
 
 ## 与运行时云备份的边界
 
-Windows 运行时的 `GitLinkProvider` 位于 `apps/windows/src/yancuo_win/cloud/`，使用 Release + Attachment 完整 `.ebpack` 快照。探测脚本的结果只能说明接口兼容性，不能替代备份恢复验收；GitLink 旧 Release 删除仍需在网页手动清理，远端增量 Operation 通道尚未实现。
+Windows 正式远端通道统一为 CloudBase 网关；LocalFolder 仅用于离线和局域测试。模拟矩阵只能验证客户端协议与失败语义，不能替代部署后的真实小包上传、下载、锁竞争和恢复验收。

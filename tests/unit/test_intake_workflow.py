@@ -76,8 +76,7 @@ def test_manual_intake_commits_one_complete_problem(
     assert problem.subject_id == subject.id
     assert problem.chapter_id == chapter.id
     assert {tag.name for tag in problem.tags} == {"高频", "极限"}
-    assert len(problem.assets) == 1
-    assert problem.assets[0].is_immutable is True
+    assert problem.assets == []
 
     with intake.runtime.session_factory() as session:
         version = session.scalar(
@@ -763,6 +762,48 @@ def test_many_images_one_problem_uses_one_ordered_recognition_unit(
     assert candidate_unit.recognition_unit_id == unit.id
 
 
+def test_many_image_candidate_materializes_traced_figure_from_second_source(
+    intake: ProblemIntakeService, tmp_path: Path
+) -> None:
+    first = tmp_path / "structured-source-1.png"
+    second = tmp_path / "structured-source-2.png"
+    first_image = QImage(100, 80, QImage.Format.Format_ARGB32)
+    first_image.fill(QColor("red"))
+    second_image = QImage(120, 90, QImage.Format.Format_ARGB32)
+    second_image.fill(QColor("blue"))
+    assert first_image.save(str(first), "PNG")
+    assert second_image.save(str(second), "PNG")
+    started = intake.start_ai([first, second], recognition_mode="many_to_one")
+    intake.ai.run_job(started.job_id)
+    candidate = intake.list_candidates(started.job_id)[0]
+    fields = dict(candidate.fields)
+    fields["content_blocks"] = [
+        {"type": "text", "content": "观察下图"},
+        {
+            "type": "figure",
+            "content": "第二张来源图的局部",
+            "source_image_index": 1,
+            "source_region": {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.6},
+        },
+    ]
+
+    committed = intake.commit_ai_candidate(candidate.review_item_id, fields)
+
+    loaded = intake.app.get_problem(committed.id)
+    assert loaded is not None
+    assert [asset for asset in loaded.assets if asset.role == "original"] == []
+    derived = [asset for asset in loaded.assets if asset.role == "derived_figure"]
+    assert len(derived) == 1
+    assert derived[0].width == 60
+    assert derived[0].height == 54
+    blocks = json.loads(loaded.question_content_json)
+    assert blocks[1]["derived_asset_id"] == derived[0].id
+    assert "source_image_index" not in blocks[1]
+    assert "source_region" not in blocks[1]
+    assert "source_asset_id" not in blocks[1]
+    assert intake.candidate_source_images(candidate.review_item_id) == []
+
+
 def test_candidate_sources_can_be_reordered(
     intake: ProblemIntakeService, tmp_path: Path
 ) -> None:
@@ -857,7 +898,7 @@ def test_problem_set_keeps_shared_material_once_and_children_independent(
                 ProblemSetAsset.problem_set_id == problem_set.id
             )
         ).all()
-    assert len(assets) == 1
+    assert assets == []
     assert intake.app.count_problems() == 2
 
 
@@ -1111,12 +1152,7 @@ def test_one_image_can_create_multiple_independent_candidates(
 ) -> None:
     image = tmp_path / "two-problems.jpg"
     image.write_bytes(b"\xff\xd8\xffmulti-candidate-image")
-    imported = intake.app.import_images([image], into_status="inbox")
-    staging_id = imported["created"][0]
-    job = intake.ai.create_structure_job(
-        [staging_id],
-        user_instruction=intake._taxonomy_instruction(),
-    )
+    job = intake.start_ai([image])
 
     class MultiProvider:
         def structure_from_image(self, **_kwargs) -> StructuredResult:
@@ -1156,11 +1192,12 @@ def test_one_image_can_create_multiple_independent_candidates(
         "yancuo_win.application.ai_service.get_provider",
         lambda _settings: MultiProvider(),
     )
-    intake.ai.run_job(job.id)
+    intake.ai.run_job(job.job_id)
 
-    candidates = intake.list_candidates(job.id)
+    candidates = intake.list_candidates(job.job_id)
     assert len(candidates) == 2
-    assert len({candidate.problem_id for candidate in candidates}) == 2
+    assert len({candidate.review_item_id for candidate in candidates}) == 2
+    assert {candidate.problem_id for candidate in candidates} == {""}
     assert {candidate.fields["title"] for candidate in candidates} == {
         "同图第一题",
         "同图第二题",
@@ -1169,14 +1206,12 @@ def test_one_image_can_create_multiple_independent_candidates(
     assert candidates[0].region["height"] == pytest.approx(0.3)
     assert candidates[1].region["y"] == pytest.approx(0.5)
 
-    staged = [intake.app.get_problem(candidate.problem_id) for candidate in candidates]
-    assert all(problem is not None for problem in staged)
-    relative_paths = {
-        problem.assets[0].relative_path
-        for problem in staged
-        if problem is not None
+    assert intake.app.count_problems() == 0
+    source_paths = {
+        source for candidate in candidates for source in candidate.source_images
     }
-    assert len(relative_paths) == 1
+    assert len(source_paths) == 1
+    assert all(source.is_file() for source in source_paths)
 
     committed = [
         intake.commit_ai_candidate(
@@ -1188,6 +1223,12 @@ def test_one_image_can_create_multiple_independent_candidates(
     ]
     assert {problem.status for problem in committed} == {"active"}
     assert {problem.title for problem in committed} == {"同图第一题", "同图第二题"}
+    assert all(
+        asset.role != "original"
+        for problem in committed
+        for asset in problem.assets
+    )
+    assert all(not source.exists() for source in source_paths)
 
 
 def test_reject_ai_candidate_does_not_create_or_trash_formal_problem(

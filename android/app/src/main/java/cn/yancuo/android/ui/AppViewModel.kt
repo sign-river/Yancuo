@@ -9,12 +9,17 @@ import androidx.lifecycle.viewModelScope
 import cn.yancuo.android.YancuoApp
 import cn.yancuo.android.data.ebpack.EbpackException
 import cn.yancuo.android.data.ebpack.EbpackImportResult
+import cn.yancuo.android.data.io.MAX_EBPACK_BYTES
+import cn.yancuo.android.data.io.copyToFileLimited
 import cn.yancuo.android.data.repo.ProblemDetail
 import cn.yancuo.android.data.repo.ProblemSummary
 import cn.yancuo.android.data.repo.ReviewResult
+import cn.yancuo.android.data.repo.parseTagCsv
 import cn.yancuo.android.domain.DATA_FORMAT_VERSION
 import cn.yancuo.android.domain.SCHEMA_VERSION
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,7 +27,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
 
 data class HomeUiState(
     val tab: HomeTab = HomeTab.INBOX,
@@ -37,10 +41,7 @@ data class SettingsUiState(
     val dataRoot: String = "",
     val schemaVersion: Int = SCHEMA_VERSION,
     val dataFormatVersion: Int = DATA_FORMAT_VERSION,
-    val gitLinkToken: String = "",
-    val gitHubToken: String = "",
-    val hasGitLink: Boolean = false,
-    val hasGitHub: Boolean = false,
+    val hasCloudBaseToken: Boolean = false,
     val message: String? = null,
 )
 
@@ -62,9 +63,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
+    private val importGate = ExclusiveOperationGate()
+    private val reviewGate = ExclusiveOperationGate()
+    private val _reviewBusy = MutableStateFlow(false)
+    val reviewBusy: StateFlow<Boolean> = _reviewBusy.asStateFlow()
+    private val homeRequestGate = LatestRequestGate()
+    private val detailRequestGate = LatestRequestGate()
+    private var homeRefreshJob: Job? = null
+    private var detailLoadJob: Job? = null
 
-    fun refreshHome() {
-        viewModelScope.launch {
+    fun refreshHome(debounceMillis: Long = 0) {
+        val request = homeRequestGate.next()
+        homeRefreshJob?.cancel()
+        homeRefreshJob = viewModelScope.launch {
+            if (debounceMillis > 0) delay(debounceMillis)
             val state = _home.value
             val status = when (state.tab) {
                 HomeTab.INBOX -> "inbox"
@@ -78,7 +90,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     all
                 }
             }
-            _home.update { it.copy(items = items) }
+            if (homeRequestGate.isCurrent(request)) {
+                _home.update { it.copy(items = items) }
+            }
         }
     }
 
@@ -88,8 +102,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setQuery(query: String) {
-        _home.update { it.copy(query = query) }
-        refreshHome()
+        _home.update { it.copy(query = query.take(512)) }
+        refreshHome(debounceMillis = 180)
     }
 
     fun refreshDue() {
@@ -99,8 +113,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadDetail(id: String) {
-        viewModelScope.launch {
-            _detail.value = withContext(Dispatchers.IO) { app.problems.get(id) }
+        val request = detailRequestGate.next()
+        detailLoadJob?.cancel()
+        detailLoadJob = viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) { app.problems.get(id) }
+            if (detailRequestGate.isCurrent(request)) _detail.value = loaded
         }
     }
 
@@ -116,61 +133,54 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         tagsCsv: String,
     ) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                app.problems.updateProblem(
-                    id = id,
-                    title = title,
-                    questionMarkdown = questionMarkdown,
-                    correctAnswer = correctAnswer,
-                    solutionMarkdown = solutionMarkdown,
-                    notes = notes,
-                    priority = priority,
-                    status = status,
-                    tagNames = tagsCsv.split(',', '，', ';', '；', ' ').map { it.trim() },
-                )
-            }
-            loadDetail(id)
-            refreshHome()
-            _home.update { it.copy(message = "已保存") }
-        }
-    }
-
-    fun importImages(files: List<File>) {
-        viewModelScope.launch {
-            _busy.value = true
-            try {
-                val created = withContext(Dispatchers.IO) {
-                    app.problems.createFromImages(files)
+            val outcome = runCatching {
+                val tags = parseTagCsv(tagsCsv)
+                withContext(Dispatchers.IO) {
+                    app.problems.updateProblem(
+                        id = id,
+                        title = title,
+                        questionMarkdown = questionMarkdown,
+                        correctAnswer = correctAnswer,
+                        solutionMarkdown = solutionMarkdown,
+                        notes = notes,
+                        priority = priority,
+                        status = status,
+                        tagNames = tags,
+                    )
                 }
-                _home.update { it.copy(tab = HomeTab.INBOX, message = "已导入 ${created.size} 题到收件箱") }
+            }
+            if (outcome.isSuccess) {
+                loadDetail(id)
                 refreshHome()
-            } finally {
-                _busy.value = false
+                _home.update { it.copy(message = "已保存") }
+            } else {
+                _home.update { it.copy(message = "保存失败：${outcome.exceptionOrNull()?.message}") }
             }
         }
     }
 
-    fun copyUriToCache(uri: Uri, nameHint: String): File? {
-        return try {
-            val dir = File(app.cacheDir, "imports").also { it.mkdirs() }
-            val dest = File(dir, "${System.currentTimeMillis()}_$nameHint")
-            app.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(dest).use { output -> input.copyTo(output) }
-            } ?: return null
-            dest
-        } catch (_: Exception) {
-            null
+    fun recordReview(problemId: String, grade: Int, onDone: (Result<ReviewResult>) -> Unit) {
+        if (!reviewGate.tryEnter()) {
+            onDone(Result.failure(IllegalStateException("已有复习评分正在保存")))
+            return
         }
-    }
-
-    fun recordReview(problemId: String, grade: Int, onDone: (ReviewResult) -> Unit) {
+        _reviewBusy.value = true
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                app.problems.recordReview(problemId, grade)
+            try {
+                val result = runCatching {
+                    withContext(Dispatchers.IO) {
+                        app.problems.recordReview(problemId, grade)
+                    }
+                }
+                if (result.isSuccess) {
+                    refreshDue()
+                    refreshHome()
+                }
+                onDone(result)
+            } finally {
+                reviewGate.exit()
+                _reviewBusy.value = false
             }
-            refreshDue()
-            refreshHome()
-            onDone(result)
         }
     }
 
@@ -180,35 +190,49 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             dataRoot = app.paths.root.absolutePath,
             schemaVersion = runCatching { app.db.schemaVersion() }.getOrDefault(SCHEMA_VERSION),
             dataFormatVersion = DATA_FORMAT_VERSION,
-            gitLinkToken = "",
-            gitHubToken = "",
-            hasGitLink = tokens.hasGitLinkToken(),
-            hasGitHub = tokens.hasGitHubToken(),
+            hasCloudBaseToken = tokens.hasCloudBaseToken(),
             message = null,
         )
     }
 
-    fun saveTokens(gitLink: String, gitHub: String) {
-        if (gitLink.isNotBlank()) app.tokenStore.saveGitLinkToken(gitLink)
-        if (gitHub.isNotBlank()) app.tokenStore.saveGitHubToken(gitHub)
+    fun saveToken(cloudBase: String) {
+        val outcome = runCatching { app.tokenStore.saveCloudBaseToken(cloudBase) }
         refreshSettings()
-        _settings.update { it.copy(message = "Token 已保存（加密存储）") }
+        _settings.update {
+            it.copy(
+                message = outcome.fold(
+                    onSuccess = { "Token 已保存（加密存储）" },
+                    onFailure = { error -> "Token 保存失败：${error.message}" },
+                ),
+            )
+        }
     }
 
     fun clearTokens() {
-        app.tokenStore.clearAll()
+        val outcome = runCatching { app.tokenStore.clearAll() }
         refreshSettings()
-        _settings.update { it.copy(message = "Token 已清除") }
+        _settings.update {
+            it.copy(
+                message = outcome.fold(
+                    onSuccess = { "Token 已清除" },
+                    onFailure = { error -> "Token 清除失败：${error.message}" },
+                ),
+            )
+        }
     }
 
     fun importEbpack(uri: Uri) {
+        if (!importGate.tryEnter()) {
+            _settings.update { it.copy(message = "已有备份正在导入，请等待完成") }
+            return
+        }
+        _busy.value = true
         viewModelScope.launch {
-            _busy.value = true
             try {
                 val result: EbpackImportResult = withContext(Dispatchers.IO) {
                     val cache = File(app.paths.cacheDir, "import-${System.currentTimeMillis()}.ebpack")
                     app.contentResolver.openInputStream(uri)?.use { input ->
-                        FileOutputStream(cache).use { output -> input.copyTo(output) }
+                        copyToFileLimited(input, cache, MAX_EBPACK_BYTES)
                     } ?: throw EbpackException("无法读取所选文件")
                     try {
                         val r = app.ebpackImporter.importPack(cache)
@@ -228,8 +252,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             } catch (e: Exception) {
-                _settings.update { it.copy(message = "导入失败：${e.message}") }
+                val reopenFailure = runCatching {
+                    withContext(Dispatchers.IO) { app.reopenAfterImport() }
+                }.exceptionOrNull()
+                _settings.update {
+                    it.copy(
+                        message = if (reopenFailure == null) {
+                            "导入失败：${e.message}"
+                        } else {
+                            "导入失败且本地库重开失败，请重启应用：${e.message}"
+                        },
+                    )
+                }
             } finally {
+                importGate.exit()
                 _busy.value = false
             }
         }

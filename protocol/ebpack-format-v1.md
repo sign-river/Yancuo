@@ -1,7 +1,7 @@
 # `.ebpack` 可移植包格式 v1
 
 > 状态：阶段 F 定稿；Windows 支持导出/导入，Android 支持导入 v1 包。变更前须说明原因与兼容性影响。
-> 当前包版本：Windows `schema_version=10`、`data_format_version=1`。
+> 当前包版本：Windows `schema_version=22`、`data_format_version=1`。
 > 实现：Windows `yancuo_win.import_export.ebpack`；Android `EbpackImporter`。
 > 测试向量：`protocol/test-vectors/ebpack-v1/`
 
@@ -76,6 +76,8 @@ package-signature.json        # 可选；v1 实现不要求
 - `encrypted=true` 在 v1 实现中应 **拒绝**（未实现解密；见 `encryption-v1.md`）
 - 若 `schema_version` 不在当前读取器声明的范围内 → **拒绝恢复**（提示升级软件）；Windows 上限使用 `SCHEMA_VERSION=9`，Android 导入上限使用独立的 `MAX_EBPACK_SCHEMA_VERSION=9`
 - Windows 对低版本快照恢复后执行 `migrate()` 升到当前；Android 保留受支持的加法式快照，不执行 Windows 迁移，也不宣称支持新增表的 UI
+- 不可信归档必须流式限量解压：最多 10000 个条目、单条目最多 256 MiB、全部展开内容最多 512 MiB；拒绝绝对/父级/驱动器路径、规范化后重复路径和异常压缩比。Android 在解压前还将外部 `.ebpack` 缓存副本限制为 512 MiB
+- `manifest.json`、`checksums.sha256` 与 `assets/index.json` 等导入元数据单文件最多 8 MiB，读取前后均不得突破该预算
 
 ---
 

@@ -12,9 +12,8 @@ from yancuo_win.ai.base import normalize_region
 from yancuo_win.ai.factory import get_provider
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.note_service import NoteService
-from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.data.ids import new_id
-from yancuo_win.data.models import NoteAsset, NoteBlock, NoteDocument
+from yancuo_win.data.models import NoteBlock, NoteDocument
 from yancuo_win.domain.rules import DomainError
 
 
@@ -58,7 +57,6 @@ class NoteExtractionDraft:
 class NoteAiService:
     def __init__(self, runtime: RuntimeContext) -> None:
         self.runtime = runtime
-        self.store = ObjectStore(runtime.paths.asset_objects_dir)
         self.notes = NoteService(runtime)
 
     def extract_from_image(
@@ -120,7 +118,6 @@ class NoteAiService:
         subject_id: str | None = None,
         chapter_id: str | None = None,
     ) -> NoteDocument:
-        stored = self.store.store_copy(draft.source_path, role="original")
         with self.runtime.session_factory() as session:
             note = NoteDocument(
                 id=new_id("note"),
@@ -132,18 +129,6 @@ class NoteAiService:
             )
             session.add(note)
             session.flush()
-            session.add(
-                NoteAsset(
-                    id=new_id("nasset"),
-                    note_document_id=note.id,
-                    role="original",
-                    relative_path=stored.relative_path,
-                    sha256=stored.sha256,
-                    mime_type=stored.mime_type,
-                    size_bytes=stored.size_bytes,
-                    is_immutable=True,
-                )
-            )
             for order, block in enumerate(draft.blocks):
                 session.add(
                     NoteBlock(
@@ -153,11 +138,7 @@ class NoteAiService:
                         block_type=block.block_type,
                         content_markdown=block.content_markdown,
                         content_latex=block.content_latex,
-                        source_region_json=json.dumps(
-                            block.source_region,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
+                        source_region_json="{}",
                         uncertain_json=json.dumps(
                             block.uncertain_fields,
                             ensure_ascii=False,

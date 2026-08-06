@@ -1,10 +1,10 @@
 package cn.yancuo.android
 
 import android.app.Application
-import cn.yancuo.android.data.assets.ObjectStore
 import cn.yancuo.android.data.credentials.TokenStore
 import cn.yancuo.android.data.db.YancuoDb
 import cn.yancuo.android.data.ebpack.EbpackImporter
+import cn.yancuo.android.data.ebpack.recoverInterruptedEbpack
 import cn.yancuo.android.data.identity.IdentityStore
 import cn.yancuo.android.data.paths.DataPaths
 import cn.yancuo.android.data.identity.LocalIdentity
@@ -15,8 +15,6 @@ class YancuoApp : Application() {
     lateinit var paths: DataPaths
         private set
     lateinit var identityStore: IdentityStore
-        private set
-    lateinit var objectStore: ObjectStore
         private set
     lateinit var db: YancuoDb
         private set
@@ -30,12 +28,12 @@ class YancuoApp : Application() {
     override fun onCreate() {
         super.onCreate()
         paths = DataPaths.from(this)
+        recoverInterruptedEbpack(paths)
         identityStore = IdentityStore(paths.identityFile)
         val identity = identityStore.loadOrCreate()
         LocalIdentityHolder.current = identity
-        objectStore = ObjectStore(paths.assetObjectsDir)
         db = YancuoDb.openExistingOrCreate(this, paths.database)
-        problems = ProblemRepository(db, objectStore)
+        problems = ProblemRepository(db)
         tokenStore = TokenStore(this)
         ebpackImporter = EbpackImporter(paths, identityStore)
     }
@@ -44,7 +42,7 @@ class YancuoApp : Application() {
     fun reopenAfterImport() {
         YancuoDb.resetInstance()
         db = YancuoDb.openExistingOrCreate(this, paths.database)
-        problems = ProblemRepository(db, objectStore)
+        problems = ProblemRepository(db)
         LocalIdentityHolder.current = identityStore.loadOrCreate()
     }
 }

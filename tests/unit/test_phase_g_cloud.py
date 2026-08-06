@@ -38,9 +38,10 @@ def test_local_folder_upload_latest_restore(runtime, tmp_path: Path) -> None:
 
     cloud.ensure_repository()
     uploaded = cloud.upload_backup()
-    assert uploaded["tag"].startswith(f"data-v1-{runtime.identity.profile_id}-")
+    assert uploaded["tag"].startswith(f"data-v1-{runtime.identity.profile_id[-8:]}-")
     assert uploaded["profile_id"] == runtime.identity.profile_id
     assert len(uploaded["sha256"]) == 64
+    assert list(runtime.paths.cache_dir.glob("data-v1-*.ebpack")) == []
 
     latest_path = cloud_root / "local" / "test-repo" / ".mistakebook" / "latest.json"
     assert latest_path.is_file()
@@ -67,6 +68,59 @@ def test_local_folder_upload_latest_restore(runtime, tmp_path: Path) -> None:
     result = cloud.restore_latest_to(target)
     assert (target / "error_book.db").is_file()
     assert result["schema_version"] >= 1
+    assert list((runtime.paths.cache_dir / "cloud_dl").glob("*.ebpack")) == []
+
+
+def test_cloud_upload_failure_cleans_export_cache(runtime, tmp_path: Path, monkeypatch) -> None:
+    cloud_root = tmp_path / "cloud-failure"
+    provider = LocalFolderProvider(cloud_root)
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "failure-cleanup"
+    runtime.settings.cloud.enabled = True
+    cloud = CloudBackupService(runtime, provider)
+    cloud.ensure_repository()
+
+    def fail_upload(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise DomainError("simulated upload failure")
+
+    monkeypatch.setattr(provider, "upload_release_asset", fail_upload)
+    with pytest.raises(DomainError, match="simulated upload failure"):
+        cloud.upload_backup()
+
+    assert list(runtime.paths.cache_dir.glob("data-v1-*.ebpack")) == []
+
+
+def test_corrupt_cloud_download_preserves_existing_verified_file(
+    runtime, tmp_path: Path
+) -> None:
+    cloud_root = tmp_path / "corrupt-cloud"
+    provider = LocalFolderProvider(cloud_root)
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "corrupt-download"
+    runtime.settings.cloud.enabled = True
+    cloud = CloudBackupService(runtime, provider)
+    cloud.ensure_repository()
+    uploaded = cloud.upload_backup()
+
+    remote_asset = (
+        cloud_root
+        / "local"
+        / "corrupt-download"
+        / "releases"
+        / uploaded["tag"]
+        / "snapshot.ebpack"
+    )
+    remote_asset.write_bytes(b"corrupt-remote-object")
+    destination_dir = tmp_path / "downloads"
+    destination_dir.mkdir()
+    destination = destination_dir / f"{uploaded['tag']}.ebpack"
+    destination.write_bytes(b"known-good-local-copy")
+
+    with pytest.raises(DomainError, match="未替换已有文件"):
+        cloud.download_backup(uploaded["tag"], destination_dir)
+
+    assert destination.read_bytes() == b"known-good-local-copy"
+    assert list(destination_dir.glob(".cloud-verify-*.ebpack")) == []
 
 
 def test_profiles_are_discovered_and_explicitly_bound(runtime, tmp_path: Path, monkeypatch) -> None:
@@ -245,7 +299,33 @@ def test_failed_upload_does_not_update_latest(runtime, tmp_path: Path) -> None:
 
     latest = provider.read_sync_manifest("local", "fail-repo")
     assert latest is None
+    assert provider.list_releases("local", "fail-repo") == []
     assert not (cloud_root / "local" / "fail-repo" / "locks" / "primary.json").exists()
+
+
+def test_failed_manifest_publish_removes_unindexed_release(runtime, tmp_path: Path) -> None:
+    services = AppServices(runtime)
+    services.create_problem(title="interrupted manifest publish")
+    cloud_root = tmp_path / "cloud_manifest_fail"
+    provider = LocalFolderProvider(cloud_root)
+    runtime.settings.cloud.repository.owner = "local"
+    runtime.settings.cloud.repository.name = "manifest-fail-repo"
+    runtime.settings.cloud.enabled = True
+    cloud = CloudBackupService(runtime, provider)
+    cloud.ensure_repository()
+
+    def boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise DomainError("simulated manifest publish failure")
+
+    provider.write_sync_manifest = boom  # type: ignore[method-assign]
+
+    with pytest.raises(DomainError, match="manifest publish failure"):
+        cloud.upload_backup()
+
+    assert provider.list_releases("local", "manifest-fail-repo") == []
+    assert not (
+        cloud_root / "local" / "manifest-fail-repo" / "locks" / "primary.json"
+    ).exists()
 
 
 def test_mask_secret_never_full() -> None:

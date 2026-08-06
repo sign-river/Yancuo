@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -42,7 +41,6 @@ import cn.yancuo.android.ui.HomeTab
 @Composable
 fun HomeScreen(
     viewModel: AppViewModel,
-    onCapture: () -> Unit,
     onTodayReview: () -> Unit,
     onSettings: () -> Unit,
     onOpenProblem: (String) -> Unit,
@@ -65,9 +63,6 @@ fun HomeScreen(
                 actions = {
                     IconButton(onClick = onTodayReview) {
                         Icon(Icons.Default.Today, contentDescription = "今日复习")
-                    }
-                    IconButton(onClick = onCapture) {
-                        Icon(Icons.Default.AddAPhoto, contentDescription = "采集")
                     }
                     IconButton(onClick = onSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "设置")

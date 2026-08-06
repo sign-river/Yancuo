@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
+import re
 import tempfile
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.cloud.factory import get_cloud_provider
@@ -18,18 +20,36 @@ from yancuo_win.cloud.local_folder import LocalFolderProvider
 from yancuo_win.cloud.base import CloudProvider
 from yancuo_win.data.ids import new_id
 from yancuo_win.data.models import (
+    Asset,
+    Chapter,
     Problem,
     ReviewItem,
     ReviewSession,
     SyncOperation,
+    Subject,
     Tag,
     Version,
 )
-from yancuo_win.domain.operations import build_operation, validate_operation
+from yancuo_win.domain.operations import (
+    MAX_OPERATION_ATTACHMENT_BYTES,
+    build_operation,
+    validate_operation,
+)
 from yancuo_win.domain.rules import DomainError, validate_priority, validate_status
 from yancuo_win.domain.sync_merge import apply_patch, merge_snapshots
 from yancuo_win.import_export.ebpack import EbpackService
+from yancuo_win.assets.object_store import ObjectStore
 from yancuo_win.review.changeset import snapshot_problem_fields
+
+
+MAX_REMOTE_OPERATION_BATCHES = 10_000
+MAX_REMOTE_OPERATION_BATCH_BYTES = 64 * 1024 * 1024
+MAX_REMOTE_OPERATION_LINE_BYTES = 48 * 1024 * 1024
+MAX_REMOTE_OPERATIONS_PER_BATCH = 100_000
+MAX_REMOTE_OPERATION_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_REMOTE_OPERATIONS_TOTAL = 250_000
+SYNC_OPERATION_ID_QUERY_BATCH = 500
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 _SYNC_MUTABLE_FIELDS = frozenset(
@@ -41,6 +61,7 @@ _SYNC_MUTABLE_FIELDS = frozenset(
         "title",
         "question_markdown",
         "question_latex",
+        "question_content_json",
         "user_answer",
         "correct_answer",
         "solution_markdown",
@@ -66,6 +87,7 @@ _SYNC_REQUIRED_TEXT_FIELDS = frozenset(
     {
         "question_markdown",
         "question_latex",
+        "question_content_json",
         "user_answer",
         "correct_answer",
         "solution_markdown",
@@ -85,6 +107,17 @@ _SYNC_OPTIONAL_TEXT_FIELDS = frozenset(
         "original_number",
     }
 )
+_SYNC_OPTIONAL_TEXT_LIMITS = {
+    "subject_id": 64,
+    "chapter_id": 64,
+    "problem_type": 64,
+    "title": 256,
+    "source_book": 256,
+    "source_year": 32,
+    "page_number": 32,
+    "original_number": 64,
+}
+_MAX_SYNC_INTEGER = 2**63 - 1
 
 
 def _utcnow() -> datetime:
@@ -136,10 +169,14 @@ def _coerce_sync_value(field: str, value: Any) -> Any:
     if field not in _SYNC_MUTABLE_FIELDS:
         raise DomainError(f"同步字段不可修改：{field}")
     if field == "status":
+        if value is None:
+            return "inbox"
         return validate_status(str(value))
     if field in {"next_review_at", "deleted_at"}:
         return _parse_datetime(value)
     if field == "priority":
+        if value is None:
+            return 3
         try:
             return validate_priority(int(value))
         except (TypeError, ValueError) as exc:
@@ -147,24 +184,87 @@ def _coerce_sync_value(field: str, value: Any) -> Any:
     if field in {"difficulty", "mastery", "review_count"}:
         if value is None and field in {"difficulty", "mastery"}:
             return None
+        if value is None and field == "review_count":
+            return 0
         try:
             number = int(value)
         except (TypeError, ValueError) as exc:
             raise DomainError(f"同步整数字段无效：{field}={value!r}") from exc
         if field == "review_count" and number < 0:
             raise DomainError("同步 review_count 不得为负数")
+        if field in {"difficulty", "mastery"} and not 1 <= number <= 5:
+            raise DomainError(f"同步 {field} 字段必须在 1 到 5 之间")
+        if number > _MAX_SYNC_INTEGER:
+            raise DomainError(f"同步整数字段过大：{field}")
         return number
     if field in {"is_favorite", "needs_redo", "allow_print", "human_confirmed"}:
+        if value is None:
+            return field == "allow_print"
         return _coerce_bool(value)
     if field in _SYNC_REQUIRED_TEXT_FIELDS:
+        if value is None:
+            return "[]" if field == "question_content_json" else ""
         if not isinstance(value, str):
             raise DomainError(f"同步文本字段无效：{field}={value!r}")
         return value
     if field in _SYNC_OPTIONAL_TEXT_FIELDS:
         if value is not None and not isinstance(value, str):
             raise DomainError(f"同步文本字段无效：{field}={value!r}")
+        if field in {"subject_id", "chapter_id"} and value == "":
+            return None
+        if isinstance(value, str) and len(value) > _SYNC_OPTIONAL_TEXT_LIMITS[field]:
+            raise DomainError(f"同步文本字段过长：{field}")
         return value
     return value
+
+
+def _normalize_problem_operation(op: dict[str, Any]) -> dict[str, Any]:
+    """在进入合并器前校验并规范化题目字段值。"""
+
+    if op.get("entity_type") != "problem":
+        return op
+    normalized = dict(op)
+    for label in ("changed_fields", "base_fields"):
+        if label not in op:
+            continue
+        fields: dict[str, Any] = {}
+        for field, value in op[label].items():
+            if field == "revision":
+                if isinstance(value, bool):
+                    raise DomainError("同步 revision 字段无效")
+                if value is None:
+                    fields[field] = 0
+                    continue
+                try:
+                    revision = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise DomainError("同步 revision 字段无效") from exc
+                if revision < 0 or revision > _MAX_SYNC_INTEGER:
+                    raise DomainError("同步 revision 字段超出有效范围")
+                fields[field] = revision
+                continue
+            if field == "tags":
+                if value is None:
+                    fields[field] = []
+                    continue
+                if not isinstance(value, list) or len(value) > 20:
+                    raise DomainError("同步 tags 字段必须是最多 20 项的数组")
+                tags: set[str] = set()
+                for raw_name in value:
+                    if not isinstance(raw_name, str):
+                        raise DomainError("同步 tag 名称必须是字符串")
+                    name = raw_name.strip()
+                    if not name or len(name) > 128:
+                        raise DomainError("同步 tag 名称为空或过长")
+                    tags.add(name)
+                fields[field] = sorted(tags)
+                continue
+            if field in {"next_review_at", "deleted_at"}:
+                fields[field] = _iso_datetime(_parse_datetime(value))
+                continue
+            fields[field] = _coerce_sync_value(field, value)
+        normalized[label] = fields
+    return normalized
 
 
 def sync_snapshot(problem: Problem, tag_names: list[str] | None = None) -> dict[str, Any]:
@@ -205,6 +305,7 @@ class SyncService:
         # push/pull 时解析默认提供商。显式传入的 provider 仍立即复用。
         self.provider = provider
         self.ebpack = EbpackService(runtime)
+        self.store = ObjectStore(runtime.paths.asset_objects_dir)
 
     @property
     def owner(self) -> str:
@@ -212,9 +313,7 @@ class SyncService:
 
     @property
     def repo(self) -> str:
-        return (
-            self.runtime.settings.cloud.repository.name or "graduate-mistake-book-data"
-        ).strip()
+        return (self.runtime.settings.cloud.repository.name or "graduate-mistake-book-data").strip()
 
     def _require_ops_provider(self) -> CloudProvider:
         provider = self.provider
@@ -223,9 +322,14 @@ class SyncService:
             self.provider = provider
         if isinstance(provider, LocalFolderProvider):
             return provider
-        if provider.name != "github" or not provider.get_capabilities().release_assets:
+        capabilities = provider.get_capabilities()
+        if provider.name != "cloudbase" or not (
+            capabilities.release_assets
+            and capabilities.atomic_file_update
+            and capabilities.delete_release
+        ):
             raise DomainError(
-                "增量同步仅支持 local_folder 或具备受控批次锁的 GitHub；GitLink 仍用完整备份。"
+                "增量同步仅支持 CloudBase；本地文件夹只用于离线测试。"
             )
         return provider
 
@@ -237,55 +341,209 @@ class SyncService:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def _push_github_batch(self, provider: CloudProvider, ops: list[dict[str, Any]]) -> None:
+    def _cleanup_unindexed_release_batch(
+        self, provider: CloudProvider, tag: str, failure: Exception
+    ) -> None:
+        try:
+            provider.delete_release(self.owner, self.repo, tag=tag)
+        except Exception as cleanup_exc:
+            raise DomainError(
+                f"CloudBase Operation 批次发布失败，且清理未入索引的 Release 失败：{cleanup_exc}"
+            ) from failure
+
+    def _push_release_batch(self, provider: CloudProvider, ops: list[dict[str, Any]]) -> None:
+        if len(ops) > MAX_REMOTE_OPERATIONS_PER_BATCH:
+            raise DomainError("待推送 Operation 批次记录过多")
         device_id = self.runtime.identity.device_id
         profile_id = self.runtime.identity.profile_id
-        batch_id = f"batch_{uuid.uuid4().hex}"
+        batch_id = new_id("batch")
         tag = f"yancuo-ops-v1-{profile_id[-8:]}-{device_id[-8:]}-{batch_id[-8:]}"
         with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
             payload = Path(temporary) / "operations.jsonl"
-            payload.write_text("".join(json.dumps(op, ensure_ascii=False) + "\n" for op in ops), encoding="utf-8")
-            sha = self._sha256(payload)
-            body = json.dumps({"format": "yancuo-operation-batch", "format_version": 1, "batch_id": batch_id, "profile_id": profile_id, "device_id": device_id, "asset_name": "operations.jsonl", "operation_count": len(ops), "sha256": sha, "created_at": _utcnow().isoformat()}, ensure_ascii=False)
-            provider.create_release(self.owner, self.repo, tag=tag, name="Yancuo operation batch", body=body)
-            provider.upload_release_asset(self.owner, self.repo, tag=tag, file_path=payload, asset_name="operations.jsonl")
-            verified = Path(temporary) / "verified.jsonl"
-            provider.download_release_asset(self.owner, self.repo, tag=tag, asset_name="operations.jsonl", dest=verified)
-            if self._sha256(verified) != sha:
-                raise DomainError("远端 Operation 批次哈希不一致，未更新索引")
-        index = provider.read_sync_manifest(self.owner, self.repo) or {"format": "yancuo-profile-snapshots", "format_version": 1, "profiles": {}, "aliases": {}}
-        batches = index.setdefault("operation_batches", [])
-        if not isinstance(batches, list):
-            raise DomainError("云端 Operation 批次索引无效")
-        batches.append({"tag": tag, "batch_id": batch_id, "profile_id": profile_id, "device_id": device_id, "asset_name": "operations.jsonl", "sha256": sha, "created_at": _utcnow().isoformat()})
-        provider.write_sync_manifest(self.owner, self.repo, index)
+            digest = hashlib.sha256()
+            total_bytes = 0
+            with payload.open("wb") as stream:
+                for op in ops:
+                    line_bytes = (json.dumps(op, ensure_ascii=False) + "\n").encode("utf-8")
+                    if len(line_bytes) > MAX_REMOTE_OPERATION_LINE_BYTES:
+                        raise DomainError("待推送 Operation 批次单行过大")
+                    total_bytes += len(line_bytes)
+                    if total_bytes > MAX_REMOTE_OPERATION_BATCH_BYTES:
+                        raise DomainError("待推送 Operation 批次文件过大")
+                    stream.write(line_bytes)
+                    digest.update(line_bytes)
+            sha = digest.hexdigest()
+            body = json.dumps(
+                {
+                    "format": "yancuo-operation-batch",
+                    "format_version": 1,
+                    "batch_id": batch_id,
+                    "profile_id": profile_id,
+                    "device_id": device_id,
+                    "asset_name": "operations.jsonl",
+                    "operation_count": len(ops),
+                    "sha256": sha,
+                    "created_at": _utcnow().isoformat(),
+                },
+                ensure_ascii=False,
+            )
+            remote_index = provider.read_sync_manifest(self.owner, self.repo)
+            if remote_index is None:
+                remote_index = {
+                    "format": "yancuo-profile-snapshots",
+                    "format_version": 1,
+                    "profiles": {},
+                    "aliases": {},
+                }
+            if not isinstance(remote_index, dict):
+                raise DomainError("云端 Operation 批次索引无效")
+            index = dict(remote_index)
+            existing_batches = index.get("operation_batches", [])
+            if not isinstance(existing_batches, list):
+                raise DomainError("云端 Operation 批次索引无效")
+            if len(existing_batches) >= MAX_REMOTE_OPERATION_BATCHES:
+                raise DomainError("云端 Operation 批次索引已达到容量上限")
+            batches = list(existing_batches)
+            provider.create_release(
+                self.owner, self.repo, tag=tag, name="Yancuo operation batch", body=body
+            )
+            try:
+                provider.upload_release_asset(
+                    self.owner,
+                    self.repo,
+                    tag=tag,
+                    file_path=payload,
+                    asset_name="operations.jsonl",
+                )
+                verified = Path(temporary) / "verified.jsonl"
+                provider.download_release_asset(
+                    self.owner,
+                    self.repo,
+                    tag=tag,
+                    asset_name="operations.jsonl",
+                    dest=verified,
+                )
+                if self._sha256(verified) != sha:
+                    raise DomainError("远端 Operation 批次哈希不一致，未更新索引")
+            except Exception as exc:
+                self._cleanup_unindexed_release_batch(provider, tag, exc)
+                raise
+        try:
+            batches.append(
+                {
+                    "tag": tag,
+                    "batch_id": batch_id,
+                    "profile_id": profile_id,
+                    "device_id": device_id,
+                    "asset_name": "operations.jsonl",
+                    "operation_count": len(ops),
+                    "sha256": sha,
+                    "created_at": _utcnow().isoformat(),
+                }
+            )
+            index["operation_batches"] = batches
+            provider.write_sync_manifest(self.owner, self.repo, index)
+        except Exception as exc:
+            self._cleanup_unindexed_release_batch(provider, tag, exc)
+            raise
 
-    def _github_remote_operations(self, provider: CloudProvider) -> list[dict[str, Any]]:
+    def _release_remote_operations(self, provider: CloudProvider) -> list[dict[str, Any]]:
         index = provider.read_sync_manifest(self.owner, self.repo) or {}
         batches = index.get("operation_batches")
         if batches is not None and not isinstance(batches, list):
             raise DomainError("云端 Operation 批次索引无效")
         if not isinstance(batches, list):
             return []
+        if len(batches) > MAX_REMOTE_OPERATION_BATCHES:
+            raise DomainError("云端 Operation 批次索引过大")
         items: list[dict[str, Any]] = []
+        seen_batches: set[str] = set()
+        total_remote_bytes = 0
+        total_remote_lines = 0
         for batch in batches:
-            if not isinstance(batch, dict) or batch.get("profile_id") != self.runtime.identity.profile_id or batch.get("device_id") == self.runtime.identity.device_id:
+            if (
+                not isinstance(batch, dict)
+                or batch.get("profile_id") != self.runtime.identity.profile_id
+                or batch.get("device_id") == self.runtime.identity.device_id
+            ):
                 continue
-            tag, asset_name, expected = str(batch.get("tag") or ""), str(batch.get("asset_name") or ""), str(batch.get("sha256") or "")
-            if not tag or not asset_name or len(expected) != 64:
+            tag, asset_name, expected = (
+                str(batch.get("tag") or ""),
+                str(batch.get("asset_name") or ""),
+                str(batch.get("sha256") or ""),
+            )
+            batch_id = str(batch.get("batch_id") or "")
+            batch_device_id = str(batch.get("device_id") or "")
+            expected_count = batch.get("operation_count")
+            if (
+                not tag
+                or asset_name != "operations.jsonl"
+                or not _SHA256_RE.fullmatch(expected)
+                or not batch_id
+                or not batch_device_id
+                or batch_id in seen_batches
+            ):
                 continue
+            if expected_count is not None and (
+                isinstance(expected_count, bool)
+                or not isinstance(expected_count, int)
+                or expected_count < 0
+                or expected_count > MAX_REMOTE_OPERATIONS_PER_BATCH
+            ):
+                raise DomainError("远端 Operation 批次记录数无效")
+            seen_batches.add(batch_id)
             with tempfile.TemporaryDirectory(dir=self.runtime.paths.cache_dir) as temporary:
-                path = Path(temporary) / asset_name
-                provider.download_release_asset(self.owner, self.repo, tag=tag, asset_name=asset_name, dest=path)
-                if self._sha256(path) != expected:
+                path = Path(temporary) / "operations.jsonl"
+                provider.download_release_asset(
+                    self.owner, self.repo, tag=tag, asset_name=asset_name, dest=path
+                )
+                if not path.is_file():
+                    raise DomainError("远端 Operation 批次文件过大或不存在")
+                batch_size = path.stat().st_size
+                if batch_size > MAX_REMOTE_OPERATION_BATCH_BYTES:
+                    raise DomainError("远端 Operation 批次文件过大或不存在")
+                total_remote_bytes += batch_size
+                if total_remote_bytes > MAX_REMOTE_OPERATION_TOTAL_BYTES:
+                    raise DomainError("远端 Operation 批次累计大小过大")
+                digest = hashlib.sha256()
+                batch_items: list[dict[str, Any]] = []
+                physical_lines = 0
+                total_bytes = 0
+                try:
+                    with path.open("rb") as stream:
+                        while line_bytes := stream.readline(MAX_REMOTE_OPERATION_LINE_BYTES + 1):
+                            physical_lines += 1
+                            if physical_lines > MAX_REMOTE_OPERATIONS_PER_BATCH:
+                                raise DomainError("远端 Operation 批次物理行数过多")
+                            total_remote_lines += 1
+                            if total_remote_lines > MAX_REMOTE_OPERATIONS_TOTAL:
+                                raise DomainError("远端 Operation 批次累计物理行数过多")
+                            if len(line_bytes) > MAX_REMOTE_OPERATION_LINE_BYTES:
+                                raise DomainError("远端 Operation 批次单行过大")
+                            total_bytes += len(line_bytes)
+                            if total_bytes > MAX_REMOTE_OPERATION_BATCH_BYTES:
+                                raise DomainError("远端 Operation 批次文件过大")
+                            digest.update(line_bytes)
+                            try:
+                                value = json.loads(line_bytes.decode("utf-8"))
+                            except json.JSONDecodeError:
+                                continue
+                            if isinstance(value, dict):
+                                if (
+                                    value.get("format") == "yancuo-operation"
+                                    and value.get("device_id") != batch_device_id
+                                ):
+                                    raise DomainError(
+                                        "远端 Operation 设备与批次声明不一致"
+                                    )
+                                batch_items.append(value)
+                except UnicodeDecodeError as exc:
+                    raise DomainError("远端 Operation 批次不是有效 UTF-8") from exc
+                if digest.hexdigest() != expected:
                     raise DomainError("远端 Operation 批次哈希不一致")
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    try:
-                        value = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(value, dict):
-                        items.append(value)
+                if expected_count is not None and physical_lines != expected_count:
+                    raise DomainError("远端 Operation 批次记录数不一致")
+                items.extend(batch_items)
         return items
 
     def record_problem_update(
@@ -315,6 +573,8 @@ class SyncService:
             tombstone=operation == "delete",
         )
         op["base_fields"] = base_fields
+        op["attachments"] = self._content_block_attachments(problem_id, changed)
+        op = _normalize_problem_operation(validate_operation(op))
         with self.runtime.session_factory() as s:
             existing = s.get(SyncOperation, op["operation_id"])
             if existing:
@@ -334,27 +594,94 @@ class SyncService:
             s.commit()
         return op
 
-    def list_unpushed(self) -> list[dict[str, Any]]:
+    def _content_block_attachments(
+        self, problem_id: str, changed_fields: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        if "question_content_json" not in changed_fields:
+            return []
+        from yancuo_win.application.question_content import load_question_content
+
+        referenced_ids = {
+            str(block.get("derived_asset_id"))
+            for block in load_question_content(changed_fields["question_content_json"])
+            if block.get("type") == "figure" and block.get("derived_asset_id")
+        }
+        if not referenced_ids:
+            return []
+        with self.runtime.session_factory() as session:
+            problem = session.scalar(
+                select(Problem)
+                .where(Problem.id == problem_id)
+                .options(selectinload(Problem.assets))
+            )
+            if problem is None:
+                return []
+            result: list[dict[str, Any]] = []
+            total_bytes = 0
+            for asset in problem.assets:
+                if asset.id not in referenced_ids or asset.role != "derived_figure":
+                    continue
+                path = self.store.resolve(asset.relative_path)
+                remaining = MAX_OPERATION_ATTACHMENT_BYTES - total_bytes
+                try:
+                    size = path.stat().st_size
+                    if size <= 0 or size > remaining:
+                        raise DomainError("单个 Operation 的派生题图总大小不能超过 32 MiB")
+                    with path.open("rb") as stream:
+                        payload = stream.read(remaining + 1)
+                except OSError:
+                    continue
+                if len(payload) != size or len(payload) > remaining:
+                    raise DomainError("派生题图在读取期间发生变化或超过大小上限")
+                total_bytes += len(payload)
+                if hashlib.sha256(payload).hexdigest() != asset.sha256:
+                    raise DomainError(f"派生题图哈希不一致：{asset.id}")
+                result.append(
+                    {
+                        "id": asset.id,
+                        "role": "derived_figure",
+                        "sha256": asset.sha256,
+                        "mime_type": asset.mime_type,
+                        "size_bytes": len(payload),
+                        "width": asset.width,
+                        "height": asset.height,
+                        "content_base64": base64.b64encode(payload).decode("ascii"),
+                    }
+                )
+            missing = referenced_ids - {item["id"] for item in result}
+            if missing:
+                raise DomainError("结构化题目引用的派生题图缺失：" + ", ".join(sorted(missing)))
+            return result
+
+    def list_unpushed(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         with self.runtime.session_factory() as s:
-            rows = s.scalars(
+            statement = (
                 select(SyncOperation).where(
                     SyncOperation.origin == "local",
                     SyncOperation.pushed_at.is_(None),
                 )
-            ).all()
+            )
+            if limit is not None:
+                statement = statement.limit(limit)
+            rows = s.scalars(statement).all()
             return [json.loads(r.payload_json) for r in rows]
 
     def push_operations(self) -> dict[str, Any]:
         provider = self._require_ops_provider()
-        ops = self.list_unpushed()
+        release_batch = not isinstance(provider, LocalFolderProvider)
+        ops = self.list_unpushed(
+            limit=MAX_REMOTE_OPERATIONS_PER_BATCH + 1 if release_batch else None
+        )
         if not ops:
             return {"pushed": 0}
+        if release_batch and len(ops) > MAX_REMOTE_OPERATIONS_PER_BATCH:
+            raise DomainError("待推送 Operation 批次记录过多")
         device_id = self.runtime.identity.device_id
         if not provider.acquire_lock(self.owner, self.repo, device_id):
             raise DomainError("无法获取同步锁")
         try:
-            if not isinstance(provider, LocalFolderProvider):
-                self._push_github_batch(provider, ops)
+            if release_batch:
+                self._push_release_batch(provider, ops)
                 now = _utcnow()
                 with self.runtime.session_factory() as s:
                     for op in ops:
@@ -399,36 +726,131 @@ class SyncService:
         dest = self.runtime.paths.backup_dir / f"pre-sync-{stamp}.ebpack"
         return self.ebpack.export_ebpack(dest)
 
+    def _known_applied_operations(
+        self, operation_ids: set[str]
+    ) -> dict[str, dict[str, Any]]:
+        """查询本次拉取涉及的已应用 Operation，并返回其不可变载荷。"""
+
+        if not operation_ids:
+            return {}
+        ordered = sorted(operation_ids)
+        known: dict[str, dict[str, Any]] = {}
+        with self.runtime.session_factory() as session:
+            for offset in range(0, len(ordered), SYNC_OPERATION_ID_QUERY_BATCH):
+                batch = ordered[offset : offset + SYNC_OPERATION_ID_QUERY_BATCH]
+                rows = session.execute(
+                    select(SyncOperation.id, SyncOperation.payload_json).where(
+                        SyncOperation.id.in_(batch),
+                        SyncOperation.applied_at.is_not(None),
+                    )
+                ).all()
+                for operation_id, payload_json in rows:
+                    try:
+                        payload = json.loads(payload_json)
+                        known[operation_id] = _normalize_problem_operation(
+                            validate_operation(payload)
+                        )
+                    except (json.JSONDecodeError, DomainError) as exc:
+                        raise DomainError(
+                            f"本地已应用 Operation 载荷损坏：{operation_id}"
+                        ) from exc
+        return known
+
+    def _operations_with_known_taxonomy(
+        self, incoming: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """延后引用本地尚不存在科目/章节的 Operation，避免外键提交失败。"""
+
+        subject_ids = {
+            fields["subject_id"]
+            for op in incoming.values()
+            if (fields := op.get("changed_fields") or {}).get("subject_id") is not None
+        }
+        chapter_ids = {
+            fields["chapter_id"]
+            for op in incoming.values()
+            if (fields := op.get("changed_fields") or {}).get("chapter_id") is not None
+        }
+        known_subjects: set[str] = set()
+        known_chapters: set[str] = set()
+        with self.runtime.session_factory() as session:
+            for model, identifiers, target in (
+                (Subject, sorted(subject_ids), known_subjects),
+                (Chapter, sorted(chapter_ids), known_chapters),
+            ):
+                for offset in range(0, len(identifiers), SYNC_OPERATION_ID_QUERY_BATCH):
+                    batch = identifiers[offset : offset + SYNC_OPERATION_ID_QUERY_BATCH]
+                    target.update(
+                        session.scalars(select(model.id).where(model.id.in_(batch))).all()
+                    )
+        return {
+            operation_id: op
+            for operation_id, op in incoming.items()
+            if (
+                (subject_id := (op.get("changed_fields") or {}).get("subject_id"))
+                is None
+                or subject_id in known_subjects
+            )
+            and (
+                (chapter_id := (op.get("changed_fields") or {}).get("chapter_id"))
+                is None
+                or chapter_id in known_chapters
+            )
+        }
+
     def pull_and_merge(self) -> dict[str, Any]:
         provider = self._require_ops_provider()
         snapshot = self._local_snapshot_before_merge()
-        remote_ops = (provider.list_remote_operations(self.owner, self.repo, exclude_device=self.runtime.identity.device_id) if isinstance(provider, LocalFolderProvider) else self._github_remote_operations(provider))
+        remote_ops = (
+            provider.list_remote_operations(
+                self.owner, self.repo, exclude_device=self.runtime.identity.device_id
+            )
+            if isinstance(provider, LocalFolderProvider)
+            else self._release_remote_operations(provider)
+        )
         applied = 0
         auto_merged = 0
         conflict_items = 0
         session_id: str | None = None
 
-        # 幂等：已应用的跳过
-        with self.runtime.session_factory() as s:
-            known = {
-                r.id
-                for r in s.scalars(
-                    select(SyncOperation).where(SyncOperation.applied_at.is_not(None))
-                ).all()
-            }
-
-        # 按实体分组
-        by_entity: dict[str, list[dict[str, Any]]] = {}
+        # 先按 Operation ID 去重。相同 ID 必须代表完全相同的不可变内容；
+        # 否则远端来源存在歧义，不能静默选择其中一份继续合并。
+        incoming: dict[str, dict[str, Any]] = {}
         for raw in remote_ops:
             try:
-                op = validate_operation(raw)
+                op = _normalize_problem_operation(validate_operation(raw))
             except DomainError:
                 continue
             if op["entity_type"] != "problem":
                 # v1 的本地持久化模型预留了其他实体类型，但当前合并器只
                 # 实现题目；不能把 asset/tag/review 补丁误套到 Problem。
                 continue
-            if op["operation_id"] in known:
+            operation_id = op["operation_id"]
+            previous = incoming.get(operation_id)
+            if previous is not None:
+                if previous != op:
+                    raise DomainError(f"远端 Operation ID 内容冲突：{operation_id}")
+                continue
+            incoming[operation_id] = op
+
+        incoming = self._operations_with_known_taxonomy(incoming)
+        known = self._known_applied_operations(set(incoming))
+        for operation_id, stored in known.items():
+            if incoming[operation_id] != stored:
+                raise DomainError(f"已应用 Operation ID 内容冲突：{operation_id}")
+
+        # 按实体分组
+        by_entity: dict[str, list[dict[str, Any]]] = {}
+        ordered_incoming = sorted(
+            incoming.items(),
+            key=lambda item: (
+                item[1]["timestamp"],
+                int(item[1].get("new_revision") or 0),
+                item[0],
+            ),
+        )
+        for operation_id, op in ordered_incoming:
+            if operation_id in known:
                 continue
             by_entity.setdefault(op["entity_id"], []).append(op)
 
@@ -460,6 +882,7 @@ class SyncService:
                     for op in ops:
                         fields.update(op.get("changed_fields") or {})
                     problem = self._create_remote_problem(s, entity_id, fields)
+                    self._apply_operation_attachments(s, problem, ops)
                     for op in ops:
                         self._store_remote_op(s, op, applied=True)
                     s.commit()
@@ -470,6 +893,7 @@ class SyncService:
                 return {"applied": 0, "auto": 0, "conflicts": 0}
 
             tag_names = [t.name for t in problem.tags]
+            self._apply_operation_attachments(s, problem, ops)
             local = sync_snapshot(problem, tag_names)
             # 用各 op 的 base_fields 还原共同祖先：取第一个 op 的 base 覆盖
             base = dict(local)
@@ -584,6 +1008,97 @@ class SyncService:
             s.commit()
             return {"applied": len(ops), "auto": auto, "conflicts": 0}
 
+    def _apply_operation_attachments(
+        self, session, problem: Problem, operations: list[dict[str, Any]]
+    ) -> None:
+        """Materialize only derived figures referenced by the accompanying blocks."""
+
+        from yancuo_win.application.question_content import load_question_content
+
+        referenced_ids: set[str] = set()
+        attachments: dict[str, dict[str, Any]] = {}
+        for operation in operations:
+            content_json = (operation.get("changed_fields") or {}).get("question_content_json")
+            if isinstance(content_json, str):
+                referenced_ids.update(
+                    str(block.get("derived_asset_id"))
+                    for block in load_question_content(content_json)
+                    if block.get("derived_asset_id")
+                )
+            for attachment in operation.get("attachments") or []:
+                if isinstance(attachment, dict) and attachment.get("id"):
+                    asset_id = str(attachment["id"])
+                    previous = attachments.get(asset_id)
+                    if previous is not None and previous != attachment:
+                        raise DomainError(f"同步派生题图 ID 载荷冲突：{asset_id}")
+                    attachments[asset_id] = attachment
+        declared_total = 0
+        for asset_id in sorted(referenced_ids):
+            attachment = attachments.get(asset_id)
+            if attachment is None:
+                existing = session.get(Asset, asset_id)
+                if existing is not None and existing.problem_id == problem.id:
+                    continue
+                raise DomainError(f"同步 Operation 缺少派生题图附件：{asset_id}")
+            declared_total += int(attachment.get("size_bytes") or 0)
+            if declared_total > MAX_OPERATION_ATTACHMENT_BYTES:
+                raise DomainError("实体 Operation 派生题图总大小不能超过 32 MiB")
+        decoded_total = 0
+        decoded_attachments: dict[str, bytes] = {}
+        for asset_id in sorted(referenced_ids):
+            attachment = attachments.get(asset_id)
+            if attachment is None:
+                continue
+            payload = base64.b64decode(str(attachment["content_base64"]), validate=True)
+            decoded_total += len(payload)
+            if decoded_total > MAX_OPERATION_ATTACHMENT_BYTES:
+                raise DomainError("实体 Operation 派生题图实际总大小超过 32 MiB")
+            expected = str(attachment["sha256"])
+            if hashlib.sha256(payload).hexdigest() != expected:
+                raise DomainError(f"同步派生题图哈希不一致：{asset_id}")
+            decoded_attachments[asset_id] = payload
+        for asset_id in sorted(referenced_ids):
+            attachment = attachments.get(asset_id)
+            if attachment is None:
+                continue
+            payload = decoded_attachments[asset_id]
+            expected = str(attachment["sha256"])
+            existing = session.get(Asset, asset_id)
+            if existing is not None:
+                if existing.problem_id != problem.id or existing.sha256 != expected:
+                    raise DomainError(f"同步派生题图 ID 冲突：{asset_id}")
+                continue
+            mime_type = str(attachment.get("mime_type") or "image/png")
+            suffix = {
+                "image/jpeg": ".jpg",
+                "image/webp": ".webp",
+                "image/gif": ".gif",
+                "image/bmp": ".bmp",
+            }.get(mime_type, ".png")
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+                handle.write(payload)
+                temporary = Path(handle.name)
+            try:
+                stored = self.store.store_copy(temporary, role="derived_figure")
+            finally:
+                temporary.unlink(missing_ok=True)
+            if stored.sha256 != expected:
+                raise DomainError(f"同步派生题图落盘校验失败：{asset_id}")
+            session.add(
+                Asset(
+                    id=asset_id,
+                    problem_id=problem.id,
+                    role="derived_figure",
+                    sha256=stored.sha256,
+                    relative_path=stored.relative_path,
+                    mime_type=mime_type,
+                    size_bytes=len(payload),
+                    width=attachment.get("width"),
+                    height=attachment.get("height"),
+                    is_immutable=True,
+                )
+            )
+
     @staticmethod
     def _apply_problem_field(problem: Problem, field: str, value: Any) -> bool:
         """应用一个同步字段，并处理 SQLite DateTime 的 JSON 往返。"""
@@ -602,9 +1117,7 @@ class SyncService:
         elif problem.status != "trashed":
             problem.deleted_at = None
 
-    def _create_remote_problem(
-        self, session, entity_id: str, fields: dict[str, Any]
-    ) -> Problem:
+    def _create_remote_problem(self, session, entity_id: str, fields: dict[str, Any]) -> Problem:
         """从远端 create Operation 创建本地题目。"""
         kwargs: dict[str, Any] = {}
         for field, value in fields.items():

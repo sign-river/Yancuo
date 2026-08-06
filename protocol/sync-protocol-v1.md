@@ -20,8 +20,8 @@
 - 完整向量时钟 CRDT
 - 用 Release 承载高频 op（Release 仍只做完整备份/迁移）
 
-> 补充说明（远端批次通道）：GitLink/GitHub 不提供可由客户端安全追加的
-> `changes/*.jsonl` 文件接口。远端增量使用本协议定义的不可变**批次**附件，
+> 补充说明（远端批次通道）：CloudBase 不向客户端开放可变
+> `changes/*.jsonl` 对象写入。远端增量使用本协议定义的不可变**批次**附件，
 > 一批可含多条 Operation；这不等同于“每题一个 Release”，也不改变完整快照
 > Release 的恢复职责。
 
@@ -77,6 +77,7 @@ operation-batches/         # 逻辑目录；远端实现对应不可变 Release 
 - `device_id`、`database_id`、`timestamp`、`entity_id` 必须是非空字符串；revision 必须是非负整数
 - `operation` ∈ `create` | `update` | `delete` | `undelete`
 - `changed_fields` 仅含实际变更键；`tags` 可为字符串数组（并集合并）
+- `question_content_json` 作为一个保守冲突字段同步；引用派生题图时，同一 Operation 可带 `attachments`，每项只允许 `role=derived_figure`，包含稳定资源 ID、SHA-256、媒体类型、尺寸和 Base64 内容。接收端必须先验证大小、Base64 和哈希，再写入内容寻址对象库；不得通过 Operation 注入或覆盖 `original` 原图。
 - `delete` 时 `tombstone=true`，并设置 `changed_fields.status="trashed"`（或等价）
 - Windows v1 当前只落地 `entity_type=problem`；其他预留实体不会被误套用到题目模型
 
@@ -131,7 +132,7 @@ operation-batches/         # 逻辑目录；远端实现对应不可变 Release 
 3. **拉取**：读取其他设备 `ops.jsonl`，跳过已应用 `operation_id`，按时间排序合并
 4. 默认 `conflict_policy=ask`
 
-### 6.1 GitLink/GitHub 远端批次
+### 6.1 CloudBase 远端批次
 
 远端提供商以不可变 Release 附件承载一个推送批次：
 
@@ -157,8 +158,8 @@ asset: operations.jsonl
 }
 ```
 
-- 先完整上传并校验附件，再创建或发布批次 Release；失败批次不能进入索引。
-- `latest.json` 的资料索引可加法增加 `operation_batches`，记录批次 tag、哈希、
+- 创建批次 Release 后完整上传并回读校验附件，只有成功后才能提交索引；任一步失败必须删除未入索引的 Release。
+- CloudBase manifest 的资料索引可加法增加 `operation_batches`，记录批次 tag、哈希、
   profile、设备和创建时间。未知客户端必须忽略该字段。
 - 推送期间沿用仓库写锁；锁只保护“发布批次 + 更新索引”的短事务，不能覆盖或
   修改既有批次 Release。
@@ -169,10 +170,9 @@ asset: operations.jsonl
 - 单批大小、Operation 数量、JSON 行大小和下载总量必须设置硬上限；超限批次
   拒绝导入，不能把远端仓库当作无限制消息队列。
 
-当前实现状态：LocalFolder 已接入可变 `changes/` 通道；GitHub 已接入本节定义的
-Release 批次通道，并完成私有仓库的锁竞争、附件上传下载、发布中断恢复与两端
-字段冲突联调。GitLink 已验证 `version_id` 的旧版本写入可覆盖新版本，不具备
-可复现的原子锁语义，仍只允许完整快照。
+当前实现状态：LocalFolder 已接入可变 `changes/` 离线通道；CloudBase 已接入本节
+定义的 Release 批次通道，并覆盖原子网关锁、附件上传下载、发布中断清理、资料
+隔离与两端字段冲突。正式远端不再提供其他 provider。
 
 ---
 
@@ -180,7 +180,7 @@ Release 批次通道，并完成私有仓库的锁竞争、附件上传下载、
 
 | 通道                    | 用途                         |
 | ----------------------- | ---------------------------- |
-| Release + `latest.json` | 换机、灾难恢复、低频完整快照 |
+| Release + manifest      | 换机、灾难恢复、低频完整快照 |
 | `changes/**/*.jsonl`    | 增量字段同步                 |
 
 增量失败时仍可用完整备份恢复；**禁止**用每题 Release 代替 Operation。

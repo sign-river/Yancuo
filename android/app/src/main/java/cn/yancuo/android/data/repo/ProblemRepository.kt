@@ -2,7 +2,6 @@ package cn.yancuo.android.data.repo
 
 import android.content.ContentValues
 import android.database.Cursor
-import cn.yancuo.android.data.assets.ObjectStore
 import cn.yancuo.android.data.db.YancuoDb
 import cn.yancuo.android.domain.REVIEW_GRADES
 import cn.yancuo.android.domain.isDue
@@ -10,7 +9,6 @@ import cn.yancuo.android.domain.masteryFromGrade
 import cn.yancuo.android.domain.newId
 import cn.yancuo.android.domain.nextReviewAt
 import cn.yancuo.android.domain.validateGrade
-import java.io.File
 import java.time.Instant
 
 data class ProblemSummary(
@@ -20,7 +18,7 @@ data class ProblemSummary(
     val priority: Int,
     val notes: String,
     val nextReviewAt: Instant?,
-    val reviewCount: Int,
+    val reviewCount: Long,
     val mastery: Int?,
 )
 
@@ -36,7 +34,7 @@ data class ProblemDetail(
     val notes: String,
     val tags: List<String>,
     val nextReviewAt: Instant?,
-    val reviewCount: Int,
+    val reviewCount: Long,
     val mastery: Int?,
 )
 
@@ -45,12 +43,11 @@ data class ReviewResult(
     val grade: Int,
     val label: String,
     val nextReviewAt: Instant,
-    val reviewCount: Int,
+    val reviewCount: Long,
 )
 
 class ProblemRepository(
     private val dbHelper: YancuoDb,
-    private val objectStore: ObjectStore,
 ) {
 
     fun listProblems(status: String? = null, query: String? = null): List<ProblemSummary> {
@@ -111,7 +108,7 @@ class ProblemRepository(
                 notes = c.getString(8) ?: "",
                 tags = emptyList(),
                 nextReviewAt = c.getString(9)?.let { parseInstant(it) },
-                reviewCount = c.getInt(10),
+                reviewCount = c.getLong(10),
                 mastery = if (c.isNull(11)) null else c.getInt(11),
             )
         }
@@ -131,63 +128,6 @@ class ProblemRepository(
         return problem.copy(tags = tags)
     }
 
-    /** 将图片写入对象库并创建收件箱题目。 */
-    fun createFromImages(imageFiles: List<File>): List<String> {
-        if (imageFiles.isEmpty()) return emptyList()
-        val db = dbHelper.writable()
-        val created = mutableListOf<String>()
-        val now = Instant.now().toString()
-        db.beginTransaction()
-        try {
-            for (file in imageFiles) {
-                val stored = objectStore.storeCopy(file, role = "original")
-                val problemId = newId("problem")
-                val title = file.nameWithoutExtension.ifBlank { "未命名" }
-                db.insertOrThrow(
-                    "problems",
-                    null,
-                    ContentValues().apply {
-                        put("id", problemId)
-                        put("status", "inbox")
-                        put("title", title)
-                        put("question_markdown", "")
-                        put("question_latex", "")
-                        put("user_answer", "")
-                        put("correct_answer", "")
-                        put("solution_markdown", "")
-                        put("error_analysis", "")
-                        put("notes", "")
-                        put("priority", 3)
-                        put("revision", 1)
-                        put("review_count", 0)
-                        put("created_at", now)
-                        put("updated_at", now)
-                    },
-                )
-                db.insertOrThrow(
-                    "assets",
-                    null,
-                    ContentValues().apply {
-                        put("id", newId("asset"))
-                        put("problem_id", problemId)
-                        put("role", "original")
-                        put("sha256", stored.sha256)
-                        put("relative_path", stored.relativePath)
-                        put("mime_type", stored.mimeType)
-                        put("size_bytes", stored.sizeBytes)
-                        put("is_immutable", 1)
-                        put("created_at", now)
-                    },
-                )
-                created += problemId
-            }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-        return created
-    }
-
     fun updateProblem(
         id: String,
         title: String? = null,
@@ -200,6 +140,21 @@ class ProblemRepository(
         status: String? = null,
         tagNames: List<String>? = null,
     ) {
+        require(priority == null || priority in 1..5) { "优先级必须在 1 到 5 之间" }
+        require(status == null || status in setOf("inbox", "active", "archived", "trashed")) {
+            "非法状态"
+        }
+        validateProblemTexts(
+            title,
+            mapOf(
+                "题干" to questionMarkdown,
+                "正确答案" to correctAnswer,
+                "解析" to solutionMarkdown,
+                "错因" to errorAnalysis,
+                "备注" to notes,
+            ),
+        )
+        val normalizedTags = tagNames?.let(::normalizeTagNames)
         val db = dbHelper.writable()
         val now = Instant.now().toString()
         db.beginTransaction()
@@ -212,18 +167,13 @@ class ProblemRepository(
                 solutionMarkdown?.let { put("solution_markdown", it) }
                 errorAnalysis?.let { put("error_analysis", it) }
                 notes?.let { put("notes", it) }
-                priority?.let { put("priority", it.coerceIn(1, 5)) }
-                status?.let {
-                    require(it in setOf("inbox", "active", "archived", "trashed")) {
-                        "非法状态"
-                    }
-                    put("status", it)
-                }
+                priority?.let { put("priority", it) }
+                status?.let { put("status", it) }
             }
             val n = db.update("problems", cv, "id = ?", arrayOf(id))
             require(n == 1) { "题目不存在" }
-            if (tagNames != null) {
-                replaceTags(db, id, tagNames)
+            if (normalizedTags != null) {
+                replaceTags(db, id, normalizedTags)
             }
             db.setTransactionSuccessful()
         } finally {
@@ -245,9 +195,10 @@ class ProblemRepository(
             )
             val (count, status) = cur.use {
                 require(it.moveToFirst()) { "题目不存在" }
-                it.getInt(0) to it.getString(1)
+                it.getLong(0) to it.getString(1)
             }
             require(status != "trashed") { "回收站题目不可复习" }
+            require(count >= 0 && count < Long.MAX_VALUE) { "复习次数无效或已达到上限" }
             val newCount = count + 1
             val newStatus = if (status == "inbox") "active" else status
             db.update(
@@ -320,7 +271,7 @@ class ProblemRepository(
         priority = getInt(3),
         notes = getString(4) ?: "",
         nextReviewAt = getString(5)?.let { parseInstant(it) },
-        reviewCount = getInt(6),
+        reviewCount = getLong(6),
         mastery = if (isNull(7)) null else getInt(7),
     )
 }

@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+import yancuo_win.application.services as services_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.cloud.local_folder import LocalFolderProvider
 from yancuo_win.config.settings import default_toml_path
+from yancuo_win.data.ids import new_id
+from yancuo_win.data.models import Asset
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
@@ -91,6 +95,97 @@ def test_restore_rejects_invalid_database_without_replacing_target(
     assert not (target / "assets" / "new.txt").exists()
 
 
+def test_restore_rejects_oversized_manifest_and_cleans_unique_staging(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backup = AppServices(runtime).create_backup(tmp_path / "metadata.zip")
+    target = tmp_path / "restore-target"
+    monkeypatch.setattr(services_module, "MAX_BACKUP_METADATA_BYTES", 4)
+
+    with pytest.raises(DomainError, match="manifest.json 无效"):
+        AppServices(runtime).restore_backup(backup, target)
+
+    assert list(target.glob(".restore-*-*")) == []
+
+
+def test_restore_rejects_identity_that_disagrees_with_manifest(
+    runtime, tmp_path: Path
+) -> None:
+    original = AppServices(runtime).create_backup(tmp_path / "identity.zip")
+    mismatched = tmp_path / "identity-mismatch.zip"
+    with zipfile.ZipFile(original, "r") as source:
+        entries = {
+            info.filename: source.read(info.filename) for info in source.infolist()
+        }
+    identity = json.loads(entries["identity.json"])
+    identity["database_id"] = "db_other"
+    entries["identity.json"] = json.dumps(identity).encode()
+    manifest = json.loads(entries["manifest.json"])
+    manifest["checksums"]["identity.json"] = hashlib.sha256(
+        entries["identity.json"]
+    ).hexdigest()
+    entries["manifest.json"] = json.dumps(manifest).encode()
+    with zipfile.ZipFile(
+        mismatched, "w", compression=zipfile.ZIP_DEFLATED
+    ) as target_archive:
+        for name, payload in entries.items():
+            target_archive.writestr(name, payload)
+    target = tmp_path / "identity-target"
+
+    with pytest.raises(DomainError, match="manifest.*不匹配"):
+        AppServices(runtime).restore_backup(mismatched, target)
+
+    assert list(target.glob(".restore-*-*")) == []
+
+
+def test_restore_rejects_corrupted_asset_before_replacing_target(
+    runtime, tmp_path: Path
+) -> None:
+    source_image = tmp_path / "source.png"
+    source_image.write_bytes(b"\x89PNG\r\n\x1a\noriginal")
+    services = AppServices(runtime)
+    problem_id = services.import_images([source_image])["created"][0]
+    stored = services.store.store_copy(source_image, role="derived_figure")
+    with services.session() as session:
+        session.add(
+            Asset(
+                id=new_id("asset"),
+                problem_id=problem_id,
+                role="derived_figure",
+                sha256=stored.sha256,
+                relative_path=stored.relative_path,
+                mime_type=stored.mime_type,
+                size_bytes=stored.size_bytes,
+                is_immutable=True,
+            )
+        )
+        session.commit()
+    original = services.create_backup(tmp_path / "asset.zip")
+    corrupted = tmp_path / "asset-corrupted.zip"
+    changed = False
+    with (
+        zipfile.ZipFile(original, "r") as source,
+        zipfile.ZipFile(
+            corrupted, "w", compression=zipfile.ZIP_DEFLATED
+        ) as target_archive,
+    ):
+        for info in source.infolist():
+            payload = source.read(info.filename)
+            if info.filename.startswith("assets/") and not changed:
+                payload += b"corruption"
+                changed = True
+            target_archive.writestr(info.filename, payload)
+    assert changed
+    target = tmp_path / "corrupt-target"
+    target.mkdir()
+    (target / "error_book.db").write_bytes(b"existing database")
+
+    with pytest.raises(DomainError, match="checksum 不匹配"):
+        services.restore_backup(corrupted, target)
+
+    assert (target / "error_book.db").read_bytes() == b"existing database"
+
+
 def test_local_folder_lock_is_released_and_expired(tmp_path: Path) -> None:
     root = tmp_path / "cloud"
     first = LocalFolderProvider(root, lock_ttl_seconds=60)
@@ -113,6 +208,20 @@ def test_local_folder_lock_is_released_and_expired(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert first.acquire_lock("local", "repo", "dev-a")
+
+
+def test_local_folder_metadata_reader_does_not_use_unbounded_read_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text('{"value": 1}', encoding="utf-8")
+
+    def fail_unbounded_read(*_args, **_kwargs):
+        raise AssertionError("Path.read_text must not be used")
+
+    monkeypatch.setattr(Path, "read_text", fail_unbounded_read)
+
+    assert LocalFolderProvider._read_json_file(metadata, "metadata")["value"] == 1
 
 
 @pytest.mark.parametrize(
@@ -163,6 +272,82 @@ def test_local_folder_rejects_unsafe_release_and_operation_components(
         )
 
 
+def test_local_folder_asset_copy_is_bounded_and_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.create_release("local", "repo", tag="backup", name="backup")
+    source = tmp_path / "asset.bin"
+    source.write_bytes(b"asset")
+
+    uploaded = provider.upload_release_asset(
+        "local", "repo", tag="backup", file_path=source, asset_name="asset.bin"
+    )
+    destination = tmp_path / "download.bin"
+    provider.download_release_asset(
+        "local", "repo", tag="backup", asset_name="asset.bin", dest=destination
+    )
+
+    assert Path(uploaded["path"]).read_bytes() == b"asset"
+    assert destination.read_bytes() == b"asset"
+    assert list(Path(uploaded["path"]).parent.glob(".up-*.tmp")) == []
+    assert list(destination.parent.glob(".down-*.tmp")) == []
+
+    monkeypatch.setattr(LocalFolderProvider, "MAX_ASSET_BYTES", 4)
+    oversized = tmp_path / "oversized.bin"
+    oversized.write_bytes(b"12345")
+    with pytest.raises(DomainError, match="512 MiB"):
+        provider.upload_release_asset(
+            "local",
+            "repo",
+            tag="backup",
+            file_path=oversized,
+            asset_name="oversized.bin",
+        )
+
+
+def test_local_folder_download_rejects_symlink_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.create_release("local", "repo", tag="backup", name="backup")
+    linked = root / "local" / "repo" / "releases" / "backup" / "linked.bin"
+    linked.write_bytes(b"link-placeholder")
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda self: self == linked or original_is_symlink(self),
+    )
+
+    with pytest.raises(DomainError, match="symlink"):
+        provider.download_release_asset(
+            "local",
+            "repo",
+            tag="backup",
+            asset_name="linked.bin",
+            dest=tmp_path / "out.bin",
+        )
+
+
+def test_local_folder_metadata_writes_are_atomic_and_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.create_private_repository("repo")
+    provider.create_release("local", "repo", tag="good", name="good")
+    provider.write_tombstone("local", "repo", "problem_1", {"deleted": True})
+
+    assert list(root.rglob(".*.tmp")) == []
+    monkeypatch.setattr(LocalFolderProvider, "MAX_METADATA_FILE_BYTES", 32)
+    with pytest.raises(DomainError, match="size limit"):
+        provider.create_release("local", "repo", tag="oversized", name="x" * 128)
+    assert not (root / "local" / "repo" / "releases" / "oversized").exists()
+
+
 def test_local_folder_skips_non_object_operation_lines(tmp_path: Path) -> None:
     root = tmp_path / "cloud"
     provider = LocalFolderProvider(root)
@@ -177,3 +362,137 @@ def test_local_folder_skips_non_object_operation_lines(tmp_path: Path) -> None:
     assert provider.list_remote_operations("local", "repo") == [
         {"operation_id": "op_valid", "timestamp": "1"}
     ]
+
+
+def test_local_folder_rejects_oversized_operation_logs(tmp_path: Path) -> None:
+    provider = LocalFolderProvider(tmp_path / "cloud")
+    provider.append_operations(
+        "local", "repo", "dev-a", [{"operation_id": "op_valid", "timestamp": "1"}]
+    )
+    provider.MAX_OPERATION_FILE_BYTES = 1
+
+    with pytest.raises(DomainError, match="size limit"):
+        provider.list_remote_operations("local", "repo")
+
+
+def test_local_folder_rejects_cumulative_remote_operation_log_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.append_operations(
+        "local", "repo", "dev-a", [{"operation_id": "op_a", "timestamp": "1"}]
+    )
+    provider.append_operations(
+        "local", "repo", "dev-b", [{"operation_id": "op_b", "timestamp": "2"}]
+    )
+    first = root / "local" / "repo" / "changes" / "dev-a" / "ops.jsonl"
+    monkeypatch.setattr(
+        LocalFolderProvider, "MAX_REMOTE_OPERATION_TOTAL_BYTES", first.stat().st_size
+    )
+
+    with pytest.raises(DomainError, match="cumulative size"):
+        provider.list_remote_operations("local", "repo")
+
+
+def test_local_folder_rejects_operation_append_before_exceeding_file_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.append_operations(
+        "local", "repo", "dev-a", [{"operation_id": "op_existing"}]
+    )
+    ops_file = root / "local" / "repo" / "changes" / "dev-a" / "ops.jsonl"
+    before = ops_file.read_bytes()
+    monkeypatch.setattr(
+        LocalFolderProvider, "MAX_OPERATION_FILE_BYTES", len(before) + 1
+    )
+
+    with pytest.raises(DomainError, match="append would exceed"):
+        provider.append_operations(
+            "local", "repo", "dev-a", [{"operation_id": "op_new"}]
+        )
+    assert ops_file.read_bytes() == before
+
+
+def test_local_folder_rolls_back_streamed_operation_batch_on_late_oversized_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.append_operations(
+        "local", "repo", "dev-a", [{"operation_id": "op_existing"}]
+    )
+    ops_file = root / "local" / "repo" / "changes" / "dev-a" / "ops.jsonl"
+    before = ops_file.read_bytes()
+    first = {"operation_id": "a"}
+    first_size = len((json.dumps(first) + "\n").encode("utf-8"))
+    monkeypatch.setattr(LocalFolderProvider, "MAX_OPERATION_LINE_BYTES", first_size)
+
+    with pytest.raises(DomainError, match="single operation"):
+        provider.append_operations(
+            "local", "repo", "dev-a", [first, {"operation_id": "oversized"}]
+        )
+
+    assert ops_file.read_bytes() == before
+
+
+def test_local_folder_rejects_operation_with_spoofed_device_directory(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+
+    with pytest.raises(DomainError, match="device_id"):
+        provider.append_operations(
+            "local",
+            "repo",
+            "dev-a",
+            [{"format": "yancuo-operation", "device_id": "dev-b"}],
+        )
+
+    assert not (root / "local" / "repo" / "changes" / "dev-a" / "ops.jsonl").exists()
+
+
+def test_local_folder_rejects_non_utf8_operation_logs(tmp_path: Path) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.append_operations(
+        "local", "repo", "dev-a", [{"operation_id": "op_valid", "timestamp": "1"}]
+    )
+    ops_file = root / "local" / "repo" / "changes" / "dev-a" / "ops.jsonl"
+    ops_file.write_bytes(b"\xff\xfe")
+
+    with pytest.raises(DomainError, match="UTF-8"):
+        provider.list_remote_operations("local", "repo")
+
+
+def test_local_folder_bounds_and_atomically_writes_sync_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "cloud"
+    provider = LocalFolderProvider(root)
+    provider.create_private_repository("repo")
+    provider.write_sync_manifest("local", "repo", {"format": "safe"})
+    metadata_dir = root / "local" / "repo" / ".mistakebook"
+
+    assert provider.read_sync_manifest("local", "repo") == {"format": "safe"}
+    assert not list(metadata_dir.glob(".latest.json.*.tmp"))
+
+    monkeypatch.setattr(LocalFolderProvider, "MAX_METADATA_FILE_BYTES", 1)
+    with pytest.raises(DomainError, match="size limit"):
+        provider.read_sync_manifest("local", "repo")
+
+
+def test_local_folder_rejects_unsafe_device_metadata_identifiers(
+    tmp_path: Path,
+) -> None:
+    provider = LocalFolderProvider(tmp_path / "cloud")
+    provider.create_private_repository("repo")
+
+    with pytest.raises(DomainError, match="unsafe path component"):
+        provider.register_device(
+            "local", "repo", {"device_id": "../outside", "name": "bad"}
+        )

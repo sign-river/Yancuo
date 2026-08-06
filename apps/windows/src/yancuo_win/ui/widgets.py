@@ -9,27 +9,34 @@ from PySide6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
     QModelIndex,
+    QObject,
     QPoint,
+    QPointF,
+    QRect,
     QSize,
     QTimer,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QAction, QColor, QPainter, QPen
+from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFrame,
-    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QMenu,
     QProgressBar,
     QPushButton,
     QProxyStyle,
     QSizePolicy,
+    QSpinBox,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -39,6 +46,7 @@ from PySide6.QtWidgets import (
 )
 
 from yancuo_win.ui.icons import bind_icon, symbolic_icon
+from yancuo_win.ui.theme import current_theme_name, theme_tokens
 
 
 @contextmanager
@@ -152,6 +160,59 @@ def default_button(text: str, parent: QWidget | None = None) -> QPushButton:
     return QPushButton(text, parent)
 
 
+def friendly_cloud_error(error: str) -> str:
+    """Turn common CloudBase gateway errors into user-readable messages."""
+    text = str(error or "")
+    if "401" in text and "登录已失效" in text:
+        return "登录已失效，请重新登录后重试"
+    if "HTTP 4" in text or "HTTP 5" in text:
+        marker = text.find(":")
+        if marker != -1 and marker < 80:
+            tail = text[marker + 1:].strip().strip('"')
+            if tail and tail != "服务暂时不可用":
+                return tail
+    return text
+
+def show_dropdown_menu(
+    menu: "QMenu",
+    anchor: QWidget,
+    *,
+    gap: int = 6,
+    margin: int = 8,
+    min_width: int | None = None,
+    max_width: int = 320,
+) -> None:
+    """Open ``menu`` below ``anchor`` with a fixed gap and keep the anchor visible.
+
+    The menu left edge aligns with the anchor left edge, shifts left near the
+    right screen edge, and flips above the anchor when there is not enough
+    space below.  The anchor widget is never covered by the popup.
+    """
+    from PySide6.QtGui import QGuiApplication
+
+    menu.adjustSize()
+    hint = menu.sizeHint()
+    width = max(hint.width(), min_width or anchor.width())
+    width = min(width, max_width)
+    height = hint.height()
+    anchor_global = anchor.mapToGlobal(QPoint(0, 0))
+    anchor_rect = QRect(anchor_global, anchor.size())
+    screen = (
+        QGuiApplication.screenAt(anchor_rect.center())
+        or QGuiApplication.primaryScreen()
+    )
+    available = screen.availableGeometry() if screen is not None else anchor_rect
+    x = anchor_rect.left()
+    if x + width > available.right() - margin:
+        x = max(available.left() + margin, available.right() - margin - width)
+    below_y = anchor_rect.bottom() + gap
+    if below_y + height <= available.bottom() - margin:
+        y = below_y
+    else:
+        y = max(available.top() + margin, anchor_rect.top() - gap - height)
+    menu.setMinimumWidth(width)
+    menu.popup(QPoint(x, y))
+
 def action_combo_box(
     placeholder: str,
     actions: Sequence[tuple[str, Callable[[], None]] | None],
@@ -178,6 +239,74 @@ def action_combo_box(
 
     combo.activated.connect(trigger)
     return combo
+
+
+class ChevronComboBox(QComboBox):
+    """Combo box with an explicit chevron that remains visible when editable."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("visibleChevron", True)
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().paintEvent(event)
+
+        from yancuo_win.ui.theme import current_theme_name, theme_tokens
+
+        tokens = theme_tokens(current_theme_name())
+        center_x = 17 if self.layoutDirection() == Qt.LayoutDirection.RightToLeft else self.width() - 17
+        center_y = self.height() // 2
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(tokens.primary if self.view().isVisible() else tokens.muted), 1.8))
+        if self.view().isVisible():
+            # 打开状态：箭头旋转 180°（向上）并使用主色
+            painter.drawLine(center_x - 4, center_y + 2, center_x, center_y - 2)
+            painter.drawLine(center_x, center_y - 2, center_x + 4, center_y + 2)
+        else:
+            painter.drawLine(center_x - 4, center_y - 2, center_x, center_y + 2)
+            painter.drawLine(center_x, center_y + 2, center_x + 4, center_y - 2)
+
+
+class ScrollSafeSpinBox(QSpinBox):
+    """Integer input whose wheel gesture remains available to its scroll area."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        event.ignore()
+
+
+class ScrollSafeDoubleSpinBox(QDoubleSpinBox):
+    """Decimal input whose wheel gesture remains available to its scroll area."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        event.ignore()
+
+
+class FineScrollListWidget(QListWidget):
+    """QListWidget whose mouse wheel scrolls by a small fixed step.
+
+    Stock item views jump several rows per wheel notch, which makes long
+    lists hard to locate.  This subclass scrolls one short row-height per
+    notch and scales trackpad pixel deltas down for finer control.
+    """
+
+    _WHEEL_STEP_PX = 72
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        pixel = event.pixelDelta().y()
+        if pixel:
+            step = max(1, round(abs(pixel) * 0.6))
+            direction = 1 if pixel > 0 else -1
+        else:
+            angle = event.angleDelta().y()
+            if not angle:
+                super().wheelEvent(event)
+                return
+            direction = 1 if angle > 0 else -1
+            step = self._WHEEL_STEP_PX
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.value() - direction * step)
+        event.accept()
 
 
 class SoftItemDelegate(QStyledItemDelegate):
@@ -429,58 +558,314 @@ class ErrorState(QWidget):
         layout.addWidget(self.retry_button, alignment=Qt.AlignmentFlag.AlignCenter)
 
 
-class ToastMessage(QFrame):
-    """Reusable top-right slide notification with an optional click action."""
+def _status_icon_pixmap(color: str, kind: str, size: int = 20) -> QPixmap:
+    """Render a colored status icon: error exclamation, success check or info dot."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    painter.drawEllipse(0, 0, size, size)
+    painter.setPen(
+        QPen(
+            QColor("#FFFFFF"),
+            max(1.8, size / 9),
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+    )
+    center = size / 2
+    if kind == "error":
+        painter.drawLine(QPointF(center, size * 0.30), QPointF(center, size * 0.58))
+        painter.drawPoint(QPointF(center, size * 0.72))
+    elif kind == "success":
+        painter.drawPolyline(
+            [
+                QPointF(size * 0.24, size * 0.52),
+                QPointF(size * 0.42, size * 0.68),
+                QPointF(size * 0.76, size * 0.34),
+            ]
+        )
+    else:  # info
+        painter.drawPoint(QPointF(center, size * 0.34))
+        painter.drawLine(QPointF(center, size * 0.48), QPointF(center, size * 0.70))
+    painter.end()
+    return pixmap
 
-    activated = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("ToastMessage")
-        self.setAccessibleName("操作反馈")
-        self.setCursor(Qt.CursorShape.ArrowCursor)
-        self.setMinimumWidth(280)
-        self.setMaximumWidth(360)
-        self.setVisible(False)
-        self._on_activated: Callable[[], None] | None = None
-        self._duration_ms = 2800
+def _error_icon_pixmap(size: int = 20) -> QPixmap:
+    """Backward-compatible red exclamation icon."""
+    return _status_icon_pixmap("#F54A45", "error", size)
+
+
+_TOAST_WARNING_MARKERS = (
+    "失败",
+    "错误",
+    "出错",
+    "无法",
+    "不存在",
+    "请先",
+    "请选择",
+    "请输入",
+    "没有可",
+    "没有其他",
+    "尚无",
+    "不能",
+    "不可用",
+    "无效",
+    "未找到",
+    "未生成",
+    "不允许",
+    "至少",
+    "必须",
+)
+
+_TOAST_SUCCESS_MARKERS = (
+    "成功",
+    "已保存",
+    "已应用",
+    "已加入",
+    "已更新",
+    "已恢复",
+    "已删除",
+    "已清空",
+    "已提交",
+    "已入库",
+    "已采用",
+    "已撤回",
+    "已保留",
+    "已重建",
+    "已创建",
+    "已修改",
+    "已替换",
+    "已合并",
+    "已上传",
+    "已下载",
+    "已同步",
+    "已备份",
+    "已移动",
+    "已记录",
+    "已重置",
+    "已设置",
+)
+
+
+def _classify_toast_tone(message: str) -> str:
+    """Pick an accent tone from message content for generic toast feedback."""
+    text = message or ""
+    if any(marker in text for marker in _TOAST_WARNING_MARKERS):
+        return "warning"
+    if any(marker in text for marker in _TOAST_SUCCESS_MARKERS) or text.startswith("已"):
+        return "success"
+    return "info"
+
+
+class AppToast(QFrame):
+    """A single toast card rendered by :class:`ToastStack`.
+
+    White card with a tone accent (error/warning red, success green,
+    info blue), matching icon, close button, countdown progress bar, and
+    slide/fade animations.  Positioning and stacking are handled by the
+    owning :class:`ToastStack`.
+    """
+
+    def __init__(
+        self,
+        stack: "ToastStack",
+        *,
+        title: str,
+        body: str,
+        tone: str = "info",
+        duration_ms: int = 3500,
+    ) -> None:
+        parent = stack.parent()
+        super().__init__(parent if isinstance(parent, QWidget) else None)
+        self._stack = stack
+        self._duration_ms = max(600, duration_ms)
         self._remaining_ms = self._duration_ms
+        self._paused = False
+        self._dismissing = False
+        self.setObjectName("AppToastShell")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(340)
+        self.setMinimumHeight(68)
+        self.setVisible(False)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self.content = QFrame()
-        self.content.setObjectName("ToastContent")
-        content_layout = QHBoxLayout(self.content)
-        content_layout.setContentsMargins(12, 9, 12, 9)
-        self.label = QLabel("")
-        self.label.setObjectName("ToastText")
-        self.label.setWordWrap(True)
-        content_layout.addWidget(self.label)
-        shadow = QGraphicsDropShadowEffect(self.content)
-        shadow.setBlurRadius(18)
-        shadow.setOffset(0, 5)
-        shadow.setColor(QColor(15, 23, 42, 42))
-        self.content.setGraphicsEffect(shadow)
-        self.progress_frame = QFrame()
-        self.progress_frame.setObjectName("ToastProgressFrame")
-        progress_layout = QVBoxLayout(self.progress_frame)
-        progress_layout.setContentsMargins(3, 2, 3, 2)
+        self._opacity = QGraphicsOpacityEffect(self)
+        self._opacity.setOpacity(0.0)
+        self.setGraphicsEffect(self._opacity)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.card = QFrame()
+        self.card.setObjectName("AppToastCard")
+        self.card.setProperty("tone", tone)
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(14, 12, 8, 10)
+        row.setSpacing(10)
+        tokens = theme_tokens(current_theme_name())
+        icon_kind = (
+            "error"
+            if tone in {"error", "warning"}
+            else "success"
+            if tone == "success"
+            else "info"
+        )
+        icon_color = (
+            tokens.danger
+            if tone in {"error", "warning"}
+            else tokens.success
+            if tone == "success"
+            else tokens.primary
+        )
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setPixmap(_status_icon_pixmap(icon_color, icon_kind, 20))
+        row.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignTop)
+
+        text_column = QVBoxLayout()
+        text_column.setContentsMargins(0, 0, 0, 0)
+        text_column.setSpacing(2)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("AppToastTitle")
+        if not title:
+            self.title_label.setVisible(False)
+        self.body_label = QLabel(body)
+        self.body_label.setObjectName("AppToastBody")
+        self.body_label.setWordWrap(True)
+        text_column.addWidget(self.title_label)
+        text_column.addWidget(self.body_label)
+        row.addLayout(text_column, 1)
+
+        self.close_button = QPushButton("✕")
+        self.close_button.setObjectName("AppToastClose")
+        self.close_button.setFixedSize(22, 22)
+        self.close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_button.setToolTip("关闭")
+        self.close_button.clicked.connect(self.dismiss)
+        row.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
+        card_layout.addLayout(row)
+
         self.progress = QProgressBar()
-        self.progress.setObjectName("ToastProgress")
+        self.progress.setObjectName("AppToastProgress")
+        self.progress.setProperty("tone", tone)
         self.progress.setTextVisible(False)
+        self.progress.setRange(0, self._duration_ms)
+        self.progress.setValue(self._duration_ms)
         self.progress.setInvertedAppearance(True)
-        progress_layout.addWidget(self.progress)
-        # Keep the countdown state for timing and tests without rendering it as a progress bar.
-        self.progress_frame.setVisible(False)
-        layout.addWidget(self.content)
-        layout.addWidget(self.progress_frame)
+        progress_row = QHBoxLayout()
+        progress_row.setContentsMargins(8, 0, 8, 0)
+        progress_row.setSpacing(0)
+        progress_row.addWidget(self.progress)
+        card_layout.addLayout(progress_row)
+
+        # 单层 QGraphicsOpacityEffect 即可；嵌套 shadow 会触发
+        # "one painter at a time" / Painter not active 冲突
+
+        outer.addWidget(self.card)
+
         self._timer = QTimer(self)
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._advance)
+
         self._slide = QPropertyAnimation(self, b"pos", self)
-        self._slide.setDuration(180)
+        self._slide.setDuration(240)
         self._slide.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade = QPropertyAnimation(self._opacity, b"opacity", self)
+        self._fade.setDuration(240)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def start_at(self, target: QPoint) -> None:
+        """Position off-screen, then slide in and fade in from the right."""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        self.adjustSize()
+        start = QPoint(parent.width() + 24, target.y())
+        self.move(start)
+        self.raise_()
+        self.show()
+        self._opacity.setOpacity(0.0)
+        self._slide.stop()
+        self._slide.setStartValue(self.pos())
+        self._slide.setEndValue(target)
+        self._slide.start()
+        self._fade.stop()
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+        self._timer.start()
+
+    def _advance(self) -> None:
+        if self._paused or self._dismissing:
+            return
+        self._remaining_ms = max(0, self._remaining_ms - self._timer.interval())
+        self.progress.setValue(self._remaining_ms)
+        if self._remaining_ms == 0:
+            self.dismiss()
+
+    def dismiss(self) -> None:
+        """Slide out to the right and fade, then hand back to the stack."""
+        if self._dismissing:
+            return
+        self._dismissing = True
+        self._timer.stop()
+        self._slide.stop()
+        self._fade.stop()
+        parent = self.parentWidget()
+        target = QPoint(parent.width() + 24, self.y()) if parent is not None else self.pos()
+        self._slide.setDuration(200)
+        self._slide.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._slide.setStartValue(self.pos())
+        self._slide.setEndValue(target)
+        self._fade.setDuration(200)
+        self._fade.setStartValue(self._opacity.opacity())
+        self._fade.setEndValue(0.0)
+        self._slide.finished.connect(self._on_dismissed)
+        self._fade.finished.connect(self._on_dismissed)
+        self._slide.start()
+        self._fade.start()
+
+    def _on_dismissed(self) -> None:
+        self._slide.finished.disconnect(self._on_dismissed)
+        self._fade.finished.disconnect(self._on_dismissed)
+        self._stack._remove(self)
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001, N802
+        self._paused = True
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001, N802
+        self._paused = False
+        super().leaveEvent(event)
+
+
+class ToastStack(QObject):
+    """Top-right stacked toast manager anchored to a parent window.
+
+    New toasts appear below existing ones with a fixed gap; the stack
+    reflows remaining toasts when one is dismissed.  The stack keeps the
+    old ``show_message`` API for generic feedback and adds
+    ``show_error`` for the red title/body style.
+    """
+
+    _TOP = 80
+    _RIGHT = 24
+    _GAP = 12
+    _WIDTH = 340
+    _MAX_VISIBLE = 5
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._toasts: list[AppToast] = []
 
     def show_message(
         self,
@@ -488,65 +873,59 @@ class ToastMessage(QFrame):
         duration_ms: int = 2800,
         on_activated: Callable[[], None] | None = None,
         *,
-        tone: str = "default",
+        tone: str = "auto",
     ) -> None:
-        parent = self.parentWidget()
+        del on_activated
+        if tone in {"", "auto", "default"}:
+            tone = _classify_toast_tone(message)
+        self._push(title="", body=message, tone=tone, duration_ms=duration_ms)
+
+    def show_error(self, title: str, message: str, duration_ms: int = 3500) -> None:
+        self._push(title=title, body=message, tone="error", duration_ms=duration_ms)
+
+    def _push(
+        self,
+        *,
+        title: str,
+        body: str,
+        tone: str,
+        duration_ms: int,
+    ) -> None:
+        parent = self.parent()
         if parent is None:
             return
-        is_warning = tone == "warning"
-        self.setProperty("tone", tone)
-        self.content.setProperty("tone", tone)
-        self.setMinimumWidth(420 if is_warning else 280)
-        self.setMaximumWidth(500 if is_warning else 360)
-        self.content.setMinimumHeight(68 if is_warning else 0)
-        self.content.style().unpolish(self.content)
-        self.content.style().polish(self.content)
-        self.label.setText(message)
-        self.setAccessibleDescription(message)
-        self._on_activated = on_activated
-        self.setCursor(
-            Qt.CursorShape.PointingHandCursor
-            if on_activated is not None
-            else Qt.CursorShape.ArrowCursor
+        if len(self._toasts) >= self._MAX_VISIBLE:
+            oldest = self._toasts.pop(0)
+            oldest.dismiss()
+        toast = AppToast(
+            self,
+            title=title,
+            body=body,
+            tone=tone,
+            duration_ms=duration_ms,
         )
-        self._duration_ms = max(600, duration_ms)
-        self._remaining_ms = self._duration_ms
-        self.progress.setRange(0, self._duration_ms)
-        self.progress.setValue(self._remaining_ms)
-        self.adjustSize()
-        target_x = max(12, parent.width() - self.width() - 16)
-        target_y = 52
-        self.move(parent.width() + 8, target_y)
-        self.raise_()
-        self.show()
-        self._slide.stop()
-        self._slide.setStartValue(self.pos())
-        self._slide.setEndValue(QPoint(target_x, target_y))
-        self._slide.start()
-        self._timer.start()
+        y = self._TOP
+        for existing in self._toasts:
+            y += existing.height() + self._GAP
+        target = QPoint(max(12, parent.width() - self._WIDTH - self._RIGHT), y)
+        self._toasts.append(toast)
+        toast.start_at(target)
 
-    def _advance(self) -> None:
-        self._remaining_ms = max(0, self._remaining_ms - self._timer.interval())
-        self.progress.setValue(self._remaining_ms)
-        if self._remaining_ms == 0:
-            self._dismiss()
+    def _remove(self, toast: AppToast) -> None:
+        if toast in self._toasts:
+            self._toasts.remove(toast)
+        self._relayout()
+        toast.deleteLater()
 
-    def _dismiss(self) -> None:
-        self._timer.stop()
-        self._slide.stop()
-        self.hide()
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
-        if event.button() == Qt.MouseButton.LeftButton and self._on_activated:
-            callback = self._on_activated
-            self._on_activated = None
-            self._dismiss()
-            self.activated.emit()
-            callback()
-            event.accept()
+    def _relayout(self) -> None:
+        parent = self.parent()
+        if parent is None:
             return
-        super().mouseReleaseEvent(event)
-
+        y = self._TOP
+        for toast in self._toasts:
+            toast._slide.stop()
+            toast.move(max(12, parent.width() - self._WIDTH - self._RIGHT), y)
+            y += toast.height() + self._GAP
 
 class CompletionNotification(QFrame):
     """Queued, clickable AI completion notice with a testable countdown."""

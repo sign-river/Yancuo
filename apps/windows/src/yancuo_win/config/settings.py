@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,9 @@ from pydantic_settings import (
     SettingsConfigDict,
     TomlConfigSettingsSource,
 )
+
+
+MAX_PREFERENCES_BYTES = 1024 * 1024
 
 
 class ApplicationConfig(BaseModel):
@@ -106,26 +110,21 @@ class PrivacyConfig(BaseModel):
 class CloudRepositoryConfig(BaseModel):
     owner: str = ""
     name: str = "graduate-mistake-book-data"
-    branch: str = "sync"
     require_private: bool = True
 
 
-class CloudProviderEndpointConfig(BaseModel):
-    base_url: str = ""
-    auth_method: str = "token"
-    credential_key: str = ""
-
-
-class CloudBaseConfig(CloudProviderEndpointConfig):
+class CloudBaseConfig(BaseModel):
     """CloudBase gateway connection details; tokens stay in system credentials."""
 
+    auth_method: str = "token"
+    credential_key: str = ""
     environment_id: str = ""
     gateway_url: str = ""
 
 
 class CloudConfig(BaseModel):
     enabled: bool = False
-    default_provider: str = "gitlink"
+    default_provider: str = "cloudbase"
     local_root: str = ""
     sync_mode: str = "manual"
     auto_backup: bool = True
@@ -136,26 +135,22 @@ class CloudConfig(BaseModel):
     upload_on_exit: bool = False
     download_on_start: bool = False
     repository: CloudRepositoryConfig = Field(default_factory=CloudRepositoryConfig)
-    gitlink: CloudProviderEndpointConfig = Field(
-        default_factory=lambda: CloudProviderEndpointConfig(
-            base_url="https://www.gitlink.org.cn",
-            auth_method="token",
-            credential_key="yancuo_gitlink_token",
-        )
-    )
-    github: CloudProviderEndpointConfig = Field(
-        default_factory=lambda: CloudProviderEndpointConfig(
-            base_url="https://api.github.com",
-            auth_method="token",
-            credential_key="yancuo_github_token",
-        )
-    )
     cloudbase: CloudBaseConfig = Field(
         default_factory=lambda: CloudBaseConfig(
             auth_method="gateway_token",
             credential_key="yancuo_cloudbase_gateway_token",
         )
     )
+
+    @field_validator("default_provider", mode="before")
+    @classmethod
+    def validate_provider(cls, value: object) -> str:
+        provider = str(value or "cloudbase").strip()
+        if provider in {"github", "gitlink"}:
+            return "cloudbase"
+        if provider not in {"local_folder", "cloudbase"}:
+            raise ValueError("云端提供商必须是 cloudbase 或 local_folder")
+        return provider
 
 
 class SyncConfig(BaseModel):
@@ -290,18 +285,61 @@ def load_settings(config_file: Path | None = None) -> AppSettings:
         raise ConfigError(f"配置加载失败：{exc}") from exc
 
 
+def _load_preferences(path: Path) -> dict[str, Any]:
+    path = Path(path)
+    if path.is_symlink():
+        raise ConfigError(f"本地偏好设置不能是符号链接：{path}")
+    if not path.is_file():
+        return {}
+    try:
+        size = path.stat().st_size
+        if size <= 0 or size > MAX_PREFERENCES_BYTES:
+            raise ConfigError(f"本地偏好设置为空或超过 1 MiB：{path}")
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_PREFERENCES_BYTES + 1)
+        if len(raw) != size or len(raw) > MAX_PREFERENCES_BYTES:
+            raise ConfigError(f"本地偏好设置读取期间发生变化或过大：{path}")
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"本地偏好设置无法读取：{path}") from exc
+    if not isinstance(payload, dict):
+        raise ConfigError(f"本地偏好设置格式无效：{path}")
+    return payload
+
+
+def _write_preferences(path: Path, payload: dict[str, Any]) -> None:
+    path = Path(path)
+    if path.is_symlink():
+        raise ConfigError(f"本地偏好设置不能是符号链接：{path}")
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    if len(encoded) > MAX_PREFERENCES_BYTES:
+        raise ConfigError("本地偏好设置超过 1 MiB，拒绝写入")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".preferences-", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.is_symlink():
+            raise ConfigError(f"本地偏好设置不能是符号链接：{path}")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSettings:
     """Apply non-sensitive per-user overrides stored beside the local database."""
 
     path = Path(data_root) / "preferences.json"
-    if not path.is_file():
+    payload = _load_preferences(path)
+    if not payload:
         return settings
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ConfigError(f"本地偏好设置无法读取：{path}") from exc
-    if not isinstance(payload, dict):
-        raise ConfigError(f"本地偏好设置格式无效：{path}")
 
     application = payload.get("application")
     if isinstance(application, dict):
@@ -339,7 +377,9 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
     if isinstance(cloud, dict):
         provider = str(cloud.get("default_provider") or "").strip()
         if provider:
-            if provider not in {"local_folder", "gitlink", "github", "cloudbase"}:
+            if provider in {"gitlink", "github"}:
+                provider = "cloudbase"
+            if provider not in {"local_folder", "cloudbase"}:
                 raise ConfigError(f"本地偏好设置包含未知云端提供商：{provider}")
             settings.cloud.default_provider = provider
         repository = cloud.get("repository")
@@ -348,9 +388,6 @@ def apply_user_preferences(settings: AppSettings, data_root: Path) -> AppSetting
             name = str(repository.get("name") or "").strip()
             if name:
                 settings.cloud.repository.name = name
-            branch = str(repository.get("branch") or "").strip()
-            if branch:
-                settings.cloud.repository.branch = branch
         settings.cloud.local_root = str(cloud.get("local_root") or "").strip()
         cloudbase = cloud.get("cloudbase")
         if isinstance(cloudbase, dict):
@@ -384,25 +421,13 @@ def save_ai_preferences(
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "preferences.json"
-    payload: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                payload = existing
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    payload = _load_preferences(path)
     payload["ai"] = {
         "enabled": enabled,
         "default_provider": provider,
         "default_vision_model": model,
     }
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_preferences(path, payload)
     return path
 
 
@@ -413,7 +438,6 @@ def save_cloud_preferences(
     owner: str,
     repository: str,
     local_root: str,
-    branch: str = "",
     cloudbase_environment_id: str = "",
     cloudbase_gateway_url: str = "",
     enabled: bool = True,
@@ -421,28 +445,20 @@ def save_cloud_preferences(
     """Persist non-sensitive cloud fields without writing access tokens."""
 
     provider = provider.strip()
-    if provider not in {"local_folder", "gitlink", "github", "cloudbase"}:
+    if provider not in {"local_folder", "cloudbase"}:
         raise ConfigError(f"未知云端提供商：{provider}")
     repository = repository.strip() or "graduate-mistake-book-data"
 
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "preferences.json"
-    payload: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                payload = existing
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    payload = _load_preferences(path)
     payload["cloud"] = {
         "enabled": enabled,
         "default_provider": provider,
         "repository": {
             "owner": owner.strip(),
             "name": repository,
-            "branch": branch.strip() or "sync",
         },
         "local_root": local_root.strip(),
     }
@@ -451,12 +467,7 @@ def save_cloud_preferences(
             "environment_id": cloudbase_environment_id.strip(),
             "gateway_url": cloudbase_gateway_url.strip(),
         }
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_preferences(path, payload)
     return path
 
 
@@ -471,25 +482,13 @@ def save_theme_preference(data_root: Path, theme: str) -> Path:
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "preferences.json"
-    payload: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                payload = existing
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    payload = _load_preferences(path)
     application = payload.get("application")
     if not isinstance(application, dict):
         application = {}
     application["theme"] = normalized
     payload["application"] = application
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_preferences(path, payload)
     return path
 
 
@@ -500,25 +499,13 @@ def save_preview_zoom_preference(data_root: Path, scale: float) -> Path:
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "preferences.json"
-    payload: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                payload = existing
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    payload = _load_preferences(path)
     application = payload.get("application")
     if not isinstance(application, dict):
         application = {}
     application["preview_zoom_scale"] = normalized
     payload["application"] = application
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _write_preferences(path, payload)
     return path
 
 

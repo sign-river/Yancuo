@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 import tempfile
 
 import pytest
@@ -37,3 +38,38 @@ def test_isolated_data_root_is_marked_and_removed() -> None:
 def test_summary_rejects_empty_samples(samples) -> None:
     with pytest.raises(ValueError):
         performance_baseline.summarize(samples)
+
+
+def test_diagnostic_summary_reports_numeric_range() -> None:
+    result = performance_baseline._diagnostic_summary([71.387, 68.852, 123.98])
+
+    assert result == {
+        "samples": [68.852, 71.387, 123.98],
+        "median": 71.387,
+        "min": 68.852,
+        "max": 123.98,
+    }
+
+
+def test_ui203_mode_requires_ten_thousand_notes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["performance_baseline.py", "--ui203", "--notes", "9999"],
+    )
+
+    with pytest.raises(SystemExit):
+        performance_baseline._parse_args()
+
+
+def test_ui203_mode_accepts_target_sample(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["performance_baseline.py", "--ui203", "--notes", "10000"],
+    )
+
+    args = performance_baseline._parse_args()
+
+    assert args.ui203 is True
+    assert args.notes == 10_000

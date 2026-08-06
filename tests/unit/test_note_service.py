@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import yancuo_win.application.unified_search_service as unified_search_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.note_service import NoteService
 from yancuo_win.application.services import AppServices
@@ -59,6 +60,33 @@ def test_note_documents_keep_independent_fields_and_ordered_blocks(note_bundle) 
     assert not hasattr(loaded, "review_count")
 
 
+def test_note_list_projection_uses_summary_or_first_block_without_relationships(
+    note_bundle,
+) -> None:
+    _runtime, _app, notes, subject, chapter = note_bundle
+    summarized = notes.create_note(
+        title="摘要笔记",
+        summary="列表摘要",
+        subject_id=subject.id,
+        chapter_id=chapter.id,
+        status="active",
+    )
+    block_only = notes.create_note(title="公式笔记", status="active")
+    notes.add_block(
+        block_only.id,
+        block_type="formula",
+        content_latex=r"x^2+1",
+    )
+
+    rows = notes.list_note_summaries(status="active")
+    by_id = {row.id: row for row in rows}
+
+    assert by_id[summarized.id].summary == "列表摘要"
+    assert by_id[block_only.id].summary == r"x^2+1"
+    assert by_id[summarized.id].subject_id == subject.id
+    assert not hasattr(by_id[summarized.id], "blocks")
+
+
 def test_note_tags_and_lifecycle_protect_trashed_documents(note_bundle) -> None:
     _runtime, app, notes, _subject, _chapter = note_bundle
     tag = app.create_tag("泰勒展开")
@@ -92,6 +120,30 @@ def test_unified_note_search_tracks_blocks_tags_and_collections(note_bundle) -> 
     search = UnifiedSearchIndexService(runtime)
     assert [row["entity_id"] for row in search.search_notes("无穷小", statuses=("inbox",))] == [note.id]
     assert [row["entity_id"] for row in search.search_notes("冲刺", statuses=("inbox",))] == [note.id]
+
+
+def test_unified_note_search_rebuilds_in_bounded_batches(
+    note_bundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, _app, notes, _subject, _chapter = note_bundle
+    for index in range(5):
+        notes.create_note(title=f"分批索引 {index}")
+    inserted_batch_sizes: list[int] = []
+    original_insert = UnifiedSearchIndexService._insert_documents
+
+    def record_insert(session, documents):
+        inserted_batch_sizes.append(len(documents))
+        original_insert(session, documents)
+
+    monkeypatch.setattr(unified_search_module, "_NOTE_REBUILD_BATCH_SIZE", 2)
+    monkeypatch.setattr(
+        UnifiedSearchIndexService, "_insert_documents", staticmethod(record_insert)
+    )
+
+    search = UnifiedSearchIndexService(runtime)
+    assert search.rebuild_notes() == 5
+    assert inserted_batch_sizes == [2, 2, 1]
+    assert len(search.search_notes("分批索引", statuses=("inbox",))) == 5
 
 
 def test_delete_note_block_compacts_the_remaining_order(note_bundle) -> None:

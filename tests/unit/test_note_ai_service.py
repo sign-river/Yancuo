@@ -36,7 +36,7 @@ def test_mock_image_becomes_note_blocks_without_problem_answer_fields(note_ai) -
     assert all(not hasattr(block, "correct_answer") for block in draft.blocks)
 
 
-def test_confirmed_draft_stores_immutable_source_asset(note_ai) -> None:
+def test_confirmed_draft_discards_review_source_asset(note_ai) -> None:
     service, image = note_ai
     draft = service.extract_from_image(image)
 
@@ -48,8 +48,7 @@ def test_confirmed_draft_stores_immutable_source_asset(note_ai) -> None:
     loaded = service.notes.get_note(note.id)
     assert loaded is not None
     assert loaded.title == "我的公式笔记"
-    assert loaded.assets
-    assert loaded.assets[0].is_immutable is True
+    assert loaded.assets == []
     assert loaded.blocks
 
 
@@ -78,7 +77,7 @@ def test_confirmed_draft_can_use_user_edited_blocks(note_ai) -> None:
 
     assert [block.content_markdown for block in note.blocks] == ["用户确认后的概念"]
     assert note.blocks[0].block_type == "concept"
-    assert json.loads(note.blocks[0].source_region_json) == edited.source_region
+    assert json.loads(note.blocks[0].source_region_json) == {}
 
 
 def test_note_ai_normalizes_block_source_regions(note_ai) -> None:

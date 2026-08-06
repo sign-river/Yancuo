@@ -17,9 +17,12 @@ from yancuo_win.application.note_intake_service import (
 )
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
+from yancuo_win.data.ids import new_id
+from yancuo_win.data.models import Asset
 from yancuo_win.domain.identity import SCHEMA_VERSION
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.import_export.ebpack import EbpackService
+import yancuo_win.import_export.ebpack as ebpack_module
 
 
 @pytest.fixture()
@@ -37,6 +40,21 @@ def test_ebpack_roundtrip_consistent(
     img = tmp_path / "p.jpg"
     img.write_bytes(b"\xff\xd8\xff" + b"ebpack-bytes")
     pid = services.import_images([img])["created"][0]
+    stored_figure = services.store.store_copy(img, role="derived_figure")
+    with services.session() as session:
+        session.add(
+            Asset(
+                id=new_id("asset"),
+                problem_id=pid,
+                role="derived_figure",
+                sha256=stored_figure.sha256,
+                relative_path=stored_figure.relative_path,
+                mime_type=stored_figure.mime_type,
+                size_bytes=stored_figure.size_bytes,
+                is_immutable=True,
+            )
+        )
+        session.commit()
     services.update_problem(pid, {"question_markdown": "ebpack题目内容"})
     note_img = tmp_path / "note.jpg"
     note_img.write_bytes(b"\xff\xd8\xff" + b"ebpack-note-draft")
@@ -68,14 +86,13 @@ def test_ebpack_roundtrip_consistent(
     assert manifest["format"] == "graduate-mistake-book-ebpack"
     assert manifest["format_version"] == 1
     assert manifest["schema_version"] == SCHEMA_VERSION
-    assert manifest["asset_count"] == 2
+    # The formal crop is archived; both source originals stay out of backups.
+    assert manifest["asset_count"] == 1
     assert manifest["encrypted"] is False
     assert manifest["authoritative_payload"] == "database/snapshot.sqlite"
     portable_snapshot = tmp_path / "portable-snapshot.sqlite"
     with zipfile.ZipFile(pack, "r") as archive:
-        portable_snapshot.write_bytes(
-            archive.read("database/snapshot.sqlite")
-        )
+        portable_snapshot.write_bytes(archive.read("database/snapshot.sqlite"))
     with closing(sqlite3.connect(portable_snapshot)) as connection:
         portable_tables = {
             row[0]
@@ -123,9 +140,108 @@ def test_ebpack_roundtrip_consistent(
     restored_draft = NoteIntakeService(restored_rt).get_session(draft.id)
     assert restored_draft is not None
     assert restored_draft.groups[0].blocks[0].content_markdown == "包内保留的概念块"
-    assert NoteIntakeService(restored_rt).resolve_source_path(
-        restored_draft.assets[0]
-    ).is_file()
+    assert not (
+        NoteIntakeService(restored_rt)
+        .resolve_source_path(restored_draft.assets[0])
+        .is_file()
+    )
+    restored_figure = next(asset for asset in got.assets if asset.role == "derived_figure")
+    assert (restored_rt.paths.asset_dir / restored_figure.relative_path).is_file()
+
+
+def test_ebpack_export_failure_preserves_existing_destination(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = AppServices(runtime)
+    services.create_problem(title="atomic export")
+    destination = tmp_path / "existing.ebpack"
+    destination.write_bytes(b"previous-backup")
+
+    def fail_write(
+        self, filename, arcname=None, compress_type=None, compresslevel=None
+    ):
+        del self, filename, arcname, compress_type, compresslevel
+        raise OSError("simulated archive write failure")
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", fail_write)
+
+    with pytest.raises(OSError, match="simulated"):
+        EbpackService(runtime).export_ebpack(destination)
+
+    assert destination.read_bytes() == b"previous-backup"
+    assert list(tmp_path.glob(".existing.ebpack.*.tmp")) == []
+    assert list(runtime.paths.cache_dir.glob("ebpack-export-*")) == []
+
+
+def test_ebpack_export_includes_committed_wal_changes(runtime, tmp_path: Path) -> None:
+    services = AppServices(runtime)
+    problem = services.create_problem(title="before WAL")
+    writer = sqlite3.connect(runtime.paths.database)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "UPDATE problems SET title = ? WHERE id = ?",
+            ("committed in WAL", problem.id),
+        )
+        writer.commit()
+        assert runtime.paths.database.with_name("error_book.db-wal").is_file()
+
+        pack = EbpackService(runtime).export_ebpack(tmp_path / "wal.ebpack")
+        snapshot = tmp_path / "wal-snapshot.sqlite"
+        with zipfile.ZipFile(pack, "r") as archive:
+            snapshot.write_bytes(archive.read("database/snapshot.sqlite"))
+        with closing(sqlite3.connect(snapshot)) as connection:
+            title = connection.execute(
+                "SELECT title FROM problems WHERE id = ?", (problem.id,)
+            ).fetchone()[0]
+    finally:
+        writer.close()
+
+    assert title == "committed in WAL"
+
+
+def test_ebpack_verify_does_not_delete_legacy_named_cache_directory(
+    runtime, tmp_path: Path
+) -> None:
+    AppServices(runtime).create_problem(title="verify isolation")
+    service = EbpackService(runtime)
+    pack = service.export_ebpack(tmp_path / "verify-isolation.ebpack")
+    legacy = runtime.paths.cache_dir / f"ebpack-verify-{pack.stem}"
+    legacy.mkdir(parents=True)
+    sentinel = legacy / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    service.verify_ebpack(pack)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert list(runtime.paths.cache_dir.glob("ebpack-verify-*")) == [legacy]
+
+
+def test_ebpack_restore_does_not_delete_legacy_named_work_directories(
+    runtime, tmp_path: Path
+) -> None:
+    AppServices(runtime).create_problem(title="restore isolation")
+    service = EbpackService(runtime)
+    pack = service.export_ebpack(tmp_path / "restore-isolation.ebpack")
+    target = tmp_path / "restore-isolation"
+    target.mkdir()
+    legacy_directories = [
+        target / ".ebpack_restore_tmp",
+        target / ".ebpack_final_staging",
+        target / ".ebpack_previous",
+    ]
+    for directory in legacy_directories:
+        directory.mkdir()
+        (directory / "sentinel.txt").write_text("keep", encoding="utf-8")
+
+    service.restore_ebpack(pack, target)
+
+    assert all(
+        (directory / "sentinel.txt").read_text(encoding="utf-8") == "keep"
+        for directory in legacy_directories
+    )
+    assert list(target.glob(".ebpack-*-*")) == []
 
 
 def test_corrupt_ebpack_rejected(runtime, tmp_path: Path) -> None:
@@ -149,6 +265,33 @@ def test_corrupt_ebpack_rejected(runtime, tmp_path: Path) -> None:
         eb.restore_ebpack(bad, tmp_path / "should_not")
 
 
+def test_ebpack_rejects_oversized_manifest_before_json_decode(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services = AppServices(runtime)
+    services.create_problem(title="metadata budget")
+    eb = EbpackService(runtime)
+    pack = eb.export_ebpack(tmp_path / "metadata-budget.ebpack")
+    monkeypatch.setattr(ebpack_module, "MAX_EBPACK_METADATA_BYTES", 4)
+
+    with pytest.raises(DomainError, match="manifest.json.*过大"):
+        eb.verify_ebpack(pack)
+
+
+def test_ebpack_rejects_oversized_extracted_checksum_table(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "extracted"
+    root.mkdir()
+    (root / "checksums.sha256").write_bytes(b"12345")
+    monkeypatch.setattr(ebpack_module, "MAX_EBPACK_METADATA_BYTES", 4)
+
+    with pytest.raises(
+        DomainError, match="checksums.sha256.*过大|过大.*checksums.sha256"
+    ):
+        EbpackService(runtime)._verify_checksums(root)
+
+
 def test_incomplete_checksum_table_is_rejected(runtime, tmp_path: Path) -> None:
     services = AppServices(runtime)
     eb = EbpackService(runtime)
@@ -156,9 +299,10 @@ def test_incomplete_checksum_table_is_rejected(runtime, tmp_path: Path) -> None:
     pack = eb.export_ebpack(tmp_path / "checksums.ebpack")
     incomplete = tmp_path / "checksums-incomplete.ebpack"
 
-    with zipfile.ZipFile(pack, "r") as source, zipfile.ZipFile(
-        incomplete, "w"
-    ) as target:
+    with (
+        zipfile.ZipFile(pack, "r") as source,
+        zipfile.ZipFile(incomplete, "w") as target,
+    ):
         for item in source.infolist():
             payload = source.read(item.filename)
             if item.filename == "checksums.sha256":
@@ -169,7 +313,9 @@ def test_incomplete_checksum_table_is_rejected(runtime, tmp_path: Path) -> None:
         eb.verify_ebpack(incomplete)
 
 
-def test_schema_too_new_rejected(runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_schema_too_new_rejected(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     services = AppServices(runtime)
     eb = EbpackService(runtime)
     services.create_problem(title="y")

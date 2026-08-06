@@ -32,6 +32,20 @@ class TransferOperation(StrEnum):
         }[self]
 
 
+def infer_transfer_operation(title: str) -> TransferOperation:
+    """Classify legacy result call sites while they share one result surface."""
+
+    if any(token in title for token in ("云", "远端", "资料")):
+        return TransferOperation.CLOUD
+    if any(token in title for token in ("同步", "推送", "拉取", "合并")):
+        return TransferOperation.SYNC
+    if "恢复" in title:
+        return TransferOperation.RESTORE
+    if any(token in title for token in ("导出", "备份")):
+        return TransferOperation.EXPORT
+    return TransferOperation.IMPORT
+
+
 class TransferResultDialog(OperationResultDialog):
     """Operation result with an explicit detail-copy action for transfer workflows."""
 
@@ -55,7 +69,10 @@ class TransferResultDialog(OperationResultDialog):
             parent=parent,
         )
         self.operation = operation
-        self._previous_focus = parent.focusWidget() if parent is not None else None
+        focus = parent.focusWidget() if parent is not None else None
+        self._previous_focus = (
+            focus if focus is not None and focus.isVisible() and focus.isEnabled() else None
+        )
         self.setObjectName(f"{operation.label}结果窗口")
         self.setAccessibleName(f"{operation.label}操作结果：{title}")
         self.summary_label.setAccessibleName(f"{operation.label}操作结果摘要")
@@ -86,8 +103,16 @@ class TransferResultDialog(OperationResultDialog):
         self.copy_button.setText("已复制详情")
 
     def _restore_previous_focus(self, _result: int) -> None:
-        if self._previous_focus is not None and self._previous_focus.isVisible():
+        if (
+            self._previous_focus is not None
+            and self._previous_focus.isVisible()
+            and self._previous_focus.isEnabled()
+        ):
             QTimer.singleShot(0, self._previous_focus.setFocus)
+            return
+        parent = self.parentWidget()
+        if parent is not None and parent.isVisible():
+            QTimer.singleShot(0, parent.focusNextChild)
 
 
 def show_transfer_result(

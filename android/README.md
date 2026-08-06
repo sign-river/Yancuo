@@ -21,6 +21,8 @@ Kotlin + Jetpack Compose 客户端，定位：**移动采集与复习**。
 - 运行配置选择 `:app`，点击 Run。
 - 单元测试：`./gradlew :app:testDebugUnitTest`（Windows：`gradlew.bat :app:testDebugUnitTest`）。
 
+2026-08-03 已验证 Windows 环境：Android Studio JBR 21、Gradle 8.2、AGP 8.2.2、Kotlin 1.9.22、SDK 34，`testDebugUnitTest` 为 `5 passed`。命令行出现 SDK XML v4 兼容警告但不影响构建；升级 Android command-line tools 后可消除该警告。
+
 ## 阶段 I 范围
 
 | 已实现（Android） | 未实现 / 留给 Windows 或后续 |
@@ -37,4 +39,4 @@ Android 新建本地库当前声明题目核心 `schema_version=7`，跨端字�
 
 ## 云端能力边界
 
-阶段 I **不**实现从 GitLink/GitHub 下载 `.ebpack`，也不实现云端增量同步。设置页保存的 Token 仅用于凭据留存（本地加密），不会触发网络同步；后续实现需另行补齐下载、校验、恢复和冲突处理流程。
+阶段 I **不**实现从 CloudBase 下载 `.ebpack`，也不实现云端增量同步。设置页保存的网关 Token 仅用于凭据留存（本地加密），不会触发网络同步；后续实现需另行补齐下载、校验、恢复和冲突处理流程。

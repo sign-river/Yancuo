@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 import yancuo_win.ui.review_page as review_page_module
 import yancuo_win.ui.today_review as today_review_module
@@ -119,6 +120,42 @@ class _NotesStub:
         return self.note if note_id == self.note.id else None
 
 
+def test_home_has_no_empty_gap_between_overview_and_action_cards(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    page = review_page_module.ReviewPage(_ServicesStub())
+
+    # 选择复习计划卡片已移至子页，home 不再保留空的 center_row 伸展行
+    assert page.plan_select_card.parent() is page.plan_select_page
+    home_items = [
+        page.home_layout.itemAt(index)
+        for index in range(page.home_layout.count())
+    ]
+    # header / overview / 操作卡片网格 / 底部伸展，共 4 项；之前多了一个空的中间行
+    assert len(home_items) == 4
+    assert home_items[0].widget() is not None  # PageHeader
+    assert home_items[1].widget() is page.review_overview
+    assert home_items[2].layout() is not None  # action grid
+    assert home_items[3].spacerItem() is not None
+
+
+def test_review_page_does_not_show_progress_during_construction(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    visibility_requests: list[tuple[QLabel, bool]] = []
+    original_set_visible = QLabel.setVisible
+
+    def track_visibility(label: QLabel, visible: bool) -> None:
+        visibility_requests.append((label, visible))
+        original_set_visible(label, visible)
+
+    monkeypatch.setattr(QLabel, "setVisible", track_visibility)
+    page = review_page_module.ReviewPage(_ServicesStub())
+
+    assert (page.progress_label, True) not in visibility_requests
+    page.close()
+
+
 def test_answer_control_lives_in_grade_card_and_unlocks_grading(
     monkeypatch,
 ) -> None:
@@ -181,6 +218,45 @@ def test_selecting_a_plan_only_updates_preview_until_start(monkeypatch) -> None:
     page.close()
 
 
+def test_selected_plan_exposes_read_only_full_history(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    services = _ServicesStub()
+    session = SimpleNamespace(
+        id="study-history",
+        started_at=datetime(2026, 8, 1, 10, 30, tzinfo=timezone.utc),
+        status="completed",
+        problem_count=1,
+    )
+    services.review_plan_study_sessions = lambda _plan_id: [session]
+    services.study_session_records = lambda _session_id: [
+        SimpleNamespace(grade=4)
+    ]
+    opened: list[tuple[str, list[object]]] = []
+
+    class _HistoryDialogStub:
+        def __init__(self, title, entries, _parent) -> None:
+            opened.append((title, entries))
+
+        def exec(self) -> None:
+            return None
+
+    monkeypatch.setattr(review_page_module, "ReviewHistoryDialog", _HistoryDialogStub)
+    page = review_page_module.ReviewPage(services)
+    page.plan_combo.setCurrentIndex(0)
+
+    assert page.plan_preview.item(0).text() == "复习交互测试"
+    assert "已完成" in page.plan_history.item(0).text()
+    assert page.open_history_button.isEnabled()
+    page._open_plan_history()
+
+    assert opened[0][0] == "测试计划"
+    assert opened[0][1][0].title == "已完成 · 1 题"
+    assert "4分 1题" in opened[0][1][0].details
+    assert page._study_session_id is None
+    page.close()
+
+
 def test_legacy_today_review_grade_uses_non_blocking_feedback(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(today_review_module, "MathContentView", _ReaderStub)
@@ -191,8 +267,8 @@ def test_legacy_today_review_grade_uses_non_blocking_feedback(monkeypatch) -> No
     app.processEvents()
 
     assert services.recorded == [("problem_review_ui", 3)]
-    assert not dialog.toast.isHidden()
-    assert "下次复习 2026-07-24" in dialog.toast.label.text()
+    assert dialog.toast._toasts
+    assert "下次复习 2026-07-24" in dialog.toast._toasts[-1].body_label.text()
     dialog.close()
 
 
@@ -233,6 +309,29 @@ def test_session_shortcut_hints_match_the_active_content_type(monkeypatch) -> No
     page.plan_combo.setCurrentIndex(0)
     page.start_session()
 
-    assert "Right 暂时跳过" in page.keyboard_hint.text()
+    assert "→ 暂时跳过" in page.keyboard_hint.text()
     assert page.keyboard_hint.accessibleDescription() == page.keyboard_hint.text()
+    page.close()
+
+
+def test_note_session_uses_the_same_accessible_shortcut_legend(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(review_page_module, "MathContentView", _ReaderStub)
+    note = SimpleNamespace(
+        id="note_shortcut_ui",
+        title="快捷键笔记",
+        status="active",
+        blocks=[],
+        tags=[],
+        summary="",
+    )
+    page = review_page_module.ReviewPage(
+        _NoteServicesStub(note), _NotesStub(note)
+    )
+    page.plan_combo.setCurrentIndex(0)
+    page.start_session()
+
+    assert page.keyboard_hint.text() == "快捷键：Enter 标记已阅读并继续。"
+    assert page.keyboard_hint.accessibleDescription() == page.keyboard_hint.text()
+    assert page.grade_card.isHidden()
     page.close()

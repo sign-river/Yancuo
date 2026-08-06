@@ -13,13 +13,14 @@ from PySide6.QtWidgets import (
 )
 
 from yancuo_win.application.services import AppServices
+from yancuo_win.application.question_content import content_blocks_with_images
 from yancuo_win.domain.review_rules import REVIEW_GRADES
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
     CardFrame,
     PageHeader,
-    ToastMessage,
+    ToastStack,
     default_button,
     primary_button,
 )
@@ -72,7 +73,7 @@ class TodayReviewDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
         layout.addWidget(buttons)
-        self.toast = ToastMessage(self)
+        self.toast = ToastStack(self)
         self._render()
 
     def _current(self):
@@ -102,6 +103,11 @@ class TodayReviewDialog(QDialog):
             "notes": p.notes,
             "problem_type": p.problem_type,
             "source_book": p.source_book,
+            "content_blocks": content_blocks_with_images(
+                p.question_content_json,
+                p.assets or (),
+                getattr(getattr(self.services, "store", None), "resolve", None),
+            ),
         }
         self.body.set_problem(
             fields,

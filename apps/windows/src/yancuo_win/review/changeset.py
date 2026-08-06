@@ -71,6 +71,7 @@ def snapshot_problem_fields(problem) -> dict[str, Any]:  # noqa: ANN001
         "title": problem.title,
         "question_markdown": problem.question_markdown,
         "question_latex": problem.question_latex,
+        "question_content_json": problem.question_content_json,
         "user_answer": problem.user_answer,
         "correct_answer": problem.correct_answer,
         "solution_markdown": problem.solution_markdown,

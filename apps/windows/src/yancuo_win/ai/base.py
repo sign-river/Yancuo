@@ -37,14 +37,42 @@ def normalize_content_blocks(value: Any) -> list[dict[str, Any]]:
     for raw in value[:100]:
         if not isinstance(raw, dict) or raw.get("type") not in {"text", "formula", "table", "figure"}:
             continue
-        block = {"type": raw["type"], "content": raw.get("content", ""), "source_region": normalize_region(raw.get("source_region"))}
+        block = {
+            "type": raw["type"],
+            "content": str(raw.get("content") or ""),
+            "source_region": normalize_region(raw.get("source_region")),
+        }
         if isinstance(raw.get("source_image_index"), int) and raw["source_image_index"] >= 0:
             block["source_image_index"] = raw["source_image_index"]
+        for asset_key in ("source_asset_id", "derived_asset_id"):
+            if isinstance(raw.get(asset_key), str) and raw[asset_key].strip():
+                block[asset_key] = raw[asset_key].strip()
         if block["type"] == "table":
             if not isinstance(raw.get("rows"), list) or not all(isinstance(row, list) for row in raw["rows"]):
                 continue
-            block["rows"] = raw["rows"]
-        if block["type"] == "figure" and not block["source_region"]:
+            rows: list[list[str | dict[str, Any]]] = []
+            for raw_row in raw["rows"][:100]:
+                row: list[str | dict[str, Any]] = []
+                for raw_cell in raw_row[:50]:
+                    if isinstance(raw_cell, dict):
+                        cell = {"content": str(raw_cell.get("content") or "")}
+                        for span in ("rowspan", "colspan"):
+                            try:
+                                value = int(raw_cell.get(span, 1))
+                            except (TypeError, ValueError):
+                                value = 1
+                            if value > 1:
+                                cell[span] = min(value, 100)
+                        row.append(cell)
+                    else:
+                        row.append(str(raw_cell or ""))
+                rows.append(row)
+            block["rows"] = rows
+        if (
+            block["type"] == "figure"
+            and not block["source_region"]
+            and not block.get("derived_asset_id")
+        ):
             continue
         result.append(block)
     return result
@@ -136,6 +164,7 @@ class AIProvider(ABC):
         messages: list[dict[str, Any]],
         model: str,
         timeout_seconds: int,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> ChatCompletionResult:
         raise NotImplementedError(f"{self.name} 不支持题目对话")
 

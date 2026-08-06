@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainterPath, QPalette, QRegion
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QFrame, QWidget
 
 THEME_MODES = {"system", "light", "dark"}
+
+
+def _check_mark_url() -> str:
+    """定位勾选对勾图标的 URL，兼容源码与打包运行。"""
+    candidates = [Path(__file__).resolve().parent / "check_mark.png"]
+    if getattr(sys, "frozen", False):
+        candidates.insert(
+            0,
+            Path(getattr(sys, "_MEIPASS", "."))
+            / "yancuo_win"
+            / "ui"
+            / "check_mark.png",
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.as_uri()
+    return ""
 
 
 @dataclass(frozen=True)
@@ -33,6 +52,9 @@ class ThemeTokens:
     danger: str
     danger_bg: str
     danger_border: str
+    success: str
+    success_bg: str
+    success_border: str
     nav_text: str
     list_hover: str
     list_selected: str
@@ -88,6 +110,9 @@ LIGHT_THEME = ThemeTokens(
     danger="#F54A45",
     danger_bg="#FEF0F0",
     danger_border="#F8B9B7",
+    success="#16A34A",
+    success_bg="#EAF7EF",
+    success_border="#B7E0C6",
     nav_text="#FFFFFF",
     list_hover="#F2F5FA",
     list_selected="#E8F0FF",
@@ -101,7 +126,7 @@ LIGHT_THEME = ThemeTokens(
     tag_bg="#EEF1F5",
     tag_text="#566074",
     hidden_bg="#FBFCFE",
-    fallback_bg="#FFF3D9",
+    fallback_bg="#FFF8E9",
     fallback_text="#744B00",
 )
 
@@ -126,6 +151,9 @@ DARK_THEME = ThemeTokens(
     danger="#FF7875",
     danger_bg="#3B2428",
     danger_border="#7A3F45",
+    success="#4ADE80",
+    success_bg="#1E3326",
+    success_border="#2F5D43",
     nav_text="#FFFFFF",
     list_hover="#273142",
     list_selected="#2B3D61",
@@ -208,21 +236,23 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 6px 8px;
     }}
     QMenu {{
-        background: {t.surface};
+        background: {t.card};
         color: {t.text};
-        border: 1px solid {t.divider};
-        border-radius: {m.radius_surface}px;
+        border: 1px solid {t.border_strong};
+        border-radius: 10px;
         padding: 6px;
     }}
     QMenu::item {{
         min-width: 144px;
-        padding: 8px 24px 8px 12px;
-        margin: 1px 0;
-        border-radius: {m.radius_control}px;
+        min-height: 40px;
+        padding: 0 16px;
+        margin: 1px 2px;
+        border-radius: 8px;
+        text-align: left;
     }}
     QMenu::item:selected {{
-        background: {t.list_selected};
-        color: {t.primary};
+        background: {t.list_hover};
+        color: {t.text};
     }}
     QMenu::item:disabled {{
         color: {t.muted};
@@ -234,7 +264,7 @@ def app_stylesheet(theme: str = "light") -> str:
     QMenu::separator {{
         height: 1px;
         background: {t.border};
-        margin: 6px 8px;
+        margin: 8px 10px;
     }}
 
     QFrame#AppSidebar {{
@@ -441,6 +471,76 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
     QLabel#DangerLabel {{
         color: {t.danger};
+    }}
+    QLabel#FieldLabel {{
+        color: {t.text};
+        font-size: 14px;
+        font-weight: 600;
+    }}
+    QPushButton#HistoryLinkButton {{
+        background: transparent;
+        border: none;
+        color: {t.primary};
+        padding: 4px 8px;
+        font-size: 13px;
+    }}
+    QPushButton#HistoryLinkButton:hover {{
+        color: {t.primary_hover};
+    }}
+    QPushButton#PlanRefreshButton {{
+        min-height: 36px;
+        border-radius: 8px;
+        padding: 0 16px;
+    }}
+    QFrame#CompactEmptyState {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+    }}
+    QLabel#EmptyStateIcon {{
+        color: {t.muted};
+        font-size: 15px;
+    }}
+    QLabel#EmptyStateTitle {{
+        color: {t.muted};
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton#EmptyStateAction {{
+        min-height: 30px;
+        padding: 0 12px;
+        border-radius: 8px;
+    }}
+    QFrame#ChatBubbleUser {{
+        background: {t.list_selected};
+        border: 1px solid {t.hover_border};
+        border-radius: 12px;
+    }}
+    QLabel#ChatBubbleUserText {{
+        color: {t.text};
+        font-size: 14px;
+    }}
+    QFrame#ChatBubbleAssistant {{
+        background: transparent;
+        border: none;
+    }}
+    QFrame#ChatReferenceCard {{
+        background: {t.surface_subtle};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+    }}
+    QFrame#UncertainCard {{
+        background: {t.fallback_bg};
+        border: 1px solid {t.hover_border};
+        border-radius: 10px;
+    }}
+    QLabel#UncertainWarnIcon {{
+        color: {t.fallback_text};
+        font-size: 15px;
+    }}
+    QLabel#RegionStatusLabel {{
+        color: {t.muted};
+        font-size: 13px;
     }}
     QLabel#WarningLabel {{
         color: {t.fallback_text};
@@ -798,6 +898,26 @@ def app_stylesheet(theme: str = "light") -> str:
         color: {t.text};
         font-weight: 600;
     }}
+    QListWidget#CandidateSourceImages {{
+        background: transparent;
+        border: none;
+        outline: none;
+        padding: 2px;
+    }}
+    QListWidget#CandidateSourceImages::item {{
+        min-height: 38px;
+        padding: 0 10px;
+        margin: 1px 0;
+        border-radius: 8px;
+        color: {t.text};
+    }}
+    QListWidget#CandidateSourceImages::item:hover {{
+        background: {t.list_hover};
+    }}
+    QListWidget#CandidateSourceImages::item:selected {{
+        background: {t.list_selected};
+        color: {t.primary};
+    }}
     QListWidget#UploadFileList, QListWidget#AnswerImageList {{
         background: {t.upload_bg};
         border: 1px solid {t.border};
@@ -832,7 +952,11 @@ def app_stylesheet(theme: str = "light") -> str:
         selection-background-color: {t.list_selected};
     }}
     QComboBox {{
-        padding-right: 32px;
+        padding: 7px 38px 7px 12px;
+    }}
+    QComboBoxPrivateContainer {{
+        background: {t.surface};
+        border: none;
     }}
     QComboBox:hover {{
         background: {t.surface_subtle};
@@ -841,12 +965,46 @@ def app_stylesheet(theme: str = "light") -> str:
     QComboBox::drop-down {{
         subcontrol-origin: padding;
         subcontrol-position: top right;
-        width: 28px;
+        width: 34px;
         border: none;
         border-top-right-radius: {m.radius_control}px;
         border-bottom-right-radius: {m.radius_control}px;
     }}
     QComboBox::drop-down:hover {{
+        background: {t.list_hover};
+    }}
+    QComboBox:on {{
+        background: {t.list_selected};
+        border: 1px solid {t.primary};
+    }}
+    QComboBox QAbstractItemView {{
+        background: {t.card};
+        color: {t.text};
+        border: 1px solid {t.border_strong};
+        border-radius: 10px;
+        padding: 6px;
+        outline: none;
+        selection-background-color: {t.list_hover};
+        selection-color: {t.text};
+    }}
+    QComboBox QAbstractItemView::item {{
+        min-height: 40px;
+        padding: 0 14px;
+        border-radius: 8px;
+        margin: 1px 2px;
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background: {t.list_hover};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background: {t.list_selected};
+        color: {t.primary};
+    }}
+    QComboBox QAbstractItemView::item:disabled {{
+        color: {t.muted};
+        background: transparent;
+    }}
+    QComboBox:on::drop-down {{
         background: {t.list_hover};
     }}
     QComboBox::down-arrow {{
@@ -864,24 +1022,28 @@ def app_stylesheet(theme: str = "light") -> str:
     QComboBox QAbstractItemView {{
         background: {t.surface};
         color: {t.text};
-        border: 1px solid {t.divider};
+        border: 1px solid {t.border_strong};
         border-radius: {m.radius_surface}px;
         outline: none;
-        padding: 4px;
+        padding: 8px;
         selection-background-color: transparent;
     }}
     QComboBox QAbstractItemView::item {{
-        min-height: 30px;
-        padding: 0 10px;
-        margin: 1px 2px;
+        min-height: 38px;
+        padding: 0 14px;
+        margin: 2px 0;
         border-radius: {m.radius_control}px;
     }}
     QComboBox QAbstractItemView::item:hover {{
         background: {t.list_hover};
     }}
     QComboBox QAbstractItemView::item:selected {{
-        background: {t.list_selected};
-        color: {t.primary};
+        background: {t.list_hover};
+        color: {t.text};
+    }}
+    QComboBox QAbstractItemView::item:disabled {{
+        color: {t.muted};
+        background: transparent;
     }}
     QTreeWidget, QTableWidget, QTableView {{
         background: {t.card};
@@ -908,7 +1070,7 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 8px 14px;
         min-height: 20px;
     }}
-    QComboBox#SearchScopeCombo {{
+    QComboBox#SearchModeCombo, QComboBox#SearchScopeCombo {{
         background: {t.surface_subtle};
         border: 1px solid {t.divider};
         border-radius: {m.radius_control}px;
@@ -985,6 +1147,28 @@ def app_stylesheet(theme: str = "light") -> str:
     QPushButton#DangerButton:hover {{
         background: {t.danger_bg};
     }}
+    QPushButton#RegionOutlineButton {{
+        min-height: 36px;
+        border-radius: 8px;
+        padding: 0 14px;
+    }}
+    QPushButton#RegionAccentButton {{
+        background: {t.list_selected};
+        color: {t.primary};
+        border: 1px solid {t.primary};
+        min-height: 36px;
+        border-radius: 8px;
+        padding: 0 14px;
+        font-weight: 600;
+    }}
+    QPushButton#RegionAccentButton:hover {{
+        background: {t.list_hover};
+    }}
+    QPushButton#RegionAccentButton:disabled {{
+        color: {t.muted};
+        background: {t.input_disabled};
+        border: 1px solid {t.border};
+    }}
     QPushButton#GhostButton {{
         background: transparent;
         border: none;
@@ -1012,7 +1196,7 @@ def app_stylesheet(theme: str = "light") -> str:
         min-width: 78px;
     }}
     QPushButton#LibraryViewButton {{
-        min-width: 92px;
+        min-width: 76px;
     }}
     QPushButton#SearchModeButton:hover:!checked:!disabled,
     QPushButton#LibraryViewButton:hover:!checked:!disabled {{
@@ -1101,7 +1285,22 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.list_hover};
         color: {t.text};
     }}
-    QCheckBox::indicator, QRadioButton::indicator {{
+    QCheckBox::indicator {{
+        width: 18px;
+        height: 18px;
+        border: 1.5px solid {t.border_strong};
+        border-radius: 4px;
+        background: transparent;
+    }}
+    QCheckBox::indicator:hover {{
+        border-color: {t.muted};
+    }}
+    QCheckBox::indicator:checked {{
+        background: {t.primary};
+        border-color: {t.primary};
+        image: url("{_check_mark_url()}");
+    }}
+    QRadioButton::indicator {{
         width: 16px;
         height: 16px;
     }}
@@ -1140,40 +1339,60 @@ def app_stylesheet(theme: str = "light") -> str:
         border: 1px solid {t.border};
         border-radius: 8px;
     }}
-    QFrame#ToastMessage {{
-        background: transparent;
-        border: none;
-    }}
-    QFrame#ToastContent {{
+
+    QFrame#AppToastCard {{
         background: {t.card};
         border: 1px solid {t.border_strong};
-        border-radius: {m.radius_item}px;
+        border-radius: 12px;
     }}
-    QFrame#ToastContent[tone="warning"] {{
-        background: {t.fallback_bg};
+    QFrame#AppToastCard[tone="error"],
+    QFrame#AppToastCard[tone="warning"] {{
         border: 1px solid {t.danger_border};
     }}
-    QFrame#ToastContent[tone="warning"] QLabel#ToastText {{
-        color: {t.fallback_text};
+    QFrame#AppToastCard[tone="success"] {{
+        border: 1px solid {t.success_border};
+    }}
+    QFrame#AppToastCard[tone="info"] {{
+        border: 1px solid {t.hover_border};
+    }}
+    QLabel#AppToastTitle {{
+        color: {t.text};
+        font-size: 14px;
         font-weight: 600;
     }}
-    QFrame#ToastProgressFrame {{
-        background: {t.card};
-        border: 1px solid {t.border_strong};
-        border-bottom-left-radius: {m.radius_floating}px;
-        border-bottom-right-radius: {m.radius_floating}px;
+    QLabel#AppToastBody {{
+        color: {t.muted};
+        font-size: 12px;
     }}
-    QProgressBar#ToastProgress {{
-        min-height: 4px;
-        max-height: 4px;
+    QProgressBar#AppToastProgress {{
+        background: transparent;
         border: none;
-        border-radius: 2px;
-        background: {t.progress_bg};
+        min-height: 3px;
+        max-height: 3px;
     }}
-    QProgressBar#ToastProgress::chunk {{
+    QProgressBar#AppToastProgress::chunk {{
+        background: {t.primary};
         border-radius: 2px;
-        background: #7c5cff;
     }}
+    QProgressBar#AppToastProgress[tone="error"]::chunk,
+    QProgressBar#AppToastProgress[tone="warning"]::chunk {{
+        background: {t.danger};
+    }}
+    QProgressBar#AppToastProgress[tone="success"]::chunk {{
+        background: {t.success};
+    }}
+    QProgressBar#AppToastProgress[tone="info"]::chunk {{
+        background: {t.primary};
+    }}
+    QPushButton#AppToastClose {{
+        border: none;
+        background: transparent;
+        color: {t.muted};
+    }}
+    QPushButton#AppToastClose:hover {{
+        color: {t.text};
+    }}
+
     QFrame#CompletionNotification {{
         background: {t.card};
         border: 1px solid {t.border_strong};
@@ -1195,7 +1414,7 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
     QLabel#ToastText {{
         color: {t.text};
-        font-size: 13px;
+        font-size: 14px;
     }}
     QFrame#LoadingSkeleton {{
         background: {t.card};
@@ -1320,12 +1539,130 @@ class ThemeManager(QObject):
     def __init__(self, app: QApplication, mode: str = "system") -> None:
         super().__init__(app)
         self.app = app
+        app.installEventFilter(self)
         self.mode = normalize_theme_mode(mode)
         self.resolved = ""
         hints = app.styleHints()
         if hasattr(hints, "colorSchemeChanged"):
             hints.colorSchemeChanged.connect(self._on_system_theme_changed)
         self.apply()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        """Give every native combo popup one reliable rounded surface."""
+
+        if (
+            event.type() in (QEvent.Type.Polish, QEvent.Type.Show, QEvent.Type.Resize)
+            and isinstance(watched, QWidget)
+            and watched.metaObject().className() == "QComboBoxPrivateContainer"
+        ):
+            self._style_combo_popup(watched)
+            if event.type() == QEvent.Type.Show:
+                self._offset_combo_popup(watched)
+                QTimer.singleShot(
+                    0,
+                    lambda popup=watched: self._fit_combo_popup(popup),
+                )
+        return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _style_combo_popup(popup: QWidget) -> None:
+        """Clip the native shell and replace its platform-dependent item paint."""
+
+        popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        popup.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        popup.setAutoFillBackground(True)
+        if isinstance(popup, QFrame):
+            popup.setFrameShape(QFrame.Shape.NoFrame)
+
+        view = popup.findChild(QAbstractItemView)
+        if view is not None and view.width() > 0 and view.height() > 0:
+            path = QPainterPath()
+            # The private container reserves native top/bottom chrome around
+            # the real list view. Exclude that chrome from the window region
+            # instead of painting or rounding it as a second surface.
+            path.addRoundedRect(view.geometry().toRectF(), 12.0, 12.0)
+            popup.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+        if view is not None and not view.property("yancuoDropdownDelegate"):
+            from yancuo_win.ui.widgets import SoftItemDelegate
+
+            view.setItemDelegate(
+                SoftItemDelegate(
+                    view,
+                    radius=8.0,
+                    horizontal_margin=4,
+                    vertical_margin=2,
+                    minimum_height=38,
+                )
+            )
+            view.setMouseTracking(True)
+            view.setProperty("yancuoDropdownDelegate", True)
+        popup.setProperty("yancuoRoundedPopupShell", True)
+
+    @staticmethod
+    def _offset_combo_popup(popup: QWidget) -> None:
+        """Keep a small gap between the trigger and its combo popup.
+
+        Qt places the private popup container at the trigger's top-left
+        corner, so the list view starts over the combo box and visually
+        covers it.  Shift the whole popup so the list view starts just
+        below (or above) the trigger with a 6px gap.
+        """
+
+        def apply() -> None:
+            if not popup.isVisible():
+                return
+            combo = popup.parentWidget()
+            if combo is None:
+                return
+            view = popup.findChild(QAbstractItemView)
+            if view is None:
+                return
+            gap = 6
+            combo_top = combo.mapToGlobal(combo.rect().topLeft()).y()
+            combo_bottom = combo.mapToGlobal(combo.rect().bottomLeft()).y()
+            view_top = view.mapToGlobal(view.rect().topLeft()).y()
+            view_bottom = view.mapToGlobal(view.rect().bottomLeft()).y()
+            if view_bottom <= combo_top + 2:
+                # opened above the trigger: shift up so the gap stays below the list
+                shift = combo_top - view_bottom + gap
+                target_y = popup.y() - max(0, shift)
+            else:
+                # opened below (or over) the trigger: shift down so the list
+                # starts below the trigger with a visible gap
+                shift = combo_bottom - view_top + gap
+                target_y = popup.y() + max(0, shift)
+            if abs(target_y - popup.y()) > 0.5:
+                popup.move(popup.x(), round(target_y))
+
+        QTimer.singleShot(0, apply)
+
+    @staticmethod
+    def _fit_combo_popup(popup: QWidget) -> None:
+        """把下拉弹层按条目数完全展开（受屏幕高度限制），避免只露出两行。"""
+        view = popup.findChild(QAbstractItemView)
+        model = view.model() if view is not None else None
+        if view is None or model is None or model.rowCount() <= 0:
+            return
+        row_height = view.sizeHintForRow(0)
+        if row_height <= 0:
+            return
+        chrome = max(0, popup.height() - view.height())
+        required = model.rowCount() * row_height + chrome
+        if required <= popup.height():
+            return
+        screen = (
+            QGuiApplication.screenAt(popup.mapToGlobal(QPoint(0, 0)))
+            or QGuiApplication.primaryScreen()
+        )
+        limit = (
+            screen.availableGeometry().bottom() - popup.mapToGlobal(QPoint(0, 0)).y()
+            if screen is not None
+            else required
+        )
+        target = max(popup.height(), min(required, limit))
+        if target > popup.height():
+            popup.resize(popup.width(), target)
 
     def set_mode(self, mode: str) -> str:
         self.mode = normalize_theme_mode(mode)

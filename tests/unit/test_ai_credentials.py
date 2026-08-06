@@ -27,13 +27,15 @@ class _Response:
     def __exit__(self, *_args) -> None:
         return None
 
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size: int = -1) -> bytes:
+        payload = json.dumps(self.payload).encode("utf-8")
+        return payload if size < 0 else payload[:size]
 
 
 class _StreamResponse:
     def __init__(self, lines: list[bytes]) -> None:
-        self.lines = lines
+        self.payload = b"".join(lines)
+        self.offset = 0
         self.headers = {"Content-Type": "text/event-stream; charset=utf-8"}
 
     def __enter__(self):
@@ -42,8 +44,31 @@ class _StreamResponse:
     def __exit__(self, *_args) -> None:
         return None
 
-    def __iter__(self):
-        return iter(self.lines)
+    def readline(self, size: int = -1) -> bytes:
+        if self.offset >= len(self.payload):
+            return b""
+        end = self.payload.find(b"\n", self.offset)
+        end = len(self.payload) if end < 0 else end + 1
+        if size >= 0:
+            end = min(end, self.offset + size)
+        line = self.payload[self.offset : end]
+        self.offset = end
+        return line
+
+
+class _BytesResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.headers = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        return self.payload if size < 0 else self.payload[:size]
 
 
 def test_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,6 +114,95 @@ def test_api_key_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         p._api_key()
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://faroapi.com/v1",
+        "https://user:secret@faroapi.com/v1",
+        "https://faroapi.com/v1?token=secret",
+    ],
+)
+def test_ai_base_url_rejects_insecure_or_embedded_credentials(
+    base_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    provider = OpenAICompatibleProvider(
+        base_url=base_url, api_key_env="FARO_API_KEY"
+    )
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.safe_urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid URL reached network"),
+    )
+
+    with pytest.raises(DomainError, match="HTTPS"):
+        provider.list_models()
+
+
+def test_json_response_size_budget_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible._MAX_AI_RESPONSE_BYTES", 16
+    )
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.safe_urlopen",
+        lambda *_args, **_kwargs: _BytesResponse(b"{" + b"x" * 32 + b"}"),
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1", api_key_env="FARO_API_KEY"
+    )
+
+    with pytest.raises(DomainError, match="响应过大"):
+        provider.list_models()
+
+
+def test_stream_response_size_budget_is_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible._MAX_AI_RESPONSE_BYTES", 16
+    )
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.safe_urlopen",
+        lambda *_args, **_kwargs: _StreamResponse([b"data: " + b"x" * 32]),
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1", api_key_env="FARO_API_KEY"
+    )
+
+    with pytest.raises(DomainError, match="流式响应过大"):
+        provider._request_stream_json(
+            "/chat/completions",
+            timeout_seconds=10,
+            payload={"model": "test"},
+            on_text_delta=lambda _text: None,
+        )
+
+
+def test_image_request_rejects_oversized_input_before_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FARO_API_KEY", "sk-faro-test")
+    monkeypatch.setattr("yancuo_win.ai.openai_compatible._MAX_AI_IMAGE_BYTES", 4)
+    image = tmp_path / "oversized.png"
+    image.write_bytes(b"12345")
+    monkeypatch.setattr(
+        "yancuo_win.ai.openai_compatible.safe_urlopen",
+        lambda *_args, **_kwargs: pytest.fail("oversized image reached network"),
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://faroapi.com/v1", api_key_env="FARO_API_KEY"
+    )
+
+    with pytest.raises(DomainError, match="32 MiB"):
+        provider.structure_from_image(
+            image_path=str(image),
+            prompt="extract",
+            model="vision",
+            timeout_seconds=10,
+        )
+
+
 def test_list_models_uses_faro_compatible_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -101,7 +215,7 @@ def test_list_models_uses_faro_compatible_endpoint(
         return _Response({"data": [{"id": "vision-b"}, {"id": "vision-a"}]})
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     provider = OpenAICompatibleProvider(
         base_url="https://faroapi.com/v1",
@@ -154,7 +268,7 @@ def test_structure_from_image_sends_multimodal_chat_completion(
         )
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     provider = OpenAICompatibleProvider(
         base_url="https://faroapi.com/v1",
@@ -220,7 +334,7 @@ def test_stream_structure_from_images_emits_ordered_sse_deltas(
         return _StreamResponse(lines)
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     provider = OpenAICompatibleProvider(
         base_url="https://faroapi.com/v1", api_key_env="FARO_API_KEY"
@@ -290,7 +404,7 @@ def test_structure_from_image_accepts_multi_problem_envelope(
         )
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     provider = OpenAICompatibleProvider(
         base_url="https://faroapi.com/v1",
@@ -331,7 +445,7 @@ def test_remote_disconnect_is_retried_before_succeeding(
         return _Response({"data": [{"id": "vision-model"}]})
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", fake_urlopen
+        "yancuo_win.ai.openai_compatible.safe_urlopen", fake_urlopen
     )
     monkeypatch.setattr(
         "yancuo_win.ai.openai_compatible.time.sleep", delays.append
@@ -355,7 +469,7 @@ def test_remote_disconnect_exhaustion_uses_actionable_chinese_error(
         raise http.client.RemoteDisconnected("remote closed")
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", always_disconnect
+        "yancuo_win.ai.openai_compatible.safe_urlopen", always_disconnect
     )
     monkeypatch.setattr("yancuo_win.ai.openai_compatible.time.sleep", lambda _delay: None)
     provider = OpenAICompatibleProvider(
@@ -376,7 +490,7 @@ def test_chat_disconnect_uses_chat_specific_retry_instruction(
         raise http.client.RemoteDisconnected("remote closed")
 
     monkeypatch.setattr(
-        "yancuo_win.ai.openai_compatible.urllib.request.urlopen", always_disconnect
+        "yancuo_win.ai.openai_compatible.safe_urlopen", always_disconnect
     )
     monkeypatch.setattr("yancuo_win.ai.openai_compatible.time.sleep", lambda _delay: None)
     provider = OpenAICompatibleProvider(
@@ -384,5 +498,5 @@ def test_chat_disconnect_uses_chat_specific_retry_instruction(
         api_key_env="FARO_API_KEY",
     )
 
-    with pytest.raises(DomainError, match="自动重试 2 次.*重新发送问题"):
+    with pytest.raises(DomainError, match="AI 流式连接中断"):
         provider.complete_chat(messages=[{"role": "user", "content": "测试"}], model="chat", timeout_seconds=1)

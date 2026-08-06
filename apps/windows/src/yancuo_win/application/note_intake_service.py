@@ -19,7 +19,6 @@ from yancuo_win.data.models import (
     Chapter,
     NoteDraftBlock,
     NoteDraftGroup,
-    NoteAsset,
     NoteBlock,
     NoteDocument,
     NoteIntakeAsset,
@@ -674,7 +673,9 @@ class NoteIntakeService:
             if not intake.assets:
                 raise DomainError("笔记草稿缺少来源图片")
             metadata = self._load_json(intake.draft_meta_json, "笔记草稿元数据")
-            source_asset = intake.assets[0]
+            source_paths = {
+                asset.relative_path for asset in intake.assets if asset.relative_path
+            }
             note_ids: list[str] = []
             for group in groups:
                 if group.target_status not in {"inbox", "active"}:
@@ -703,18 +704,6 @@ class NoteIntakeService:
                 note.tags = tags
                 session.add(note)
                 session.flush()
-                session.add(
-                    NoteAsset(
-                        id=new_id("nasset"),
-                        note_document_id=note.id,
-                        role="original",
-                        relative_path=source_asset.relative_path,
-                        sha256=source_asset.sha256,
-                        mime_type=source_asset.mime_type or "",
-                        size_bytes=source_asset.size_bytes or 0,
-                        is_immutable=True,
-                    )
-                )
                 for order, block in enumerate(group.blocks):
                     session.add(
                         NoteBlock(
@@ -724,7 +713,7 @@ class NoteIntakeService:
                             block_type=block.block_type,
                             content_markdown=block.content_markdown,
                             content_latex=block.content_latex,
-                            source_region_json=block.source_region_json,
+                            source_region_json="{}",
                             uncertain_json=block.uncertain_json,
                         )
                     )
@@ -735,7 +724,15 @@ class NoteIntakeService:
             intake.error_message = ""
             intake.completed_at = utcnow()
             intake.updated_at = utcnow()
+            for group in groups:
+                for block in group.blocks:
+                    block.source_asset_id = None
+            for asset in list(intake.assets):
+                session.delete(asset)
             session.commit()
+        from yancuo_win.application.services import AppServices
+
+        AppServices(self.runtime)._remove_unreferenced_asset_files(source_paths)
         from yancuo_win.application.note_service import NoteService
 
         notes = NoteService(self.runtime)
@@ -760,7 +757,7 @@ class NoteIntakeService:
             raise DomainError(f"不支持的笔记录入状态：{status}")
         with self.runtime.session_factory() as session:
             intake = self._get_open_session(session, session_id)
-            if status == "processing" and intake.status not in {"draft", "failed", "review"}:
+            if status == "processing" and intake.status not in {"draft", "failed", "review", "processing"}:
                 raise DomainError("当前笔记录入状态不能重新开始识别")
             if status == "completed" and intake.status != "review":
                 raise DomainError("笔记草稿尚未进入确认状态")

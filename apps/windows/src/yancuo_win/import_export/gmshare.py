@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -23,6 +25,8 @@ from yancuo_win.domain.identity import DATA_FORMAT_VERSION
 from yancuo_win.domain.rules import DomainError, validate_priority
 from yancuo_win.infrastructure.archive import (
     ArchiveSecurityError,
+    iter_regular_files,
+    read_regular_file_limited,
     safe_extract_zip,
     safe_relative_path,
     validate_relative_checksum_path,
@@ -30,6 +34,13 @@ from yancuo_win.infrastructure.archive import (
 
 FORMAT_NAME = "graduate-mistake-book-gmshare"
 FORMAT_VERSION = 1
+MAX_SHARE_PROBLEMS = 10_000
+MAX_SHARE_ASSET_REFERENCES = 10_000
+MAX_SHARE_JSONL_LINE_BYTES = 4 * 1024 * 1024
+MAX_CHECKSUM_LINE_BYTES = 4 * 1024
+MAX_SHARE_METADATA_BYTES = 8 * 1024 * 1024
+MAX_SHARE_PHYSICAL_LINES = 20_000
+_PROBLEM_EXPORT_BATCH_SIZE = 200
 
 # 默认拒绝：无论 includes 如何，这些键不得写入 problems.jsonl
 HARD_DENY_FIELDS = frozenset(
@@ -54,7 +65,10 @@ class ShareIncludeOptions:
     solution: bool = True
     tags: bool = True
     source: bool = True
-    original_images: bool = True
+    question_figures: bool = True
+    # Kept only so older callers deserialize cleanly. Source originals are
+    # never exported, regardless of this legacy flag.
+    original_images: bool = False
     error_analysis: bool = False
     user_answer: bool = False  # 即使 True 也被 HARD_DENY 挡住
     notes: bool = False
@@ -107,27 +121,28 @@ class GmshareService:
         includes.user_answer = False
         includes.notes = False
         includes.review_history = False
+        includes.original_images = False
 
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        dest = Path(dest) if dest else (
-            self.runtime.paths.backup_dir / f"yancuo-share-{stamp}.gmshare"
+        dest = (
+            Path(dest)
+            if dest
+            else (self.runtime.paths.backup_dir / f"yancuo-share-{stamp}.gmshare")
         )
         if dest.suffix.lower() != ".gmshare":
             dest = dest.with_suffix(".gmshare")
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         package_id = new_id("share")
-        staging = self.runtime.paths.cache_dir / f"gmshare-export-{stamp}"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True)
+        self.runtime.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="gmshare-export-", dir=self.runtime.paths.cache_dir))
         assets_root = staging / "assets"
         objects_dst = assets_root / "objects"
         objects_dst.mkdir(parents=True)
 
         try:
-            rows: list[dict[str, Any]] = []
             asset_index: list[dict[str, Any]] = []
+            problem_count = 0
             with self.runtime.session_factory() as s:
                 stmt = select(Problem).options(
                     selectinload(Problem.tags), selectinload(Problem.assets)
@@ -136,54 +151,62 @@ class GmshareService:
                     stmt = stmt.where(Problem.id.in_(problem_ids))
                 else:
                     stmt = stmt.where(Problem.deleted_at.is_(None))
-                problems = list(s.scalars(stmt).all())
-                if not problems:
-                    raise DomainError("没有可分享的题目")
-
-                for problem in problems:
-                    if problem.status == "trashed":
-                        continue
-                    rec = self._serialize_problem(problem, includes)
-                    # 复制原图
-                    asset_refs: list[dict[str, Any]] = []
-                    if includes.original_images:
-                        for asset in problem.assets:
-                            if asset.role != "original":
+                with (staging / "problems.jsonl").open("w", encoding="utf-8") as rows_file:
+                    for problems in self._problem_batches(s, stmt):
+                        for problem in problems:
+                            if problem.status == "trashed":
                                 continue
-                            src = self.store.resolve(asset.relative_path)
-                            if not src.is_file():
-                                continue
-                            rel = asset.relative_path.replace("\\", "/")
-                            if rel.startswith("objects/"):
-                                out = assets_root / rel
-                            else:
-                                out = objects_dst / rel
-                            out.parent.mkdir(parents=True, exist_ok=True)
-                            if not out.is_file():
-                                shutil.copy2(src, out)
-                            ref = {
-                                "role": "original",
-                                "sha256": asset.sha256,
-                                "relative_path": rel
-                                if rel.startswith("objects/")
-                                else f"objects/{rel}",
-                                "mime_type": asset.mime_type,
-                            }
-                            asset_refs.append(ref)
-                            asset_index.append(ref)
-                    rec["assets"] = asset_refs
-                    # 最终清洗硬拒绝字段
-                    for bad in HARD_DENY_FIELDS:
-                        rec.pop(bad, None)
-                    rows.append(rec)
+                            problem_count += 1
+                            if problem_count > MAX_SHARE_PROBLEMS:
+                                raise DomainError(
+                                    f"分享题目数超过上限（{MAX_SHARE_PROBLEMS}）"
+                                )
+                            rec = self._serialize_problem(problem, includes)
+                            # Only durable cropped question figures cross the
+                            # sharing boundary; upload/review originals never do.
+                            asset_refs: list[dict[str, Any]] = []
+                            if includes.question_figures:
+                                for asset in problem.assets:
+                                    if asset.role != "derived_figure":
+                                        continue
+                                    src = self.store.resolve(asset.relative_path)
+                                    if not src.is_file():
+                                        continue
+                                    rel = asset.relative_path.replace("\\", "/")
+                                    if rel.startswith("objects/"):
+                                        out = assets_root / rel
+                                    else:
+                                        out = objects_dst / rel
+                                    out.parent.mkdir(parents=True, exist_ok=True)
+                                    if not out.is_file():
+                                        shutil.copy2(src, out)
+                                    ref = {
+                                        "asset_id": asset.id,
+                                        "role": "derived_figure",
+                                        "sha256": asset.sha256,
+                                        "relative_path": rel
+                                        if rel.startswith("objects/")
+                                        else f"objects/{rel}",
+                                        "mime_type": asset.mime_type,
+                                    }
+                                    asset_refs.append(ref)
+                                    asset_index.append(ref)
+                                    if len(asset_index) > MAX_SHARE_ASSET_REFERENCES:
+                                        raise DomainError(
+                                            "分享资源引用数超过上限"
+                                            f"（{MAX_SHARE_ASSET_REFERENCES}）"
+                                        )
+                            rec["assets"] = asset_refs
+                            # 最终清洗硬拒绝字段
+                            for bad in HARD_DENY_FIELDS:
+                                rec.pop(bad, None)
+                            encoded = json.dumps(rec, ensure_ascii=False) + "\n"
+                            if len(encoded.encode("utf-8")) > MAX_SHARE_JSONL_LINE_BYTES:
+                                raise DomainError("分享题目单条记录超过大小上限")
+                            rows_file.write(encoded)
 
-            if not rows:
+            if not problem_count:
                 raise DomainError("没有可分享的题目")
-
-            (staging / "problems.jsonl").write_text(
-                "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
-                encoding="utf-8",
-            )
             (assets_root / "index.json").write_text(
                 json.dumps({"assets": asset_index}, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
@@ -196,7 +219,7 @@ class GmshareService:
                 "title": title,
                 "app_version": __version__,
                 "data_format_version": DATA_FORMAT_VERSION,
-                "problem_count": len(rows),
+                "problem_count": problem_count,
                 "asset_count": len(asset_index),
                 "includes": {
                     "question": includes.question,
@@ -204,7 +227,8 @@ class GmshareService:
                     "solution": includes.solution,
                     "tags": includes.tags,
                     "source": includes.source,
-                    "original_images": includes.original_images,
+                    "question_figures": includes.question_figures,
+                    "original_images": False,
                     "error_analysis": includes.error_analysis,
                     "user_answer": False,
                     "notes": False,
@@ -220,20 +244,49 @@ class GmshareService:
             return GmshareExportResult(
                 path=dest,
                 package_id=package_id,
-                problem_count=len(rows),
+                problem_count=problem_count,
                 asset_count=len(asset_index),
             )
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    def _serialize_problem(
-        self, problem: Problem, includes: ShareIncludeOptions
-    ) -> dict[str, Any]:
+    @staticmethod
+    def _problem_batches(session, statement):
+        problems = session.scalars(statement).yield_per(_PROBLEM_EXPORT_BATCH_SIZE)
+        return problems.partitions(_PROBLEM_EXPORT_BATCH_SIZE)
+
+    def _serialize_problem(self, problem: Problem, includes: ShareIncludeOptions) -> dict[str, Any]:
         rec: dict[str, Any] = {"origin_problem_id": problem.id}
         if includes.question:
             rec["title"] = problem.title
             rec["question_markdown"] = problem.question_markdown or ""
             rec["question_latex"] = problem.question_latex or ""
+            try:
+                raw_blocks = json.loads(problem.question_content_json or "[]")
+            except json.JSONDecodeError:
+                raw_blocks = []
+            blocks: list[dict[str, Any]] = []
+            if isinstance(raw_blocks, list):
+                for value in raw_blocks[:100]:
+                    if not isinstance(value, dict):
+                        continue
+                    block = {
+                        key: field
+                        for key, field in value.items()
+                        if key
+                        not in {
+                            "source_asset_id",
+                            "source_image_index",
+                            "source_region",
+                        }
+                    }
+                    if block.get("type") == "figure":
+                        if not includes.question_figures or not block.get(
+                            "derived_asset_id"
+                        ):
+                            continue
+                    blocks.append(block)
+            rec["question_content"] = blocks
         if includes.correct_answer:
             rec["correct_answer"] = problem.correct_answer or ""
         if includes.solution:
@@ -255,19 +308,16 @@ class GmshareService:
         pack = Path(pack)
         if not pack.is_file():
             raise DomainError("分享包不存在")
-        staging = self.runtime.paths.cache_dir / f"gmshare-import-{pack.stem}"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True)
+        self.runtime.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="gmshare-import-", dir=self.runtime.paths.cache_dir))
         try:
             with zipfile.ZipFile(pack, "r") as zf:
                 try:
                     safe_extract_zip(zf, staging)
                 except ArchiveSecurityError as exc:
                     raise DomainError(f"gmshare ZIP 解压被拒绝：{exc}") from exc
-            manifest = self._validate(staging)
+            manifest, rows = self._validate(staging)
             package_id = str(manifest["package_id"])
-            lines = (staging / "problems.jsonl").read_text(encoding="utf-8").splitlines()
             created = 0
             skipped = 0
             created_ids: list[str] = []
@@ -275,11 +325,7 @@ class GmshareService:
             from yancuo_win.application.sync_service import sync_snapshot
 
             with self.runtime.session_factory() as s:
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    raw = json.loads(line)
+                for raw in rows:
                     origin_pid = str(raw.get("origin_problem_id") or "")
                     if not origin_pid:
                         continue
@@ -309,6 +355,7 @@ class GmshareService:
                         title=raw.get("title"),
                         question_markdown=str(raw.get("question_markdown") or ""),
                         question_latex=str(raw.get("question_latex") or ""),
+                        question_content_json="[]",
                         correct_answer=str(raw.get("correct_answer") or ""),
                         solution_markdown=str(raw.get("solution_markdown") or ""),
                         error_analysis=str(raw.get("error_analysis") or ""),
@@ -338,8 +385,9 @@ class GmshareService:
                             s.add(tag)
                             s.flush()
                         problem.tags.append(tag)
+                    imported_asset_ids: dict[str, str] = {}
                     for ref in raw.get("assets") or []:
-                        if not isinstance(ref, dict) or ref.get("role") != "original":
+                        if not isinstance(ref, dict) or ref.get("role") != "derived_figure":
                             continue
                         rel = str(ref.get("relative_path") or "").replace("\\", "/")
                         try:
@@ -348,12 +396,13 @@ class GmshareService:
                             raise DomainError(f"分享包资源路径非法：{rel}") from exc
                         if not src.is_file():
                             continue
-                        stored = self.store.store_copy(src, role="original")
+                        stored = self.store.store_copy(src, role="derived_figure")
+                        imported_id = new_id("asset")
                         s.add(
                             Asset(
-                                id=new_id("asset"),
+                                id=imported_id,
                                 problem_id=problem.id,
-                                role="original",
+                                role="derived_figure",
                                 sha256=stored.sha256,
                                 relative_path=stored.relative_path,
                                 mime_type=stored.mime_type,
@@ -361,6 +410,33 @@ class GmshareService:
                                 is_immutable=True,
                             )
                         )
+                        source_id = str(ref.get("asset_id") or "")
+                        if source_id:
+                            imported_asset_ids[source_id] = imported_id
+                    imported_blocks: list[dict[str, Any]] = []
+                    raw_blocks = raw.get("question_content") or []
+                    if isinstance(raw_blocks, list):
+                        for value in raw_blocks[:100]:
+                            if not isinstance(value, dict):
+                                continue
+                            block = dict(value)
+                            for key in (
+                                "source_asset_id",
+                                "source_image_index",
+                                "source_region",
+                            ):
+                                block.pop(key, None)
+                            if block.get("type") == "figure":
+                                mapped = imported_asset_ids.get(
+                                    str(block.get("derived_asset_id") or "")
+                                )
+                                if not mapped:
+                                    continue
+                                block["derived_asset_id"] = mapped
+                            imported_blocks.append(block)
+                    problem.question_content_json = json.dumps(
+                        imported_blocks, ensure_ascii=False
+                    )
                     s.add(
                         ProblemOrigin(
                             problem_id=problem.id,
@@ -395,33 +471,144 @@ class GmshareService:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    def _validate(self, root: Path) -> dict[str, Any]:
+    def _validate(self, root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         for name in ("manifest.json", "checksums.sha256", "problems.jsonl"):
             if not (root / name).is_file():
                 raise DomainError(f"分享包缺少 {name}")
-        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        try:
+            manifest = json.loads(
+                read_regular_file_limited(
+                    root / "manifest.json", max_bytes=MAX_SHARE_METADATA_BYTES
+                ).decode("utf-8")
+            )
+        except (ArchiveSecurityError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainError("分享包 manifest.json 无效") from exc
+        if not isinstance(manifest, dict):
+            raise DomainError("分享包 manifest.json 必须是对象")
         if manifest.get("format") != FORMAT_NAME:
             raise DomainError("不是研错库 .gmshare 包")
-        if int(manifest.get("format_version") or 0) != FORMAT_VERSION:
+        try:
+            format_version = int(manifest.get("format_version") or 0)
+            problem_count = int(manifest.get("problem_count") or 0)
+            asset_count = int(manifest.get("asset_count") or 0)
+        except (TypeError, ValueError) as exc:
+            raise DomainError("gmshare manifest 数量或版本字段无效") from exc
+        if format_version != FORMAT_VERSION:
             raise DomainError("gmshare format_version 不受支持")
+        package_id = manifest.get("package_id")
+        if not isinstance(package_id, str) or not package_id.strip() or len(package_id) > 128:
+            raise DomainError("gmshare package_id 无效")
+        if not 1 <= problem_count <= MAX_SHARE_PROBLEMS:
+            raise DomainError("gmshare 题目数量无效或超限")
+        if not 0 <= asset_count <= MAX_SHARE_ASSET_REFERENCES:
+            raise DomainError("gmshare 资源引用数量无效或超限")
+
         # 校验 checksums
-        for line in (root / "checksums.sha256").read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("  ", 1)
-            if len(parts) != 2:
-                raise DomainError(f"checksum 行格式错误：{line[:80]}")
-            digest, rel = (part.strip() for part in parts)
-            try:
-                path = validate_relative_checksum_path(root, rel)
-            except ArchiveSecurityError as exc:
-                raise DomainError(f"checksum 路径非法：{rel}") from exc
-            if not path.is_file():
-                raise DomainError(f"checksum 指向缺失文件：{rel}")
-            if _sha256_file(path) != digest:
-                raise DomainError(f"校验失败：{rel}")
-        return manifest
+        checksummed_paths: set[str] = set()
+        checksum_physical_lines = 0
+        try:
+            with (root / "checksums.sha256").open("rb") as checksum_stream:
+                while line_bytes := checksum_stream.readline(MAX_CHECKSUM_LINE_BYTES + 1):
+                    checksum_physical_lines += 1
+                    if checksum_physical_lines > MAX_SHARE_PHYSICAL_LINES:
+                        raise DomainError("checksum 物理行数超限")
+                    if len(line_bytes) > MAX_CHECKSUM_LINE_BYTES:
+                        raise DomainError("checksum 行过长")
+                    line = line_bytes.decode("utf-8").strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("  ", 1)
+                    if len(parts) != 2:
+                        raise DomainError(f"checksum 行格式错误：{line[:80]}")
+                    digest, rel = (part.strip() for part in parts)
+                    if len(digest) != 64 or any(
+                        char not in "0123456789abcdefABCDEF" for char in digest
+                    ):
+                        raise DomainError(f"checksum 摘要格式错误：{digest[:80]}")
+                    try:
+                        path = validate_relative_checksum_path(root, rel)
+                    except ArchiveSecurityError as exc:
+                        raise DomainError(f"checksum 路径非法：{rel}") from exc
+                    canonical = path.relative_to(root.resolve()).as_posix()
+                    if rel.replace("\\", "/") != canonical:
+                        raise DomainError(f"checksum 路径不是规范相对路径：{rel}")
+                    if canonical in checksummed_paths:
+                        raise DomainError(f"checksum 路径重复：{rel}")
+                    checksummed_paths.add(canonical)
+                    if len(checksummed_paths) > 10_000:
+                        raise DomainError("checksum 条目数量超限")
+                    if not path.is_file():
+                        raise DomainError(f"checksum 指向缺失文件：{rel}")
+                    if _sha256_file(path) != digest.lower():
+                        raise DomainError(f"校验失败：{rel}")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise DomainError("分享包 checksums.sha256 无效") from exc
+
+        actual_paths = {
+            path.relative_to(root).as_posix()
+            for path in iter_regular_files(root)
+            if path.relative_to(root).as_posix() != "checksums.sha256"
+        }
+        if checksummed_paths != actual_paths:
+            missing = sorted(actual_paths - checksummed_paths)
+            extra = sorted(checksummed_paths - actual_paths)
+            detail = []
+            if missing:
+                detail.append("缺少 " + "、".join(missing[:5]))
+            if extra:
+                detail.append("多余 " + "、".join(extra[:5]))
+            raise DomainError("checksum 未完整覆盖分享包文件：" + "；".join(detail))
+
+        rows: list[dict[str, Any]] = []
+        problem_physical_lines = 0
+        try:
+            with (root / "problems.jsonl").open("rb") as problem_stream:
+                while line_bytes := problem_stream.readline(MAX_SHARE_JSONL_LINE_BYTES + 1):
+                    problem_physical_lines += 1
+                    if problem_physical_lines > MAX_SHARE_PHYSICAL_LINES:
+                        raise DomainError("分享包题目物理行数超限")
+                    if len(line_bytes) > MAX_SHARE_JSONL_LINE_BYTES:
+                        raise DomainError("分享包单条题目记录过大")
+                    if not line_bytes.strip():
+                        continue
+                    row = json.loads(line_bytes.decode("utf-8"))
+                    if not isinstance(row, dict):
+                        raise DomainError("分享包题目记录必须是对象")
+                    rows.append(row)
+                    if len(rows) > MAX_SHARE_PROBLEMS:
+                        raise DomainError("分享包题目记录数量超限")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainError("分享包 problems.jsonl 无效") from exc
+        if len(rows) != problem_count:
+            raise DomainError("gmshare manifest 与题目记录数量不一致")
+
+        index_path = root / "assets" / "index.json"
+        try:
+            asset_index = json.loads(
+                read_regular_file_limited(index_path, max_bytes=MAX_SHARE_METADATA_BYTES).decode(
+                    "utf-8"
+                )
+            )
+        except (ArchiveSecurityError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainError("分享包 assets/index.json 无效") from exc
+        indexed_assets = asset_index.get("assets") if isinstance(asset_index, dict) else None
+        if not isinstance(indexed_assets, list) or not all(
+            isinstance(item, dict) for item in indexed_assets
+        ):
+            raise DomainError("分享包资源索引必须包含 assets 对象数组")
+        if len(indexed_assets) != asset_count:
+            raise DomainError("gmshare manifest 与资源索引数量不一致")
+        referenced_assets = 0
+        for row in rows:
+            assets = row.get("assets") or []
+            if not isinstance(assets, list) or not all(isinstance(item, dict) for item in assets):
+                raise DomainError("分享包题目资源引用必须是对象数组")
+            referenced_assets += len(assets)
+            if referenced_assets > MAX_SHARE_ASSET_REFERENCES:
+                raise DomainError("分享包题目资源引用数量超限")
+        if referenced_assets != asset_count:
+            raise DomainError("gmshare 题目资源引用与资源索引数量不一致")
+        return manifest, rows
 
     def _write_checksums(self, root: Path) -> None:
         lines: list[str] = []
@@ -435,9 +622,19 @@ class GmshareService:
         (root / "checksums.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _zip_staging(self, staging: Path, dest: Path) -> None:
-        if dest.exists():
-            dest.unlink()
-        with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for path in staging.rglob("*"):
-                if path.is_file():
-                    zf.write(path, path.relative_to(staging).as_posix())
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for path in staging.rglob("*"):
+                    if path.is_file():
+                        zf.write(path, path.relative_to(staging).as_posix())
+            with temporary.open("r+b") as stream:
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, dest)
+        finally:
+            temporary.unlink(missing_ok=True)

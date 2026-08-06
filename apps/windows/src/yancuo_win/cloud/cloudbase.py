@@ -1,4 +1,4 @@
-"""CloudBase complete-snapshot adapter through a deployed gateway function.
+"""CloudBase snapshot and immutable-operation adapter through a gateway.
 
 CloudBase client SDK credentials must never be embedded in a desktop client.
 The gateway owns Cloud Storage and PostgreSQL access; this adapter talks only
@@ -8,15 +8,24 @@ to its documented HTTPS contract and keeps the gateway token in keyring.
 from __future__ import annotations
 
 import json
+import os
+import secrets
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlparse
+from urllib.request import Request
 
 from yancuo_win.cloud.base import CloudCapabilities, CloudProvider, CloudUser, RemoteRelease
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.infrastructure.credentials import get_secret
+from yancuo_win.cloud.cloudbase_auth import force_refresh_token, get_access_token
+from yancuo_win.infrastructure.safe_http import iter_file_chunks, safe_urlopen
+
+
+_MAX_GATEWAY_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_ERROR_RESPONSE_BYTES = 4 * 1024
+_MAX_ASSET_BYTES = 512 * 1024 * 1024
 
 
 class CloudBaseGatewayProvider(CloudProvider):
@@ -26,38 +35,77 @@ class CloudBaseGatewayProvider(CloudProvider):
         self.environment_id = environment_id.strip()
         self.gateway_url = gateway_url.rstrip("/")
         self.credential_key = credential_key
+        self._held_locks: dict[tuple[str, str], tuple[str, str]] = {}
 
     def _token(self) -> str:
-        token = get_secret(self.credential_key)
-        if not token:
-            raise DomainError("请先在设置中保存 CloudBase 网关令牌")
-        return token
+        return get_access_token(self.environment_id, self.credential_key)
 
     def _validate_configuration(self) -> None:
         if not self.environment_id:
             raise DomainError("请填写 CloudBase 环境 ID")
-        if not self.gateway_url.startswith(("https://", "http://")):
+        parsed = urlparse(self.gateway_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username:
             raise DomainError("请填写 CloudBase 网关 HTTPS 地址")
+
+    @staticmethod
+    def _validate_storage_url(url: str) -> None:
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise DomainError("CloudBase 存储地址必须是无内嵌凭据的 HTTPS URL")
 
     def _action(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         self._validate_configuration()
         body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
-        request = Request(
-            f"{self.gateway_url}/actions/{quote(action, safe='/')}",
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self._token()}",
-                "Content-Type": "application/json",
-                "X-CloudBase-Environment-ID": self.environment_id,
-            },
-        )
+        endpoint = f"{self.gateway_url}/actions/{quote(action, safe='/')}"
+
+        def _build_request(access_token: str) -> Request:
+            return Request(
+                endpoint,
+                data=body,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "X-CloudBase-Environment-ID": self.environment_id,
+                },
+            )
+
+        def _open(access_token: str) -> str:
+            with safe_urlopen(_build_request(access_token), timeout=60) as response:
+                body_bytes = response.read(_MAX_GATEWAY_RESPONSE_BYTES + 1)
+                if len(body_bytes) > _MAX_GATEWAY_RESPONSE_BYTES:
+                    raise DomainError("CloudBase 网关响应过大")
+                return body_bytes.decode("utf-8")
+
         try:
-            with urlopen(request, timeout=60) as response:  # noqa: S310 - configured gateway
-                raw = response.read().decode("utf-8")
+            raw = _open(self._token())
         except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
-            raise DomainError(f"CloudBase 网关请求失败（HTTP {exc.code}）：{detail}") from exc
+            detail = exc.read(_MAX_ERROR_RESPONSE_BYTES).decode(
+                "utf-8", errors="replace"
+            )[:300]
+            if exc.code == 401 and "登录已失效" in detail:
+                try:
+                    fresh_token = force_refresh_token(
+                        self.environment_id, self.credential_key
+                    )
+                except DomainError:
+                    raise DomainError(f"CloudBase 网关请求失败（HTTP 401）：{detail}") from exc
+                try:
+                    raw = _open(fresh_token)
+                except HTTPError as retry_exc:
+                    retry_detail = retry_exc.read(_MAX_ERROR_RESPONSE_BYTES).decode(
+                        "utf-8", errors="replace"
+                    )[:300]
+                    raise DomainError(f"CloudBase 网关请求失败（HTTP {retry_exc.code}）：{retry_detail}") from retry_exc
+                except URLError as retry_exc:
+                    raise DomainError(f"无法连接 CloudBase 网关：{retry_exc.reason}") from retry_exc
+            else:
+                raise DomainError(f"CloudBase 网关请求失败（HTTP {exc.code}）：{detail}") from exc
         except URLError as exc:
             raise DomainError(f"无法连接 CloudBase 网关：{exc.reason}") from exc
         try:
@@ -72,10 +120,20 @@ class CloudBaseGatewayProvider(CloudProvider):
         if not isinstance(data, dict):
             raise DomainError("CloudBase 网关 data 格式无效")
         return data
-
     @staticmethod
     def _repo(owner: str, repo: str) -> dict[str, str]:
         return {"owner": owner, "repository": repo}
+
+    def _write_repo(self, owner: str, repo: str) -> dict[str, str]:
+        lease = self._held_locks.get((owner, repo))
+        if not lease:
+            raise DomainError("CloudBase 写入前必须先获取主写入锁")
+        device_id, lease_id = lease
+        return {
+            **self._repo(owner, repo),
+            "device_id": device_id,
+            "lease_id": lease_id,
+        }
 
     def authenticate(self) -> None:
         self._action("health")
@@ -101,7 +159,7 @@ class CloudBaseGatewayProvider(CloudProvider):
         return manifest if isinstance(manifest, dict) else None
 
     def write_sync_manifest(self, owner: str, repo: str, manifest: dict[str, Any]) -> None:
-        self._action("manifest/write", {**self._repo(owner, repo), "manifest": manifest})
+        self._action("manifest/write", {**self._write_repo(owner, repo), "manifest": manifest})
 
     def list_releases(self, owner: str, repo: str) -> list[RemoteRelease]:
         data = self._action("releases/list", self._repo(owner, repo))
@@ -120,49 +178,117 @@ class CloudBaseGatewayProvider(CloudProvider):
         ]
 
     def create_release(self, owner: str, repo: str, *, tag: str, name: str, body: str = "") -> RemoteRelease:
-        data = self._action("releases/create", {**self._repo(owner, repo), "tag": tag, "name": name, "body": body})
+        data = self._action("releases/create", {**self._write_repo(owner, repo), "tag": tag, "name": name, "body": body})
         return RemoteRelease(tag=tag, name=name, assets=[], raw=data)
 
     def upload_release_asset(self, owner: str, repo: str, *, tag: str, file_path: Path, asset_name: str) -> dict[str, Any]:
-        data = self._action("assets/upload-url", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name, "size": file_path.stat().st_size})
+        size = file_path.stat().st_size
+        if size < 0 or size > _MAX_ASSET_BYTES:
+            raise DomainError("CloudBase 上传文件超过 512 MiB 上限")
+        write_repo = self._write_repo(owner, repo)
+        data = self._action("assets/upload-url", {**write_repo, "tag": tag, "asset_name": asset_name, "size": size})
         url = str(data.get("url") or "")
-        if not url.startswith(("https://", "http://")):
-            raise DomainError("CloudBase 网关未返回有效上传地址")
+        self._validate_storage_url(url)
         headers = data.get("headers") if isinstance(data.get("headers"), dict) else {}
-        request = Request(url, data=file_path.read_bytes(), method="PUT", headers={str(k): str(v) for k, v in headers.items()})
+        upload_headers = {str(k): str(v) for k, v in headers.items()}
+        upload_headers["Content-Length"] = str(size)
+        request = Request(
+            url,
+            data=iter_file_chunks(file_path),
+            method="PUT",
+            headers=upload_headers,
+        )
         try:
-            with urlopen(request, timeout=300):  # noqa: S310 - signed upload URL from gateway
+            with safe_urlopen(request, timeout=300):
                 pass
         except (HTTPError, URLError) as exc:
             raise DomainError(f"CloudBase 存储上传失败：{exc}") from exc
-        return self._action("assets/commit", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name, "upload_id": data.get("upload_id")})
+        return self._action("assets/commit", {**write_repo, "tag": tag, "asset_name": asset_name, "upload_id": data.get("upload_id")})
 
     def download_release_asset(self, owner: str, repo: str, *, tag: str, asset_name: str, dest: Path) -> Path:
         data = self._action("assets/download-url", {**self._repo(owner, repo), "tag": tag, "asset_name": asset_name})
         url = str(data.get("url") or "")
-        if not url.startswith(("https://", "http://")):
-            raise DomainError("CloudBase 网关未返回有效下载地址")
+        self._validate_storage_url(url)
+        dest = Path(dest)
+        if dest.is_symlink():
+            raise DomainError("CloudBase 下载目标不能是符号链接")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".cloudbase-down-", suffix=".tmp", dir=dest.parent
+        )
+        temporary = Path(temporary_name)
         try:
-            with urlopen(url, timeout=300) as response:  # noqa: S310 - signed download URL from gateway
-                content = response.read()
+            with safe_urlopen(url, timeout=300) as response, os.fdopen(
+                descriptor, "wb"
+            ) as output:
+                descriptor = -1
+                received = 0
+                while chunk := response.read(1024 * 1024):
+                    received += len(chunk)
+                    if received > _MAX_ASSET_BYTES:
+                        raise DomainError("CloudBase 下载文件超过 512 MiB 上限")
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if dest.is_symlink():
+                raise DomainError("CloudBase 下载目标不能是符号链接")
+            os.replace(temporary, dest)
         except (HTTPError, URLError) as exc:
             raise DomainError(f"CloudBase 存储下载失败：{exc}") from exc
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(content)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
         return dest
 
     def delete_release(self, owner: str, repo: str, *, tag: str) -> None:
-        self._action("releases/delete", {**self._repo(owner, repo), "tag": tag})
+        self._action("releases/delete", {**self._write_repo(owner, repo), "tag": tag})
 
     def acquire_lock(self, owner: str, repo: str, device_id: str) -> bool:
-        return bool(self._action("locks/acquire", {**self._repo(owner, repo), "device_id": device_id}).get("acquired"))
+        lease_id = secrets.token_urlsafe(24)
+
+        def _try_acquire() -> bool:
+            return bool(
+                self._action(
+                    "locks/acquire",
+                    {
+                        **self._repo(owner, repo),
+                        "device_id": device_id,
+                        "lease_id": lease_id,
+                    },
+                ).get("acquired")
+            )
+
+        try:
+            acquired = _try_acquire()
+        except DomainError as exc:
+            if "资料库不存在" not in str(exc):
+                raise
+            # First write on a fresh CloudBase namespace: create the logical
+            # repository (idempotent) and retry once.
+            self.create_private_repository(repo)
+            acquired = _try_acquire()
+        if acquired:
+            self._held_locks[(owner, repo)] = (device_id, lease_id)
+        return acquired
 
     def release_lock(self, owner: str, repo: str, device_id: str) -> None:
-        self._action("locks/release", {**self._repo(owner, repo), "device_id": device_id})
+        lease = self._held_locks.get((owner, repo))
+        if not lease or lease[0] != device_id:
+            raise DomainError("CloudBase 主写入锁不属于当前任务")
+        self._action(
+            "locks/release",
+            {
+                **self._repo(owner, repo),
+                "device_id": device_id,
+                "lease_id": lease[1],
+            },
+        )
+        self._held_locks.pop((owner, repo), None)
 
     def test_connection(self) -> dict[str, Any]:
         self.authenticate()
         return {"ok": True, "provider": self.name, "environment_id": self.environment_id}
 
     def get_capabilities(self) -> CloudCapabilities:
-        return CloudCapabilities(private_repository=True, release_assets=True, atomic_file_update=True, large_file_upload=True, delete_release=True)
+        return CloudCapabilities(private_repository=True, release_assets=True, atomic_file_update=True, large_file_upload=True, delete_release=True, max_asset_bytes=_MAX_ASSET_BYTES)

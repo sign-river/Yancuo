@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import tempfile
 import gc
@@ -52,7 +53,6 @@ class CloudBackupService:
     def ensure_repository(self) -> dict[str, Any]:
         if self.provider.name == "local_folder":
             return self.provider.create_private_repository(self.repo)
-        # GitLink：仅探测访问
         return self.provider.get_repository(self.owner, self.repo)
 
     @staticmethod
@@ -81,10 +81,6 @@ class CloudBackupService:
             "profiles": {},
             "aliases": {},
         }
-        # Old installations exposed one repository-wide latest pointer. Keep it
-        # readable but never silently assign it to a newly generated profile.
-        if latest.get("tag"):
-            index["legacy_latest"] = latest
         return index
 
     @staticmethod
@@ -164,7 +160,6 @@ class CloudBackupService:
             ),
             "remote_profiles": remote,
             "requires_takeover": bool(remote_ids - {local, canonical}),
-            "legacy_latest_available": bool(self._profile_index().get("legacy_latest")),
             "aliases": aliases,
         }
 
@@ -196,16 +191,22 @@ class CloudBackupService:
         canonical_profile_id = canonical_profile_id.strip()
         if source_profile_id == canonical_profile_id:
             return
-        index = self._profile_index()
-        profiles = index.setdefault("profiles", {})
-        if not isinstance(profiles, dict) or canonical_profile_id not in profiles:
-            raise DomainError("主资料不存在，不能创建资料别名")
-        aliases = index.setdefault("aliases", {})
-        if not isinstance(aliases, dict):
-            raise DomainError("云端资料别名记录无效")
-        aliases[source_profile_id] = canonical_profile_id
-        self._resolve_profile(index, source_profile_id)
-        self.provider.write_sync_manifest(self.owner, self.repo, index)
+        device_id = self.runtime.identity.device_id
+        if not self.provider.acquire_lock(self.owner, self.repo, device_id):
+            raise DomainError("无法获取主写入锁：另一台设备可能正在修改云端资料")
+        try:
+            index = self._profile_index()
+            profiles = index.setdefault("profiles", {})
+            if not isinstance(profiles, dict) or canonical_profile_id not in profiles:
+                raise DomainError("主资料不存在，不能创建资料别名")
+            aliases = index.setdefault("aliases", {})
+            if not isinstance(aliases, dict):
+                raise DomainError("云端资料别名记录无效")
+            aliases[source_profile_id] = canonical_profile_id
+            self._resolve_profile(index, source_profile_id)
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+        finally:
+            self.provider.release_lock(self.owner, self.repo, device_id)
 
     def upload_backup(self) -> dict[str, Any]:
         """手动云备份：上传完整包成功后才更新 latest。"""
@@ -221,6 +222,9 @@ class CloudBackupService:
         device_id = self.runtime.identity.device_id
         if not self.provider.acquire_lock(self.owner, self.repo, device_id):
             raise DomainError("无法获取主写入锁：另一台设备可能是主编辑设备")
+        created_tag: str | None = None
+        manifest_published = False
+        pack: Path | None = None
         try:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             profile_id = self.runtime.identity.profile_id
@@ -246,7 +250,7 @@ class CloudBackupService:
             parent_snapshot_id = (
                 previous.get("snapshot_id") if isinstance(previous, dict) else None
             )
-            tag = f"data-v1-{profile_id}-{stamp}-{device_id[-8:]}-{snapshot_id[-8:]}"
+            tag = f"data-v1-{profile_id[-8:]}-{stamp}-{device_id[-8:]}-{snapshot_id[-8:]}"
             pack = self.ebpack.export_ebpack(
                 self.runtime.paths.cache_dir / f"{tag}.ebpack"
             )
@@ -270,37 +274,21 @@ class CloudBackupService:
                 ensure_ascii=False,
             )
 
-            # GitLink：先附件后 Release；LocalFolder：先建目录再拷文件
-            if caps.assets_first:
-                asset_info = self.provider.upload_release_asset(
-                    self.owner,
-                    self.repo,
-                    tag=tag,
-                    file_path=pack,
-                    asset_name=asset_name,
-                )
-                release = self.provider.create_release(
-                    self.owner,
-                    self.repo,
-                    tag=tag,
-                    name=release_name,
-                    body=release_body,
-                )
-            else:
-                release = self.provider.create_release(
-                    self.owner,
-                    self.repo,
-                    tag=tag,
-                    name=release_name,
-                    body=release_body,
-                )
-                asset_info = self.provider.upload_release_asset(
-                    self.owner,
-                    self.repo,
-                    tag=tag,
-                    file_path=pack,
-                    asset_name=asset_name,
-                )
+            release = self.provider.create_release(
+                self.owner,
+                self.repo,
+                tag=tag,
+                name=release_name,
+                body=release_body,
+            )
+            created_tag = tag
+            asset_info = self.provider.upload_release_asset(
+                self.owner,
+                self.repo,
+                tag=tag,
+                file_path=pack,
+                asset_name=asset_name,
+            )
 
             if _sha256(pack) != sha:
                 raise DomainError("上传前后哈希不一致，已中止更新 latest")
@@ -321,23 +309,9 @@ class CloudBackupService:
             profile_snapshots[profile_id] = snapshot
             index["updated_at"] = datetime.now(timezone.utc).isoformat()
             index["primary_profile_id"] = profile_id
-            latest = {
-                "format": "graduate-mistake-book-latest",
-                "format_version": 1,
-                "tag": tag,
-                "asset_name": asset_name,
-                "sha256": sha,
-                "uploaded_at": datetime.now(timezone.utc).isoformat(),
-                "device_id": device_id,
-                "database_id": self.runtime.identity.database_id,
-                "schema_version": self.runtime.schema_version,
-                "primary_device": device_id,
-                "size": pack.stat().st_size,
-                "asset": asset_info,
-            }
             # 完整包就绪后才写资料索引；legacy 字段保留给旧客户端读取。
-            index["legacy_latest"] = latest
             self.provider.write_sync_manifest(self.owner, self.repo, index)
+            manifest_published = True
             self.runtime.identity = record_snapshot_head(
                 self.runtime.paths.identity_file, self.runtime.identity, snapshot_id
             )
@@ -349,10 +323,26 @@ class CloudBackupService:
                 "release": release.tag,
                 "profile_id": profile_id,
             }
+        except Exception as exc:
+            if created_tag is not None and not manifest_published:
+                try:
+                    self.provider.delete_release(
+                        self.owner, self.repo, tag=created_tag
+                    )
+                except Exception as cleanup_exc:
+                    raise DomainError(
+                        "云快照发布失败，且清理未入索引的 Release 失败："
+                        f"{cleanup_exc}"
+                    ) from exc
+            raise
         finally:
             # 无论导出、上传或写 latest 哪一步失败，都释放主写入锁；
             # LocalFolder 的 TTL 只是最后一道兜底，不替代显式释放。
-            self.provider.release_lock(self.owner, self.repo, device_id)
+            try:
+                self.provider.release_lock(self.owner, self.repo, device_id)
+            finally:
+                if pack is not None:
+                    pack.unlink(missing_ok=True)
 
     def list_backups(self) -> list[dict[str, Any]]:
         releases = self.provider.list_releases(self.owner, self.repo)
@@ -400,13 +390,29 @@ class CloudBackupService:
         dest_dir = Path(dest_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{tag}.ebpack"
-        self.provider.download_release_asset(
-            self.owner, self.repo, tag=tag, asset_name=asset_name, dest=dest
+        if dest.is_symlink():
+            raise DomainError("云备份下载目标不能是符号链接")
+        descriptor, candidate_name = tempfile.mkstemp(
+            prefix=".cloud-verify-", suffix=".ebpack", dir=dest_dir
         )
-        actual = _sha256(dest)
-        if expected and actual != expected:
-            dest.unlink(missing_ok=True)
-            raise DomainError("下载文件哈希与 latest 记录不一致，已删除损坏文件")
+        os.close(descriptor)
+        candidate = Path(candidate_name)
+        try:
+            self.provider.download_release_asset(
+                self.owner,
+                self.repo,
+                tag=tag,
+                asset_name=asset_name,
+                dest=candidate,
+            )
+            actual = _sha256(candidate)
+            if expected and actual != expected:
+                raise DomainError("下载文件哈希与 latest 记录不一致，未替换已有文件")
+            if dest.is_symlink():
+                raise DomainError("云备份下载目标不能是符号链接")
+            os.replace(candidate, dest)
+        finally:
+            candidate.unlink(missing_ok=True)
         return dest
 
     def restore_profile_to(self, profile_id: str, target_root: Path) -> dict[str, Any]:
@@ -421,7 +427,10 @@ class CloudBackupService:
         pack = self.download_backup(
             str(snapshot["tag"]), self.runtime.paths.cache_dir / "cloud_dl"
         )
-        return self.ebpack.restore_ebpack(pack, Path(target_root))
+        try:
+            return self.ebpack.restore_ebpack(pack, Path(target_root))
+        finally:
+            pack.unlink(missing_ok=True)
 
     @staticmethod
     def _table_key_columns(connection: sqlite3.Connection, table: str) -> list[str]:

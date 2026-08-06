@@ -6,8 +6,6 @@ from pathlib import Path
 
 from yancuo_win.cloud.base import CloudProvider
 from yancuo_win.cloud.cloudbase import CloudBaseGatewayProvider
-from yancuo_win.cloud.github import GitHubProvider
-from yancuo_win.cloud.gitlink import GitLinkProvider
 from yancuo_win.cloud.local_folder import LocalFolderProvider
 from yancuo_win.config.settings import AppSettings
 from yancuo_win.domain.rules import DomainError
@@ -23,18 +21,6 @@ def get_cloud_provider(settings: AppSettings, *, local_root: Path | None = None)
             env = os.environ.get("YANCUO_CLOUD_LOCAL_ROOT")
             root = Path(env) if env else Path(settings.paths.backup_dir) / "cloud_local"
         return LocalFolderProvider(root)
-    if name == "gitlink":
-        cfg = settings.cloud.gitlink
-        return GitLinkProvider(
-            base_url=cfg.base_url or "https://www.gitlink.org.cn",
-            credential_key=cfg.credential_key or "yancuo_gitlink_token",
-        )
-    if name == "github":
-        cfg = settings.cloud.github
-        return GitHubProvider(
-            base_url=cfg.base_url or "https://api.github.com",
-            credential_key=cfg.credential_key or "yancuo_github_token",
-        )
     if name == "cloudbase":
         cfg = settings.cloud.cloudbase
         return CloudBaseGatewayProvider(

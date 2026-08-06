@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import zipfile
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from docx import Document
 from sqlalchemy import select
 
+import yancuo_win.application.services as services_module
 from yancuo_win.application.ai_service import AIService
 from yancuo_win.application.bootstrap import bootstrap_runtime
+from yancuo_win.application.intake_service import ProblemIntakeService
 from yancuo_win.application.services import AppServices, ProblemFilter
 from yancuo_win.config.settings import default_toml_path
-from yancuo_win.data.models import AiJob, AiJobItem, Asset, ReviewItem
+from yancuo_win.data.models import (
+    AiJob,
+    AiJobItem,
+    Asset,
+    IntakeAsset,
+    IntakeSession,
+    ReviewItem,
+)
 from yancuo_win.domain.rules import DomainError
 
 
@@ -46,6 +59,43 @@ def test_problem_lifecycle_and_trash(services: AppServices) -> None:
     services.trash_problem(p.id)
     assert services.purge_trashed() == 1
     assert services.get_problem(p.id) is None
+
+
+def test_stale_failed_intake_sources_expire_after_seven_days(
+    services: AppServices, tmp_path: Path
+) -> None:
+    image = tmp_path / "stale-source.jpg"
+    image.write_bytes(b"\xff\xd8\xffstale-source")
+    intake = ProblemIntakeService(services.runtime)
+    draft = intake.start_ai([image])
+    with services.session() as session:
+        row = session.get(IntakeSession, draft.intake_session_id)
+        assert row is not None
+        row.status = "failed"
+        row.updated_at = datetime.now(timezone.utc) - timedelta(days=8)
+        asset = session.scalar(
+            select(IntakeAsset).where(
+                IntakeAsset.session_id == draft.intake_session_id
+            )
+        )
+        assert asset is not None
+        source_path = services.store.resolve(asset.relative_path)
+        session.commit()
+    assert source_path.is_file()
+
+    AppServices(services.runtime)
+
+    with services.session() as session:
+        row = session.get(IntakeSession, draft.intake_session_id)
+        asset = session.scalar(
+            select(IntakeAsset).where(
+                IntakeAsset.session_id == draft.intake_session_id
+            )
+        )
+        assert row is not None and row.status == "cancelled"
+        assert asset is not None and asset.role == "retired"
+        assert asset.relative_path == ""
+    assert not source_path.exists()
 
 
 def test_import_image_dedup_and_immutable(
@@ -116,12 +166,16 @@ def test_purge_trashed_removes_ai_dependencies_and_orphan_file(
     with services.session() as session:
         assert session.get(Asset, asset_id) is None
         assert session.get(AiJob, job.id) is None
-        assert session.scalar(
-            select(AiJobItem).where(AiJobItem.problem_id == problem_id)
-        ) is None
-        assert session.scalar(
-            select(ReviewItem).where(ReviewItem.problem_id == problem_id)
-        ) is None
+        assert (
+            session.scalar(select(AiJobItem).where(AiJobItem.problem_id == problem_id))
+            is None
+        )
+        assert (
+            session.scalar(
+                select(ReviewItem).where(ReviewItem.problem_id == problem_id)
+            )
+            is None
+        )
 
 
 def test_search_filter_and_tags(services: AppServices) -> None:
@@ -135,14 +189,14 @@ def test_search_filter_and_tags(services: AppServices) -> None:
     assert len(tagged) == 1
 
 
-def test_backup_restore_and_word_export(
-    services: AppServices, tmp_path: Path
-) -> None:
+def test_backup_restore_and_word_export(services: AppServices, tmp_path: Path) -> None:
     img = tmp_path / "b.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"payload-xyz")
     created = services.import_images([img])["created"]
     pid = created[0]
-    services.update_problem(pid, {"question_markdown": "原题内容A", "correct_answer": "42"})
+    services.update_problem(
+        pid, {"question_markdown": "原题内容A", "correct_answer": "42"}
+    )
 
     backup = services.create_backup(tmp_path / "bak.zip")
     assert backup.is_file()
@@ -161,6 +215,106 @@ def test_backup_restore_and_word_export(
     assert "42" in text
 
 
+def test_local_backup_includes_committed_wal_changes(
+    services: AppServices, tmp_path: Path
+) -> None:
+    problem = services.create_problem(title="before WAL")
+    writer = sqlite3.connect(services.runtime.paths.database)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "UPDATE problems SET title = ? WHERE id = ?",
+            ("committed in WAL", problem.id),
+        )
+        writer.commit()
+
+        backup = services.create_backup(tmp_path / "wal-backup.zip")
+        snapshot = tmp_path / "local-snapshot.sqlite"
+        with zipfile.ZipFile(backup, "r") as archive:
+            snapshot.write_bytes(archive.read("database/error_book.db"))
+        with closing(sqlite3.connect(snapshot)) as connection:
+            title = connection.execute(
+                "SELECT title FROM problems WHERE id = ?", (problem.id,)
+            ).fetchone()[0]
+    finally:
+        writer.close()
+
+    assert title == "committed in WAL"
+
+
+def test_local_backup_failure_preserves_existing_destination(
+    services: AppServices, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    services.create_problem(title="atomic local backup")
+    destination = tmp_path / "existing.zip"
+    destination.write_bytes(b"previous-backup")
+
+    def fail_write(
+        self, filename, arcname=None, compress_type=None, compresslevel=None
+    ):
+        del self, filename, arcname, compress_type, compresslevel
+        raise OSError("simulated local backup failure")
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", fail_write)
+
+    with pytest.raises(OSError, match="simulated"):
+        services.create_backup(destination)
+
+    assert destination.read_bytes() == b"previous-backup"
+    assert list(tmp_path.glob(".existing.zip.*.tmp")) == []
+    assert list(services.runtime.paths.cache_dir.glob("backup-export-*")) == []
+
+
+def test_local_backup_rejects_identity_replaced_after_bootstrap(
+    services: AppServices, tmp_path: Path
+) -> None:
+    identity_path = services.runtime.paths.identity_file
+    payload = json.loads(identity_path.read_text(encoding="utf-8"))
+    payload["database_id"] = "db_replaced"
+    identity_path.write_text(json.dumps(payload), encoding="utf-8")
+    destination = tmp_path / "mismatched-identity.zip"
+
+    with pytest.raises(DomainError, match="不匹配"):
+        services.create_backup(destination)
+
+    assert not destination.exists()
+
+
+def test_word_export_preserves_structured_table_order(
+    services: AppServices, tmp_path: Path
+) -> None:
+    problem = services.create_problem(title="结构化导出", status="active")
+    services.update_problem(
+        problem.id,
+        {
+            "question_content_json": json.dumps(
+                [
+                    {"type": "text", "content": "先阅读表格："},
+                    {
+                        "type": "table",
+                        "rows": [
+                            [{"content": "项目", "colspan": 2}],
+                            ["x", "$x^2$"],
+                        ],
+                    },
+                    {"type": "formula", "content": "x^2+1"},
+                ],
+                ensure_ascii=False,
+            )
+        },
+    )
+
+    destination = services.export_problems_docx(
+        [problem.id], tmp_path / "structured.docx"
+    )
+
+    document = Document(str(destination))
+    assert any(paragraph.text == "先阅读表格：" for paragraph in document.paragraphs)
+    assert document.tables[0].cell(0, 0).text == "项目"
+    assert document.tables[0].cell(1, 1).text == "$x^2$"
+
+
 def test_chapter_template_roundtrip(services: AppServices, tmp_path: Path) -> None:
     sub = services.create_subject("线性代数")
     services.create_chapter(sub.id, "行列式")
@@ -170,6 +324,17 @@ def test_chapter_template_roundtrip(services: AppServices, tmp_path: Path) -> No
     # 再导入到同名科目应跳过已有章节且不报错
     services.import_chapter_template(tpl)
     assert len(services.list_chapters(sub.id)) == 2
+
+
+def test_chapter_template_import_rejects_oversized_file_before_json_decode(
+    services: AppServices, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = tmp_path / "oversized-template.json"
+    template.write_bytes(b"12345")
+    monkeypatch.setattr(services_module, "MAX_CHAPTER_TEMPLATE_BYTES", 4)
+
+    with pytest.raises(DomainError, match="过大"):
+        services.import_chapter_template(template)
 
 
 def test_chapter_template_v2_preserves_duplicate_names_in_different_paths(
@@ -334,9 +499,11 @@ def test_catalog_choices_reordering_and_problem_category_move(
         math.id,
     ]
     services.reorder_chapter(derivative.id, -1)
-    assert [chapter.id for chapter in services.list_chapters(math.id) if chapter.parent_id is None][
-        :2
-    ] == [derivative.id, integral.id]
+    assert [
+        chapter.id
+        for chapter in services.list_chapters(math.id)
+        if chapter.parent_id is None
+    ][:2] == [derivative.id, integral.id]
 
     assert (
         services.move_problems_to_category(
@@ -369,6 +536,4 @@ def test_catalog_choices_reordering_and_problem_category_move(
     scopes = services.list_knowledge_scopes()
     assert any(scope.label == "高等数学 / 积分 / 二重积分" for scope in scopes)
     with pytest.raises(DomainError, match="天数"):
-        services.list_problems(
-            ProblemFilter(status="active", created_within_days=0)
-        )
+        services.list_problems(ProblemFilter(status="active", created_within_days=0))

@@ -42,14 +42,13 @@ from yancuo_win.application.note_ai_service import (
 )
 from yancuo_win.application.note_intake_service import NoteIntakeService
 from yancuo_win.application.services import AppServices
-from yancuo_win.application.note_service import NoteService
+from yancuo_win.application.note_service import NoteListRow, NoteService
 from yancuo_win.application.note_ai_search_service import NoteAiSearchService
 from yancuo_win.application.unified_search_service import UnifiedSearchIndexService
 from yancuo_win.data.models import NoteBlock, NoteDocument, NoteIntakeSession
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.tasks.note_search_worker import NoteAiSearchWorker
-from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.icons import bind_icon
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
@@ -65,6 +64,7 @@ from yancuo_win.ui.widgets import (
     ghost_button,
     primary_button,
     set_tab_order_chain,
+    show_dropdown_menu,
 )
 
 _STATUS_LABELS = {
@@ -81,6 +81,14 @@ _BLOCK_LABELS = {
     "callout": "提示",
     "image": "图片",
 }
+_NOTE_LIST_BATCH_SIZE = 500
+
+_NOTE_STATUS_LABELS = {
+    "active": "正式",
+    "inbox": "草稿",
+    "archived": "已归档",
+    "trashed": "回收站",
+}
 
 
 class NoteDraftGroupTree(QTreeWidget):
@@ -90,6 +98,7 @@ class NoteDraftGroupTree(QTreeWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._from_task_queue = False
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
@@ -668,6 +677,7 @@ class NotePage(QWidget):
     status_message = Signal(str)
     notes_changed = Signal()
     add_to_review_requested = Signal(str)
+    library_shown = Signal()
 
     def __init__(
         self,
@@ -677,10 +687,10 @@ class NotePage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.notes = notes
-        self._notes: list[NoteDocument] = []
+        self._notes: list[NoteListRow] = []
+        self._note_visible_count = 0
         self._note: NoteDocument | None = None
         self._block: NoteBlock | None = None
-        self._original_path: Path | None = None
         self._loading = False
         self._narrow_layout = False
         self._narrow_space_open = False
@@ -718,16 +728,13 @@ class NotePage(QWidget):
         library_root.setSpacing(12)
 
         self.new_note_button = primary_button("新建笔记")
-        self.new_note_button.clicked.connect(self._show_manual_create)
-        ai_note_button = QPushButton("AI 图片录入")
-        ai_note_button.clicked.connect(self._show_ai_intake)
+        self.new_note_button.clicked.connect(self._show_new_note_menu)
         self.resume_draft_button = ghost_button("继续草稿")
         self.resume_draft_button.clicked.connect(self._resume_note_draft)
         header = PageHeader(
             "笔记", "用可编辑的内容块整理公式、概念和学习记录。"
         )
         header.add_action(self.resume_draft_button)
-        header.add_action(ai_note_button)
         header.add_action(self.new_note_button)
         library_root.addWidget(header)
 
@@ -857,7 +864,7 @@ class NotePage(QWidget):
         self.note_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.note_list.setWordWrap(True)
+        self.note_list.setWordWrap(False)
         self.note_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.note_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
@@ -875,6 +882,9 @@ class NotePage(QWidget):
         self.note_list.currentItemChanged.connect(self._select_note)
         self.note_list.itemSelectionChanged.connect(self._update_bulk_actions)
         self.note_list.itemDoubleClicked.connect(self._open_selected_note_detail)
+        self.note_list.verticalScrollBar().valueChanged.connect(
+            self._load_more_notes_at_end
+        )
         middle.body.addWidget(self.note_list, stretch=1)
         self.bulk_actions = QFrame()
         self.bulk_actions.setObjectName("ContextBar")
@@ -1050,10 +1060,9 @@ class NotePage(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
-        detail_header = PageHeader("笔记详情")
+        detail_header = PageHeader("笔记详情", "笔记状态")
         self.note_title_label = detail_header.title
         self.note_status = detail_header.description
-        self.note_status.show()
         self.detail_back_button = IconButton("chevron-left", "返回笔记库")
         self.detail_back_button.clicked.connect(self._return_to_library)
         detail_header.add_leading(self.detail_back_button)
@@ -1070,20 +1079,18 @@ class NotePage(QWidget):
         actions = QHBoxLayout(action_bar)
         actions.setContentsMargins(10, 8, 10, 8)
         actions.setSpacing(8)
-        self.original_button = ghost_button("查看原图")
-        self.original_button.setToolTip("按需打开录入时保存的不可变原图")
-        self.original_button.clicked.connect(self._open_original)
         self.read_button = primary_button("完成编辑")
         self.read_button.clicked.connect(lambda: self._set_mode("read"))
         self.edit_button = primary_button("编辑笔记")
         self.edit_button.clicked.connect(lambda: self._set_mode("edit"))
         self.more_button = ghost_button("更多")
         bind_icon(self.more_button, "more-horizontal")
-        more_menu = QMenu(self.more_button)
-        more_menu.addAction("加入合集", self._edit_note_collections)
-        more_menu.addAction("加入复习计划", self._request_review)
-        self.more_button.setMenu(more_menu)
-        actions.addWidget(self.original_button)
+        self.more_menu = QMenu(self.more_button)
+        self.more_menu.addAction("加入合集", self._edit_note_collections)
+        self.more_menu.addAction("加入复习计划", self._request_review)
+        self.more_button.clicked.connect(
+            lambda: show_dropdown_menu(self.more_menu, self.more_button)
+        )
         actions.addWidget(self.more_button)
         actions.addStretch(1)
         actions.addWidget(self.read_button)
@@ -1218,7 +1225,7 @@ class NotePage(QWidget):
         current_id = select_note_id or (self._note.id if self._note else None)
         try:
             self._reload_collections()
-            self._notes = self.notes.list_notes(
+            self._notes = self.notes.list_note_summaries(
                 status=self.status_filter.currentData()
             )
             if self._collection_filter_id == "__unfiled__":
@@ -1260,14 +1267,21 @@ class NotePage(QWidget):
         selected_row = -1
         with deferred_view_updates(self.note_list):
             self.note_list.clear()
-            for index, note in enumerate(self._notes):
-                title = note.title or "未命名笔记"
-                preview = note.summary.strip() or self._block_preview(note)
-                item = QListWidgetItem(f"{title}\n{preview or '尚未添加内容'}")
-                item.setData(Qt.ItemDataRole.UserRole, note.id)
-                self.note_list.addItem(item)
-                if note.id == current_id:
-                    selected_row = index
+            self._note_visible_count = 0
+            current_index = next(
+                (
+                    index
+                    for index, note in enumerate(self._notes)
+                    if note.id == current_id
+                ),
+                -1,
+            )
+            target_count = max(
+                _NOTE_LIST_BATCH_SIZE,
+                current_index + 1 if current_index >= 0 else 0,
+            )
+            self._append_note_batch(target_count)
+            selected_row = current_index
         self._loading = False
         if selected_row >= 0:
             self.note_list.setCurrentRow(selected_row)
@@ -1277,6 +1291,38 @@ class NotePage(QWidget):
             self._note = None
             self._block = None
         self._update_bulk_actions()
+
+    def _append_note_batch(self, target_count: int | None = None) -> None:
+        if self._note_visible_count >= len(self._notes):
+            return
+        end = min(
+            len(self._notes),
+            target_count
+            if target_count is not None
+            else self._note_visible_count + _NOTE_LIST_BATCH_SIZE,
+        )
+        for note in self._notes[self._note_visible_count : end]:
+            title = note.title or "未命名笔记"
+            preview = note.summary.strip()
+            status = _NOTE_STATUS_LABELS.get(note.status, note.status)
+            detail = f"{status} · {preview or '尚未添加内容'}"
+            item = QListWidgetItem(f"{title}\n{detail}")
+            item.setData(Qt.ItemDataRole.UserRole, note.id)
+            item.setToolTip(f"{title}\n{detail}")
+            item.setData(
+                Qt.ItemDataRole.AccessibleDescriptionRole,
+                f"{status}笔记；双击打开独立详情页",
+            )
+            self.note_list.addItem(item)
+        self._note_visible_count = end
+
+    def _load_more_notes_at_end(self, value: int) -> None:
+        if self._loading or self._note_visible_count >= len(self._notes):
+            return
+        scroll = self.note_list.verticalScrollBar()
+        if value >= scroll.maximum():
+            with deferred_view_updates(self.note_list):
+                self._append_note_batch()
 
     def _reload_collections(self) -> None:
         collections = self.notes.list_collections()
@@ -1370,14 +1416,6 @@ class NotePage(QWidget):
     def _on_note_ai_search_done(self, matches: object) -> None:
         self._note_ai_search_ids = {item.note_id for item in matches}
         self.reload()
-
-    @staticmethod
-    def _block_preview(note: NoteDocument) -> str:
-        for block in note.blocks:
-            value = block.content_latex if block.block_type == "formula" else block.content_markdown
-            if value.strip():
-                return value.replace("\n", " ")[:60]
-        return ""
 
     def _selected_note_ids(self) -> list[str]:
         return [
@@ -1480,6 +1518,7 @@ class NotePage(QWidget):
             if choice != QMessageBox.StandardButton.Discard:
                 return
         self._restore_library_state()
+        self.library_shown.emit()
 
     def _capture_library_state(self, note_id: str | None = None) -> None:
         self._library_state = {
@@ -1556,28 +1595,6 @@ class NotePage(QWidget):
         self.save_note_button.setEnabled(editable)
         self.trash_button.setVisible(editable)
         self.restore_button.setVisible(note.status == "trashed")
-        original_asset = next(
-            (asset for asset in note.assets if asset.role == "original"),
-            None,
-        )
-        self._original_path = (
-            self.note_ai.store.resolve(original_asset.relative_path)
-            if original_asset is not None
-            else None
-        )
-        has_original = original_asset is not None
-        original_available = bool(
-            self._original_path is not None and self._original_path.is_file()
-        )
-        self.original_button.setVisible(
-            has_original and self.mode_stack.currentIndex() == 1
-        )
-        self.original_button.setEnabled(original_available)
-        self.original_button.setToolTip(
-            "按需打开录入时保存的不可变原图"
-            if original_available
-            else "原图文件已丢失，请从备份恢复"
-        )
         self.block_list.clear()
         for index, block in enumerate(note.blocks, start=1):
             value = block.content_latex if block.block_type == "formula" else block.content_markdown
@@ -1635,6 +1652,16 @@ class NotePage(QWidget):
 
     def _show_library(self, *_args, select_note_id: str | None = None) -> None:
         self._restore_library_state(select_note_id=select_note_id)
+        self.library_shown.emit()
+
+    def _show_new_note_menu(self) -> None:
+        """新建笔记下拉：AI 图片录入 / 手动录入。"""
+        menu = QMenu(self)
+        ai = menu.addAction("AI 图片录入")
+        ai.triggered.connect(self._show_ai_intake)
+        manual = menu.addAction("手动录入")
+        manual.triggered.connect(self._show_manual_create)
+        show_dropdown_menu(menu, self.new_note_button)
 
     def _show_manual_create(self) -> None:
         if self.page_stack.currentWidget() is self.library_page:
@@ -1889,12 +1916,20 @@ class NotePage(QWidget):
             return
         self._start_note_worker(intake, source_path)
 
+    def _draft_preview_back(self) -> None:
+        """返回：从任务队列进入时直接回任务列表，否则回到 AI 录入页。"""
+        if self._from_task_queue:
+            self._from_task_queue = False
+            self.library_shown.emit()
+            return
+        self._show_ai_intake()
+
     def _show_draft_preview(self, intake: NoteIntakeSession) -> None:
         if self.draft_preview_page is not None:
             self.page_stack.removeWidget(self.draft_preview_page)
             self.draft_preview_page.deleteLater()
         page = NoteDraftPreviewPage(intake, self.note_intake, self)
-        page.back_requested.connect(self._show_ai_intake)
+        page.back_requested.connect(self._draft_preview_back)
         page.confirmed.connect(self._finish_draft_confirmation)
         self.draft_preview_page = page
         self.page_stack.addWidget(page)
@@ -2034,9 +2069,6 @@ class NotePage(QWidget):
         self.read_button.setVisible(not reading)
         self.edit_button.setVisible(reading)
         self.more_button.setVisible(reading)
-        self.original_button.setVisible(
-            reading and self._original_path is not None
-        )
         if not reading:
             self._set_editor_section("content")
         if mode == "read":
@@ -2075,24 +2107,6 @@ class NotePage(QWidget):
             ),
             tag_names=(tag.name for tag in note.tags),
         )
-
-    def _open_original(self) -> None:
-        if self._original_path is None or not self._original_path.is_file():
-            self.status_message.emit("原图文件不存在，请从备份恢复")
-            return
-        pixmap = QPixmap(str(self._original_path))
-        if pixmap.isNull():
-            self.status_message.emit("原图格式无法读取")
-            return
-        regions = (
-            self._decode_source_region(block.source_region_json)
-            for block in (self._note.blocks if self._note is not None else ())
-        )
-        ImageViewerDialog(
-            pixmap,
-            self,
-            source_regions=(region for region in regions if region),
-        ).exec()
 
     @staticmethod
     def _decode_source_region(value: str) -> dict[str, float]:
