@@ -971,14 +971,6 @@ def app_stylesheet(theme: str = "light") -> str:
         background: {t.surface_subtle};
         border-color: {t.hover_border};
     }}
-    QComboBox::drop-down {{
-        subcontrol-origin: padding;
-        subcontrol-position: top right;
-        width: 34px;
-        border: none;
-        border-top-right-radius: {m.radius_control}px;
-        border-bottom-right-radius: {m.radius_control}px;
-    }}
     QComboBox::drop-down:hover {{
         background: {t.list_hover};
     }}
@@ -1015,10 +1007,6 @@ def app_stylesheet(theme: str = "light") -> str:
     }}
     QComboBox:on::drop-down {{
         background: {t.list_hover};
-    }}
-    QComboBox::down-arrow {{
-        width: 9px;
-        height: 9px;
     }}
     QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
         border: 1px solid {t.focus_ring};

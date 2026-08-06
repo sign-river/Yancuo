@@ -2412,7 +2412,7 @@ class MainWindow(QMainWindow):
         current_path = self.library_breadcrumb.text()
         current_label = current_path.split(" / ", 1)[-1]
         self.search_scope_combo.blockSignals(True)
-        self.search_scope_combo.setItemText(0, f"当前：{current_label}")
+        self.search_scope_combo.setItemText(0, current_label)
         if self._library_view == "process":
             self.search_scope_combo.setCurrentIndex(0)
             self.search_scope_combo.setEnabled(False)
