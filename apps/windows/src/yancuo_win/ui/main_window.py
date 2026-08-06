@@ -440,7 +440,9 @@ class MainWindow(QMainWindow):
         self.note_page.add_to_review_requested.connect(self._add_note_to_daily_review)
         self.stack.addWidget(self.note_page)
         self.stack.addWidget(self._build_settings_page())
-        self.problem_detail_page = ProblemDetailPage(self.problem_chat)
+        self.problem_detail_page = ProblemDetailPage(
+            self.problem_chat, self.ai_coordinator
+        )
         self.problem_detail_page.back_requested.connect(self._close_problem_detail)
         self.problem_detail_page.edit_requested.connect(self._edit_problem_from_detail)
         self.problem_detail_page.previous_requested.connect(
@@ -704,6 +706,9 @@ class MainWindow(QMainWindow):
         if job is not None and job.domain == "question_intake":
             if job_id != self.intake_page.ai_job_id:
                 self._show_status_toast(f"一个 AI 录题任务失败：{message}")
+            return
+        if job is not None and job.domain == "problem_chat":
+            # AI 讨论的失败由详情页对话区自己展示
             return
         self._on_ai_job_fail(job_id, message)
 

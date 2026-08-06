@@ -41,6 +41,7 @@ _DOMAIN_LABELS = {
     "note_intake": "笔记识别",
     "question_completion": "题目补全",
     "note_completion": "笔记补全",
+    "problem_chat": "题目对话",
     "generic": "后台任务",
 }
 _JOB_TYPE_LABELS = {

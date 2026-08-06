@@ -33,7 +33,8 @@ from PySide6.QtWidgets import (
 
 from yancuo_win.application.problem_chat_service import ProblemChatService, ProblemReference
 from yancuo_win.data.models import Problem
-from yancuo_win.tasks.worker import ProblemChatWorker
+from yancuo_win.domain.rules import DomainError
+from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.ui.image_viewer import ImageViewerDialog
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import (
@@ -565,17 +566,28 @@ class ProblemDetailPage(QWidget):
             for divider in self._toolbar_dividers:
                 divider.setVisible(True)
 
-    def __init__(self, chat: ProblemChatService | None = None, parent=None) -> None:
+    def __init__(
+        self,
+        chat: ProblemChatService | None = None,
+        coordinator: AIJobCoordinator | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.chat = chat
+        self.ai_coordinator = coordinator
         self.problem_id: str | None = None
-        self._chat_worker: ProblemChatWorker | None = None
+        self._chat_job_id: str | None = None
         self._streaming_bubble: _ChatBubble | None = None
         self._streaming_text = ""
         self._stream_timer = QTimer(self)
         self._stream_timer.setInterval(120)
         self._stream_timer.timeout.connect(self._flush_stream_bubble)
         self._conversation_by_problem: dict[str, str] = {}
+        if coordinator is not None:
+            coordinator.register_handler("problem_chat", self._run_problem_chat_job)
+            coordinator.job_finished.connect(self._on_problem_chat_job_finished)
+            coordinator.job_failed.connect(self._on_problem_chat_job_failed)
+            coordinator.job_progress.connect(self._on_problem_chat_progress)
         self._reader_scroll_by_problem: dict[str, int] = {}
         self._pending_reader_scroll = 0
         self._focus_before_chat: QWidget | None = None
@@ -1189,7 +1201,10 @@ class ProblemDetailPage(QWidget):
             self._refresh_conversations()
 
     def _send_chat(self) -> None:
-        if self.chat is None or self._chat_worker is not None:
+        if self.chat is None or self._chat_job_id is not None:
+            return
+        if self.ai_coordinator is None:
+            self._set_chat_history("聊天任务队列不可用，请重启应用后重试。")
             return
         conversation_id = self._conversation_id()
         if not conversation_id:
@@ -1206,30 +1221,28 @@ class ProblemDetailPage(QWidget):
         self._streaming_text = ""
         self._streaming_bubble = self._chat_flow.add_message("assistant", "正在生成回答…")
         self._set_chat_busy(True)
-        references = self.reference_canvas.references()
-        worker = ProblemChatWorker(self.chat, conversation_id, content, references, self)
-        worker.text_delta.connect(self._on_chat_delta)
-        worker.finished_ok.connect(self._on_chat_completed)
-        worker.failed.connect(self._on_chat_failed)
-        worker.finished.connect(self._on_chat_worker_finished)
-        self._chat_worker = worker
-        worker.start()
+        references = [
+            reference.as_dict() for reference in self.reference_canvas.references()
+        ]
+        try:
+            job = self.ai_coordinator.ai.create_background_job(
+                domain="problem_chat",
+                context_id=conversation_id,
+                job_type="chat",
+                config={"content": content, "references": references},
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._set_chat_busy(False)
+            self._on_chat_failed(str(exc))
+            return
+        self._chat_job_id = job.id
+        self.ai_coordinator.enqueue(job.id)
 
     def _set_chat_busy(self, busy: bool) -> None:
         self.chat_input.setEnabled(not busy)
         self.send_chat_button.setEnabled(True)
         self.send_chat_button.setText("停止生成" if busy else "发送")
         self.conversation_combo.setEnabled(not busy)
-
-    def _on_chat_completed(self, message: object) -> None:
-        self._stream_timer.stop()
-        self._flush_stream_bubble()
-        self._streaming_bubble = None
-        status = getattr(message, "status", "failed")
-        if status == "complete":
-            self.reference_canvas.clear()
-            self._finish_reference_mode()
-        self._load_conversation()
 
     def _on_chat_failed(self, error: str) -> None:
         self._stream_timer.stop()
@@ -1240,18 +1253,6 @@ class ProblemDetailPage(QWidget):
         else:
             self._set_chat_history(f"发送失败：{error}")
 
-    def _on_chat_worker_finished(self) -> None:
-        worker = self._chat_worker
-        self._chat_worker = None
-        self._set_chat_busy(False)
-        if worker is not None:
-            worker.deleteLater()
-
-    def _on_chat_delta(self, delta: str) -> None:
-        self._streaming_text += delta
-        if self._streaming_bubble is not None and not self._stream_timer.isActive():
-            self._stream_timer.start()
-
     def _flush_stream_bubble(self) -> None:
         if self._streaming_bubble is None:
             return
@@ -1260,20 +1261,94 @@ class ProblemDetailPage(QWidget):
         self._chat_flow.scroll_to_bottom()
 
     def _toggle_send_or_stop(self) -> None:
-        if self._chat_worker is None:
+        if self._chat_job_id is None:
             self._send_chat()
             return
-        # 停止生成：恢复输入状态，后台任务完成后结果仍会保存
-        worker = self._chat_worker
-        if hasattr(worker, "cancel"):
-            worker.cancel()
+        job_id = self._chat_job_id
+        if self.ai_coordinator is not None:
+            self.ai_coordinator.cancel(job_id)
+        self._chat_job_id = None
         self._stream_timer.stop()
-        self._chat_worker = None
-        worker.deleteLater()
-        self._set_chat_busy(False)
         if self._streaming_bubble is not None:
             self._flush_stream_bubble()
             self._streaming_bubble = None
+        self._set_chat_busy(False)
+
+    def _run_problem_chat_job(
+        self, job_id: str, emit_progress, should_cancel
+    ) -> dict[str, Any]:
+        job = self.ai_coordinator.ai.get_job(job_id)
+        if job is None:
+            raise DomainError("聊天任务不存在")
+        try:
+            config = json.loads(job.config_json)
+        except json.JSONDecodeError:
+            config = {}
+        content = str(config.get("content") or "")
+        raw_references = config.get("references") or []
+        references = [
+            ProblemReference.from_value(value) for value in raw_references
+        ]
+
+        def receive(delta: str) -> None:
+            if should_cancel() or not delta:
+                return
+            emit_progress(
+                {
+                    "stage": "streaming",
+                    "label": "正在接收 AI 回复",
+                    "text_delta": delta,
+                }
+            )
+
+        message = self.chat.send_message(
+            job.context_id,
+            content,
+            references,
+            on_text_delta=receive,
+        )
+        return {
+            "conversation_id": job.context_id,
+            "message_id": message.id,
+        }
+
+    def _on_problem_chat_progress(self, job_id: str, event: object) -> None:
+        if job_id != self._chat_job_id:
+            return
+        if isinstance(event, dict) and event.get("stage") == "streaming":
+            delta = event.get("text_delta") or ""
+            if delta:
+                self._streaming_text += delta
+                if (
+                    self._streaming_bubble is not None
+                    and not self._stream_timer.isActive()
+                ):
+                    self._stream_timer.start()
+
+    def _on_problem_chat_job_finished(self, job_id: str) -> None:
+        if job_id != self._chat_job_id:
+            return
+        self._chat_job_id = None
+        self._stream_timer.stop()
+        self._flush_stream_bubble()
+        self._streaming_bubble = None
+        self._set_chat_busy(False)
+        self.reference_canvas.clear()
+        self._finish_reference_mode()
+        self._load_conversation()
+
+    def _on_problem_chat_job_failed(self, job_id: str, message: str) -> None:
+        if job_id != self._chat_job_id:
+            return
+        self._chat_job_id = None
+        self._stream_timer.stop()
+        if self._streaming_bubble is not None:
+            text = self._streaming_text or "正在生成回答…"
+            self._streaming_bubble.set_markdown(f"{text}\n\n（发送失败：{message}）")
+            self._streaming_bubble = None
+        else:
+            self._set_chat_history(f"发送失败：{message}")
+        self._set_chat_busy(False)
 
     def _show_chat_more_menu(self) -> None:
         menu = QMenu(self)

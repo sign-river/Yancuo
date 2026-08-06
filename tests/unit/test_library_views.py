@@ -483,6 +483,45 @@ def test_problem_detail_new_chat_skips_empty_current_conversation(
     assert page.conversation_combo.currentData() != empty.id
 
 
+def test_problem_detail_chat_runs_through_task_queue(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
+    window._open_problem_detail(problem.id)
+    page = window.problem_detail_page
+    page._toggle_chat()
+    app.processEvents()
+
+    page.chat_input.setPlainText("解释一下")
+    page._send_chat()
+    job_id = page._chat_job_id
+    assert job_id is not None
+    job = window.ai.get_job(job_id)
+    assert job is not None
+    assert job.domain == "problem_chat"
+    assert job.job_type == "chat"
+
+    for _ in range(100):
+        app.processEvents()
+        if page._chat_job_id is None:
+            break
+        time.sleep(0.02)
+    assert page._chat_job_id is None
+    completed = window.ai.get_job(job_id)
+    assert completed is not None and completed.status == "completed"
+    conversation_id = page._conversation_id()
+    conversation = window.problem_chat.get_conversation(conversation_id)
+    assert conversation is not None
+    assert [(m.role, m.status) for m in conversation.messages] == [
+        ("user", "complete"),
+        ("assistant", "complete"),
+    ]
+
+
 def test_problem_detail_reference_canvas_stays_embedded_and_keeps_normalized_regions(
     window: MainWindow,
     tmp_path: Path,
