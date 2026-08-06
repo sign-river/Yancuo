@@ -242,3 +242,8 @@ node_modules/
 
 # CloudBase 部署包（构建产物，不提交）
 cloudbase/release/
+
+# Local debug artifacts (UI screenshots / OCR crops)
+.tmp/
+/_*.png
+/_*.jpg
