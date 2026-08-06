@@ -2140,7 +2140,7 @@ class MainWindow(QMainWindow):
             else:
                 self.note_page._show_ai_intake()
                 self.note_page.ai_intake_status.setText(
-                    "任务仍在后台处理中，可从任务队列查看实时回复。"
+                    "任务仍在后台处理中，可从任务队列查看识别进度。"
                 )
             return
         self.ai_job_detail_page.open_job(job_id)
