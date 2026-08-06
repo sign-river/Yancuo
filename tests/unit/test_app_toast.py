@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from PySide6.QtCore import QAbstractAnimation
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -12,6 +15,25 @@ def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
+def _wait_until(app: QApplication, predicate: Callable[[], bool], timeout_ms: int = 5000) -> None:
+    """Poll the event loop until ``predicate`` holds.
+
+    GitHub-hosted Windows runners are shared/virtualized and can drive
+    QPropertyAnimation noticeably slower than wall-clock time, so a fixed
+    ``QTest.qWait`` barely longer than the animation duration is not
+    reliable.  Waiting for the actual end state (slide stopped / toast
+    removed) keeps these assertions deterministic on any runner.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while not predicate():
+        if time.monotonic() >= deadline:
+            break
+        QTest.qWait(10)
+        app.processEvents()
+
+
 def test_error_toast_shows_title_body_and_anchors_top_right() -> None:
     app = _app()
     host = QWidget()
@@ -20,7 +42,10 @@ def test_error_toast_shows_title_body_and_anchors_top_right() -> None:
     app.processEvents()
     stack = ToastStack(host)
     stack.show_error("创建失败", "请输入复习计划名称")
-    QTest.qWait(320)
+    _wait_until(
+        app,
+        lambda: stack._toasts and stack._toasts[0]._slide.state() == QAbstractAnimation.State.Stopped,
+    )
     app.processEvents()
 
     assert len(stack._toasts) == 1
@@ -35,8 +60,7 @@ def test_error_toast_shows_title_body_and_anchors_top_right() -> None:
     assert 0 < toast.progress.value() <= toast.progress.maximum()
 
     toast.dismiss()
-    QTest.qWait(320)
-    app.processEvents()
+    _wait_until(app, lambda: len(stack._toasts) == 0)
     assert len(stack._toasts) == 0
     host.close()
 
@@ -50,6 +74,11 @@ def test_toasts_stack_with_gap_without_overlap() -> None:
     stack = ToastStack(host)
     stack.show_error("第一条", "内容一")
     stack.show_error("第二条", "内容二")
+    _wait_until(
+        app,
+        lambda: stack._toasts
+        and all(t._slide.state() == QAbstractAnimation.State.Stopped for t in stack._toasts),
+    )
     app.processEvents()
 
     assert len(stack._toasts) == 2
@@ -58,8 +87,7 @@ def test_toasts_stack_with_gap_without_overlap() -> None:
     assert first.x() == second.x()
 
     first.dismiss()
-    QTest.qWait(320)
-    app.processEvents()
+    _wait_until(app, lambda: len(stack._toasts) == 1)
     assert len(stack._toasts) == 1
     assert stack._toasts[0].y() == 80
     host.close()
@@ -90,8 +118,7 @@ def test_countdown_progress_pauses_when_paused() -> None:
     assert toast.progress.value() < paused_value
 
     toast.dismiss()
-    QTest.qWait(320)
-    app.processEvents()
+    _wait_until(app, lambda: len(stack._toasts) == 0)
     host.close()
 
 
@@ -113,8 +140,7 @@ def test_generic_show_message_keeps_compatibility() -> None:
     assert toast.progress.property("tone") == "success"
 
     toast.dismiss()
-    QTest.qWait(320)
-    app.processEvents()
+    _wait_until(app, lambda: len(stack._toasts) == 0)
     host.close()
 
 
@@ -134,8 +160,7 @@ def test_show_message_auto_classifies_warning_tone() -> None:
     assert toast.icon_label is not None
 
     toast.dismiss()
-    QTest.qWait(320)
-    app.processEvents()
+    _wait_until(app, lambda: len(stack._toasts) == 0)
     host.close()
 
 
@@ -154,6 +179,5 @@ def test_show_message_explicit_tone_wins() -> None:
     assert toast.progress.property("tone") == "info"
 
     toast.dismiss()
-    QTest.qWait(320)
-    app.processEvents()
+    _wait_until(app, lambda: len(stack._toasts) == 0)
     host.close()

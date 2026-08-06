@@ -799,6 +799,16 @@ class AppToast(QFrame):
         self._fade = QPropertyAnimation(self._opacity, b"opacity", self)
         self._fade.setDuration(240)
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # When a slide ends, snap to the exact target.  QPropertyAnimation
+        # interpolates QPoint through floats and rounds to pixels, so on slow or
+        # virtualized CI runners the final frame can land one pixel off the
+        # computed anchor; snapping keeps the card at the precise top-right spot.
+        self._slide.finished.connect(self._snap_to_slide_target)
+
+    def _snap_to_slide_target(self) -> None:
+        end = self._slide.endValue()
+        if isinstance(end, QPoint) and self.pos() != end:
+            self.move(end)
 
     def start_at(self, target: QPoint) -> None:
         """Position off-screen, then slide in and fade in from the right."""
