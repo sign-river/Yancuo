@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from yancuo_win.data.models import AiJob
 from yancuo_win.ui.task_center import TaskQueuePage, _job_label
@@ -31,6 +31,12 @@ class _FakeAI:
 
     def get_job(self, job_id: str):
         return next((j for j in self._jobs if j.id == job_id), None)
+
+    def delete_jobs(self, job_ids) -> int:
+        ids = {str(job_id) for job_id in job_ids}
+        before = len(self._jobs)
+        self._jobs = [job for job in self._jobs if job.id not in ids]
+        return before - len(self._jobs)
 
     def today_cost(self) -> float:
         return 0.0
@@ -92,3 +98,24 @@ def test_refresh_keeps_selected_job_after_rebuild() -> None:
     assert page.active_pane._selected_job_id() == "q2"
     page.close()
 
+
+def test_clear_records_rebuilds_queue_when_all_jobs_removed(monkeypatch) -> None:
+    _ = QApplication.instance() or QApplication([])
+    ai = _FakeAI([
+        _job("d1", "question_intake", status="completed"),
+        _job("d2", "question_intake", status="completed"),
+    ])
+    page = TaskQueuePage(ai)
+    pane = page.done_pane
+    assert pane.list.count() == 2
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    pane._clear_records()
+    assert ai._jobs == []
+    # 清空后必须重建列表，显示“暂无已完成任务”占位，而不是残留旧任务
+    assert pane.list.count() == 1
+    assert pane.list.item(0).data(256) is None
+    assert "暂无" in pane.list.item(0).text()
+    page.close()

@@ -292,14 +292,15 @@ class _QueuePane(QWidget):
         row.addStretch(1)
         layout.addWidget(actions)
 
-    def refresh(self) -> None:
+    def refresh(self, *, force: bool = False) -> None:
         jobs = [
             job for job in self.ai.list_jobs(limit=100)
             if self.predicate(job)
         ]
         snapshot = [(job.id, _job_label(job)) for job in jobs]
-        # 内容没变就不重建列表，避免每 2s 刷新把滚动位置和选择重置到顶部
-        if snapshot == self._last_snapshot:
+        # 内容没变就不重建列表，避免每 2s 刷新把滚动位置和选择重置到顶部；
+        # 清除记录等主动变更用 force=True 强制重建，避免清空后残留旧条目。
+        if not force and snapshot == self._last_snapshot:
             return
         self._last_snapshot = snapshot
         current = self.list.currentItem()
@@ -344,8 +345,7 @@ class _QueuePane(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "清除失败", str(exc))
             return
-        self._last_snapshot = []
-        self.refresh()
+        self.refresh(force=True)
 
     def _selected_job_id(self) -> str | None:
         item = self.list.currentItem()
@@ -363,8 +363,13 @@ class _QueuePane(QWidget):
 
     def _open_selected(self) -> None:
         job_id = self._selected_job_id()
-        if job_id:
-            self.open_requested.emit(job_id)
+        if not job_id:
+            return
+        if self.ai.get_job(job_id) is None:
+            # 记录已被清除或外部删除，避免进入详情页报“任务不存在”
+            self.refresh(force=True)
+            return
+        self.open_requested.emit(job_id)
 
     def _run_selected(self) -> None:
         job_id = self._selected_job_id()
