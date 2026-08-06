@@ -1191,6 +1191,15 @@ def test_local_search_controls_explain_mode_and_privacy(
     assert window.search_scope_combo.currentData() == "current"
 
 
+def test_search_scope_label_tracks_breadcrumb_without_prefix(
+    window: MainWindow,
+) -> None:
+    window._set_library_view("process")
+    _select_mode(window, "active")
+    assert window.search_scope_combo.itemText(0) == "全部正式题目"
+    assert not window.search_scope_combo.itemText(0).startswith("当前")
+
+
 def test_local_search_uses_index_and_current_knowledge_scope(
     window: MainWindow,
 ) -> None:
