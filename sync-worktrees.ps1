@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Force   # 子分支工作树里有未提交改动时，也强制覆盖
 )
 
@@ -21,8 +21,9 @@ foreach ($line in $lines) {
     if ($line -like 'worktree *') {
         $wt = ($line -replace '^worktree ', '').Trim()
     }
-    elseif ($line -like 'branch refs/heads/*' -and $wt -and $wt -ne $root) {
+    elseif ($line -like 'branch refs/heads/*' -and $wt) {
         $branch = ($line -replace '^branch refs/heads/', '').Trim()
+        if ($branch -eq 'main') { $wt = $null; continue }
         Write-Host "----> $branch ($wt)"
         $dirty = git -C $wt status --porcelain
         if ($dirty -and -not $Force) {
