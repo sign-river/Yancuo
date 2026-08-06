@@ -554,6 +554,14 @@ def test_problem_detail_box_select_enabled_with_rendered_pdf_sources(
     assert page.reference_canvas._selection_enabled
     assert not page.reference_canvas._pixmap.isNull()
 
+    QTest.keyClick(page.reference_canvas, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert not page.reference_canvas._selection_enabled
+    assert page.reader_stack.currentWidget() is page.reference_scroll
+    QTest.keyClick(page.reference_canvas, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert page.reader_stack.currentWidget() is page.reader
+
 
 def test_ai_completion_entry_opens_page_preparation_without_starting_job(
     window: MainWindow,

@@ -93,6 +93,7 @@ class _ReferenceCanvas(QWidget):
 
     changed = Signal()
     selection_finished = Signal()
+    exit_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -305,8 +306,11 @@ class _ReferenceCanvas(QWidget):
 
     def keyPressEvent(self, event) -> None:  # noqa: ANN001, N802
         if event.key() == Qt.Key.Key_Escape:
-            self.cancel_selection()
-            self.selection_finished.emit()
+            if self._drawing or self._selection_enabled:
+                self.cancel_selection()
+                self.selection_finished.emit()
+            else:
+                self.exit_requested.emit()
             event.accept()
             return
         if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
@@ -667,6 +671,7 @@ class ProblemDetailPage(QWidget):
         self.reference_canvas = _ReferenceCanvas()
         self.reference_canvas.changed.connect(self._update_reference_summary)
         self.reference_canvas.selection_finished.connect(self._reference_selection_finished)
+        self.reference_canvas.exit_requested.connect(self._finish_reference_mode)
         self.reader_stack = QStackedWidget()
         self.reader_stack.addWidget(self.reader)
         self.reference_scroll = QScrollArea()
