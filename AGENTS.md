@@ -8,11 +8,15 @@
 - 单元测试：`tests/`；Qt 测试由 `tests/conftest.py` 固定为 offscreen 平台。
 - 其他目录：`android/`、`cloudbase/`、`protocol/`、`docs/`。
 
-## 工作树与分支（重要）
-- 本仓库使用 git worktree：开发在 `codex/*` 分支工作树进行，改动提交到该分支，
-  由主线（main）负责合并。**不要直接修改 `D:\project\Yancuo`（main 工作副本）**。
-- 机器上 `yancuo` 命令通过 editable 安装指向 `D:\project\Yancuo\apps\windows\src`，
-  因此运行中的应用要等分支合并进 main 后才会带上新改动；不要在 main 上手动改。
+## 工作树与分支（重要，规则按角色区分）
+- 本仓库使用 git worktree：**功能开发**在 `codex/*` 分支工作树进行，改动提交到该分支，
+  由主线（main）负责合并。功能分支上的 AI 不要把功能改动直接提交到 main。
+- 若你正在 **main 主线**上工作（例如负责整合/合并 `codex/*` 分支、解决冲突、或用户明确要求直接改 main），
+  **本规则不禁止你在 main 上提交**——合并、解决冲突、用户点名的主线改动正是主线 AI 的职责。
+- 不要在规则里硬编码本机绝对路径（如某台机器上的 `D:\project\Yancuo`）：不同机器/克隆位置不同。
+  判断“当前是否 main 工作树”用 `git branch --show-current`，而不是路径。
+- 本机（用户机器）上 `yancuo` 命令通过 editable 安装指向 main 工作副本的 `apps/windows/src`，
+  因此运行中的应用要等分支合并进 main 后才会带上新改动；这条只影响“何时能看到效果”，不是修改权限约束。
 
 ## 测试（最高优先级）
 - 统一从仓库根目录运行 `python -m pytest`。
