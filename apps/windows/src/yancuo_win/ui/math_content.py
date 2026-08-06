@@ -789,6 +789,22 @@ class MathContentView(QWidget):
         self._apply_canvas_background()
         self._view.hide()
         layout.addWidget(self._view)
+        # QPdfView 页面光栅化完成前会画白色占位，
+        # 用主题背景色遮罩盖住这段间隔，
+        # 页面渲染完成后再隐藏遮罩，避免进入页面时白闪。
+        self._loading_overlay = QWidget(self)
+        self._loading_overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self._loading_overlay.hide()
+        # 遮罩创建在 _apply_canvas_background 之后，
+        # 需要重新应用一次背景，否则遮罩透明，
+        # QPdfView 的白色占位会透过显示。
+        self._apply_canvas_background()
+        self._ready_poll_timer = QTimer(self)
+        self._ready_poll_timer.setInterval(30)
+        self._ready_poll_timer.timeout.connect(self._poll_page_ready)
+        self._ready_poll_count = 0
         _PREVIEW_VIEWS.add(self)
         manager = get_theme_manager(QApplication.instance())
         if manager is not None:
@@ -856,6 +872,13 @@ class MathContentView(QWidget):
             canvas.setAutoFillBackground(True)
             canvas.setBackgroundRole(QPalette.ColorRole.Dark)
             canvas.setStyleSheet(f"background: {background.name()};")
+        overlay = getattr(self, "_loading_overlay", None)
+        if overlay is not None:
+            overlay_palette = overlay.palette()
+            overlay_palette.setColor(QPalette.ColorRole.Window, background)
+            overlay.setPalette(overlay_palette)
+            overlay.setAutoFillBackground(True)
+            overlay.setBackgroundRole(QPalette.ColorRole.Window)
 
     def set_fit_content_height(
         self, enabled: bool = True, *, expand_widget: bool = True
@@ -1140,6 +1163,7 @@ class MathContentView(QWidget):
         if not self._pdf_view_initialized:
             self._pdf_view_initialized = True
             self._view.show()
+        self._start_page_ready_poll()
         self._apply_zoom_scale()
         if self._fit_content_height:
             self._update_content_height()
@@ -1149,8 +1173,71 @@ class MathContentView(QWidget):
             previous_buffer.deleteLater()
         self._finish_render(page, generation)
 
+    def _start_page_ready_poll(self) -> None:
+        """Keep the theme-colored overlay until QPdfView finishes rendering.
+
+        QPdfView paints a white placeholder for pages that are still being
+        rasterized, which shows as a visible white flash when a page becomes
+        visible on slower machines.  In dark themes the placeholder is easy to
+        spot, so hide the viewer behind the overlay until its viewport is no
+        longer blank.  Light themes reuse the same light page color, so the
+        placeholder is not noticeable and we skip the wait.
+        """
+        if current_theme_name() != "dark":
+            return
+        overlay = getattr(self, "_loading_overlay", None)
+        if overlay is not None:
+            overlay.setGeometry(self.rect())
+            overlay.show()
+            overlay.raise_()
+        self._ready_poll_count = 0
+        self._ready_poll_timer.start()
+
+    def _poll_page_ready(self) -> None:
+        self._ready_poll_count += 1
+        if self._is_page_rendered() or self._ready_poll_count > 200:
+            self._ready_poll_timer.stop()
+            overlay = getattr(self, "_loading_overlay", None)
+            if overlay is not None:
+                overlay.hide()
+
+    def _is_page_rendered(self) -> bool:
+        viewport_getter = getattr(self._view, "viewport", None)
+        if not callable(viewport_getter):
+            return False
+        viewport = viewport_getter()
+        if viewport is None:
+            return False
+        width = viewport.width()
+        height = viewport.height()
+        if width <= 0 or height <= 0:
+            return False
+        image = viewport.grab().toImage()
+        if image.isNull():
+            return False
+        # 页面未光栅化时 QPdfView 画白色占位；
+        # 渲染完成后页面背景是主题深色。
+        # 采样多个点，只要有一个深色点就认为就绪。
+        points = (
+            (width // 2, height // 2),
+            (width // 2, height // 4),
+            (width // 2, 3 * height // 4),
+            (width // 4, height // 2),
+            (3 * width // 4, height // 2),
+        )
+        for x, y in points:
+            if x < 0 or y < 0 or x >= width or y >= height:
+                continue
+            color = image.pixelColor(x, y)
+            if (color.red() + color.green() + color.blue()) / 3 < 150:
+                return True
+        return False
+
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
+        overlay = getattr(self, "_loading_overlay", None)
+        if overlay is not None:
+            overlay.setGeometry(self.rect())
         if self._document is not None:
             self._apply_zoom_scale()
 
