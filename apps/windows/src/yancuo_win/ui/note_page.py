@@ -10,6 +10,7 @@ from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -744,14 +745,24 @@ class NotePage(QWidget):
         search_row = QHBoxLayout(search_toolbar)
         search_row.setContentsMargins(8, 4, 8, 4)
         search_row.setSpacing(8)
-        self.note_search_mode = QComboBox()
-        self.note_search_mode.setObjectName("SearchScopeCombo")
-        describe_field(self.note_search_mode, "笔记搜索方式")
-        self.note_search_mode.addItem("普通搜索", "local")
-        self.note_search_mode.addItem("AI 搜索", "ai")
-        self.note_search_mode.currentIndexChanged.connect(self._submit_note_search)
-        self.note_search_mode.setFixedHeight(36)
-        search_row.addWidget(self.note_search_mode)
+        self.note_search_mode_group = QButtonGroup(self)
+        self.note_search_mode_group.setExclusive(True)
+        self.local_search_button = QPushButton("普通搜索")
+        self.local_search_button.setCheckable(True)
+        self.local_search_button.setChecked(True)
+        describe_field(self.local_search_button, "普通搜索笔记", "完全离线，只查询本机笔记索引")
+        self.ai_search_button = QPushButton("AI 搜索")
+        self.ai_search_button.setCheckable(True)
+        self.ai_search_button.setToolTip(
+            "只向有限候选发送笔记标题、内容片段、标签和更新时间"
+        )
+        describe_field(self.ai_search_button, "AI 搜索笔记", "用自然语言描述想找的笔记")
+        for button in (self.local_search_button, self.ai_search_button):
+            button.setObjectName("SearchModeButton")
+            button.setFixedHeight(36)
+            self.note_search_mode_group.addButton(button)
+            button.clicked.connect(self._on_note_search_mode_changed)
+            search_row.addWidget(button)
         self.note_search_edit = SearchInput("搜索标题、内容、标签或合集")
         self.note_search_edit.setFixedHeight(36)
         describe_field(
@@ -911,7 +922,7 @@ class NotePage(QWidget):
         middle.body.addWidget(self.bulk_actions)
         set_tab_order_chain(
             self.note_search_edit,
-            self.note_search_mode,
+            self.ai_search_button,
             self.note_list,
         )
         split.addWidget(middle)
@@ -1242,7 +1253,7 @@ class NotePage(QWidget):
                 ]
             query = self.note_search_edit.text().strip()
             if query:
-                if self.note_search_mode.currentData() == "ai" and self._note_ai_search_ids is not None:
+                if self.ai_search_button.isChecked() and self._note_ai_search_ids is not None:
                     hit_ids = self._note_ai_search_ids
                 else:
                     hits = self.note_search.search_notes(
@@ -1397,8 +1408,17 @@ class NotePage(QWidget):
         self.reload()
         self.status_message.emit(f"已新建合集“{collection.title}”")
 
+    def _on_note_search_mode_changed(self, _checked: bool = False) -> None:
+        if self.ai_search_button.isChecked():
+            self.note_search_edit.setPlaceholderText(
+                "描述想找的笔记，例如：包含等价无穷小与泰勒展开的整理"
+            )
+        else:
+            self.note_search_edit.setPlaceholderText("搜索标题、内容、标签或合集")
+        self._submit_note_search()
+
     def _submit_note_search(self) -> None:
-        if self.note_search_mode.currentData() != "ai":
+        if not self.ai_search_button.isChecked():
             self._note_ai_search_ids = None
             self.reload()
             return
@@ -1525,7 +1545,7 @@ class NotePage(QWidget):
             "collection_id": self._collection_filter_id,
             "status": self.status_filter.currentData(),
             "query": self.note_search_edit.text(),
-            "search_mode": self.note_search_mode.currentData(),
+            "search_mode": "ai" if self.ai_search_button.isChecked() else "local",
             "note_id": note_id or (self._note.id if self._note else None),
             "scroll": self.note_list.verticalScrollBar().value(),
             "collection_scroll": self.collection_list.verticalScrollBar().value(),
@@ -1539,9 +1559,8 @@ class NotePage(QWidget):
         if index >= 0:
             self.status_filter.setCurrentIndex(index)
         search_mode = state.get("search_mode")
-        index = self.note_search_mode.findData(search_mode)
-        if index >= 0:
-            self.note_search_mode.setCurrentIndex(index)
+        self.ai_search_button.setChecked(search_mode == "ai")
+        self.local_search_button.setChecked(search_mode != "ai")
         self.note_search_edit.setText(str(state.get("query", "")))
         self.page_stack.setCurrentWidget(self.library_page)
         self.reload(
