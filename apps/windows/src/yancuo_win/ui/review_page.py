@@ -954,6 +954,8 @@ class ReviewPage(QWidget):
             self._fields(problem),
             tag_names=[tag.name for tag in (problem.tags or [])],
             include_answers=self._answer_visible,
+            show_header=False,
+            classic=True,
         )
 
     def _set_keyboard_hint(self, text: str) -> None:
