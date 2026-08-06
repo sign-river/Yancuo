@@ -850,6 +850,8 @@ class ProblemForm(QWidget):
             render_layout.setContentsMargins(0, 0, 12, 0)
             render_layout.setSpacing(8)
             self.render_view = MathContentView()
+            # 预览框缩放独立于全局“预览缩放”设置，锁定在 100%
+            self.render_view.set_fixed_zoom_scale(1.0)
             self.render_view.set_adaptive_content_height(1200)
             render_layout.addWidget(self.render_view)
             self.splitter.addWidget(render_panel)
@@ -863,10 +865,10 @@ class ProblemForm(QWidget):
             self._form_target.setSpacing(12)
             editor_panel.setWidget(editor_host)
             self.splitter.addWidget(editor_panel)
-            # 题目预览占 2 份、编辑字段占 1 份
-            self.splitter.setStretchFactor(0, 2)
+            # 题目预览与编辑字段横向占比 1:1
+            self.splitter.setStretchFactor(0, 1)
             self.splitter.setStretchFactor(1, 1)
-            self.splitter.setSizes([720, 360])
+            self.splitter.setSizes([540, 540])
 
         basic = CardFrame()
         basic.add_title("基本归属")
