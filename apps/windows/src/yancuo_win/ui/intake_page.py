@@ -1083,7 +1083,7 @@ class IntakePage(QWidget):
         task_row.setContentsMargins(14, 10, 14, 10)
         self.ai_task_status = QLabel("AI 任务正在排队")
         self.ai_task_status.setWordWrap(True)
-        self.ai_task_button = primary_button("查看实时回复")
+        self.ai_task_button = primary_button("查看识别进度")
         self.ai_task_button.clicked.connect(self._open_current_ai_task)
         task_row.addWidget(self.ai_task_status, stretch=1)
         task_row.addWidget(self.ai_task_button)
@@ -1219,7 +1219,7 @@ class IntakePage(QWidget):
         page, layout = self._page()
         layout.addWidget(
             self._header(
-                "AI 实时回复",
+                "AI 输出实时预览",
                 "这里展示模型公开输出和处理阶段；返回上传页不会中断任务。",
                 self.show_ai_upload,
                 back_tooltip="返回上传页",
@@ -1229,13 +1229,13 @@ class IntakePage(QWidget):
         layout.addWidget(self.ai_processing_steps_bar)
         card = CardFrame()
         card.setObjectName("IntakeStatusSurface")
-        card.add_title("模型回复")
+        card.add_title("模型输出")
         self.processing_status = card.add_hint("正在准备任务…")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         card.body.addWidget(self.progress_bar)
-        self.processing_steps = QLabel("图片提交后，模型回复会在下方持续显示。")
+        self.processing_steps = QLabel("图片提交后，AI 输出会在下方实时展示。")
         self.processing_steps.setWordWrap(True)
         card.body.addWidget(self.processing_steps)
         self.processing_preview = QTextEdit()
@@ -1712,7 +1712,7 @@ class IntakePage(QWidget):
             self.ai_task_button.setText("审核结果")
         elif self.ai_job_id:
             self.ai_task_surface.show()
-            self.ai_task_button.setText("查看实时回复")
+            self.ai_task_button.setText("查看识别进度")
             if self.coordinator.active_job_id != self.ai_job_id:
                 self._start_worker(self.ai_job_id)
             else:
@@ -2011,7 +2011,7 @@ class IntakePage(QWidget):
         self.processing_cancel_button.setEnabled(True)
         self.ai_task_surface.show()
         self.ai_task_status.setText("AI 任务已提交，正在后台排队")
-        self.ai_task_button.setText("查看实时回复")
+        self.ai_task_button.setText("查看识别进度")
         self._start_worker(started.job_id)
         self.ai_files.clear()
         self.ai_file_list.clear()
