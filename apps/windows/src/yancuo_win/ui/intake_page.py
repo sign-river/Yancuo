@@ -754,6 +754,8 @@ class _RegionRecognitionCompareDialog(QDialog):
             proposal.old_fields,
             tag_names=proposal.old_fields.get("tags", []),
             include_answers=True,
+            show_header=False,
+            classic=True,
         )
         old_card.body.addWidget(old_view)
         comparison.addWidget(old_card, stretch=1)
@@ -770,6 +772,8 @@ class _RegionRecognitionCompareDialog(QDialog):
             proposal.new_fields,
             tag_names=proposal.new_fields.get("tags", []),
             include_answers=True,
+            show_header=False,
+            classic=True,
         )
         new_card.body.addWidget(new_view)
         comparison.addWidget(new_card, stretch=1)
@@ -1083,6 +1087,8 @@ class ProblemForm(QWidget):
                 "notes": self.notes.toPlainText(),
             },
             tag_names=tags,
+            show_header=False,
+            classic=True,
         )
 
     def _resize_text_areas_to_content(self) -> None:
@@ -3008,7 +3014,8 @@ class IntakePage(QWidget):
             fields,
             tag_names=self.ai_form.tag_names(),
             include_answers=True,
-            compact=True,
+            show_header=False,
+            classic=True,
         )
         self.ai_form.refresh_render_previews()
 

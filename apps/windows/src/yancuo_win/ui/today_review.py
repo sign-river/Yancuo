@@ -113,6 +113,8 @@ class TodayReviewDialog(QDialog):
             fields,
             tag_names=[tag.name for tag in (p.tags or [])],
             include_answers=not self.hide_answer.isChecked(),
+            show_header=False,
+            classic=True,
         )
 
     def _grade(self, grade: int) -> None:
