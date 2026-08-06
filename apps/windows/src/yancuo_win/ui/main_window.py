@@ -1227,15 +1227,12 @@ class MainWindow(QMainWindow):
         nav_footer.setFixedHeight(56)
         nav_actions = QHBoxLayout(nav_footer)
         nav_actions.setContentsMargins(12, 8, 12, 8)
-        self.new_subject_button = primary_button("\u5f55\u5165\u9898\u76ee")
-        self.new_subject_button.setToolTip("\u4e0a\u4f20\u56fe\u7247\u6216\u624b\u52a8\u586b\u5199\uff0c\u5f55\u5165\u65b0\u9898\u76ee")
-        self.new_subject_button.clicked.connect(self._show_ai_intake)
-        self.new_tag_button = QPushButton("\u7ba1\u7406")
-        bind_icon(self.new_tag_button, "chevron-down", size=16)
+        self.new_tag_button = primary_button("\u7ba1\u7406")
+        self.new_tag_button.setIcon(colored_icon("chevron-down", "#FFFFFF"))
+        self.new_tag_button.setIconSize(QSize(16, 16))
         self.new_tag_button.setToolTip("\u65b0\u5efa\u6216\u7ba1\u7406\u79d1\u76ee\u3001\u7ae0\u8282\u3001\u6807\u7b7e")
         self.new_tag_button.clicked.connect(self._show_catalog_menu)
         self.catalog_menu_button = self.new_tag_button
-        nav_actions.addWidget(self.new_subject_button)
         nav_actions.addWidget(self.new_tag_button)
         nav_actions.addStretch(1)
         nav_layout.addWidget(nav_footer)
@@ -2139,7 +2136,6 @@ class MainWindow(QMainWindow):
             self.library_nav_title.setText("知识浏览")
             self.library_view_hint.setText("按科目与知识结构浏览正式题目。")
             self.library_list_hint.setText("正式题目 · 双击打开详情")
-            self.new_subject_button.setVisible(True)
             self.new_tag_button.setVisible(True)
             self.catalog_menu_button.setVisible(True)
             self.library_nav_stack.setCurrentIndex(0)
@@ -2153,7 +2149,6 @@ class MainWindow(QMainWindow):
                 "集中查看常用题目视图，以及待整理、已归档和回收站题目。"
             )
             self.library_list_hint.setText("处理中心题目 · 双击打开详情")
-            self.new_subject_button.setVisible(False)
             self.new_tag_button.setVisible(False)
             self.catalog_menu_button.setVisible(False)
             self.library_nav_stack.setCurrentIndex(1)
@@ -3983,9 +3978,10 @@ class MainWindow(QMainWindow):
         menu = self._build_catalog_action_menu(
             self.get_create_actions() + self.get_manage_actions()
         )
-        bind_icon(self.catalog_menu_button, "chevron-up", size=16)
+        self.catalog_menu_button.setIcon(colored_icon("chevron-up", "#FFFFFF"))
+        self.catalog_menu_button.setIconSize(QSize(16, 16))
         menu.aboutToHide.connect(
-            lambda: bind_icon(self.catalog_menu_button, "chevron-down", size=16)
+            lambda: self.catalog_menu_button.setIcon(colored_icon("chevron-down", "#FFFFFF"))
         )
         show_dropdown_menu(menu, self.catalog_menu_button)
 

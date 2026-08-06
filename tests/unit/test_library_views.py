@@ -767,7 +767,7 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
         "积分基础题",
         "二重积分题",
     }
-    assert not window.new_subject_button.isHidden()
+    assert not window.new_tag_button.isHidden()
 
     window._set_library_view("process")
     assert window.library_process_button.isChecked()
@@ -781,7 +781,7 @@ def test_library_views_separate_knowledge_and_lifecycle_navigation(
         "trashed",
     ]
     assert _problem_titles(window) == ["待整理题"]
-    assert window.new_subject_button.isHidden()
+    assert window.new_tag_button.isHidden()
 
     _select_mode(window, "archived")
     assert _problem_titles(window) == ["归档题"]
@@ -1064,12 +1064,10 @@ def test_library_view_buttons_are_separate_and_aligned_with_tree(window: MainWin
     assert not window.library_process_button.isHidden()
 
 
-def test_library_intake_button_is_primary_and_opens_intake(window: MainWindow) -> None:
-    button = window.new_subject_button
-    assert button.text() == "录入题目"
+def test_library_manage_button_is_primary(window: MainWindow) -> None:
+    button = window.new_tag_button
+    assert button.text() == "\u7ba1\u7406"
     assert button.objectName() == "PrimaryButton"
-    button.click()
-    assert window.stack.currentIndex() == 1  # _PAGE_INTAKE
 
 
 def test_catalog_actions_follow_selected_node_type_and_position(
