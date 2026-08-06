@@ -1037,8 +1037,8 @@ def test_library_search_mode_uses_expanded_buttons(window: MainWindow) -> None:
     assert not hasattr(window, "library_search_combo")
     assert not window.local_search_button.isHidden()
     assert not window.ai_search_button.isHidden()
-    assert window.local_search_button.parentWidget() is window.search_scope_combo.parentWidget()
-    assert window.ai_search_button.parentWidget() is window.search_scope_combo.parentWidget()
+    assert window.local_search_button.parentWidget() is window.ai_search_button.parentWidget()
+    assert not hasattr(window, "search_scope_combo")
 
 
 def test_library_new_button_is_primary_intake_action(window: MainWindow) -> None:
@@ -1188,19 +1188,9 @@ def test_local_search_controls_explain_mode_and_privacy(
     assert window.ai_search_button.isEnabled()
     assert "有限候选" in window.ai_search_button.toolTip()
     assert "完全离线" in window.search_privacy_hint.text()
-    assert window.search_scope_combo.currentData() == "current"
 
 
-def test_search_scope_label_tracks_breadcrumb_without_prefix(
-    window: MainWindow,
-) -> None:
-    window._set_library_view("process")
-    _select_mode(window, "active")
-    assert window.search_scope_combo.itemText(0) == "全部正式题目"
-    assert not window.search_scope_combo.itemText(0).startswith("当前")
-
-
-def test_local_search_uses_index_and_current_knowledge_scope(
+def test_local_search_stays_in_current_knowledge_scope(
     window: MainWindow,
 ) -> None:
     parent_mode = next(
@@ -1215,10 +1205,6 @@ def test_local_search_uses_index_and_current_knowledge_scope(
     assert _problem_titles(window) == []
     assert "0 条结果" in window.library_list_hint.text()
 
-    window.search_scope_combo.setCurrentIndex(1)
-    assert _problem_titles(window) == ["未分类极限题"]
-    assert "全部正式题目" in window.library_list_hint.text()
-
     window.search_edit.setText("格林公式")
     window.refresh_problems()
     assert _problem_titles(window) == ["二重积分题"]
@@ -1228,14 +1214,12 @@ def test_processing_search_stays_in_current_lifecycle_status(
     window: MainWindow,
 ) -> None:
     window._set_library_view("process")
-    assert not window.search_scope_combo.isEnabled()
     window.search_edit.setText("题")
     window.refresh_problems()
     assert _problem_titles(window) == ["待整理题"]
 
     _select_mode(window, "archived")
     assert _problem_titles(window) == ["归档题"]
-    assert window.search_scope_combo.currentData() == "current"
 
     window._clear_library_search()
     assert window.search_edit.text() == ""

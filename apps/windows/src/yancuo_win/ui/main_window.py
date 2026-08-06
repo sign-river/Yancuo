@@ -21,7 +21,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
-    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -891,17 +890,6 @@ class MainWindow(QMainWindow):
             search_row.addWidget(button)
             button.clicked.connect(self._on_search_mode_changed)
 
-        self.search_scope_combo = QComboBox()
-        self.search_scope_combo.setAccessibleName("题库搜索范围")
-        self.search_scope_combo.setObjectName("SearchScopeCombo")
-        self.search_scope_combo.addItem("当前范围", "current")
-        self.search_scope_combo.addItem("全部正式题目", "all_active")
-        self.search_scope_combo.setMinimumWidth(190)
-        self.search_scope_combo.currentIndexChanged.connect(
-            self._on_search_scope_changed
-        )
-        search_row.addWidget(self.search_scope_combo)
-
         self.search_edit = SearchInput("搜索题目、答案、解析、标签、备注或来源")
         self.search_edit.setAccessibleName("搜索题库")
         self.search_edit.setAccessibleDescription("输入关键词后按回车搜索题目")
@@ -1108,14 +1096,6 @@ class MainWindow(QMainWindow):
         self.local_search_button.setChecked(True)
         search_row.addWidget(self.local_search_button)
         search_row.addWidget(self.ai_search_button)
-        self.search_scope_combo = QComboBox()
-        self.search_scope_combo.setObjectName("SearchScopeCombo")
-        self.search_scope_combo.addItem("\u5f53\u524d\u8303\u56f4", "current")
-        self.search_scope_combo.addItem("\u5168\u90e8\u6b63\u5f0f\u9898\u76ee", "all_active")
-        self.search_scope_combo.setMinimumWidth(190)
-        self.search_scope_combo.setFixedHeight(36)
-        self.search_scope_combo.currentIndexChanged.connect(self._on_search_scope_changed)
-        search_row.addWidget(self.search_scope_combo)
         self.search_edit = SearchInput("\u641c\u7d22\u9898\u76ee\u3001\u7b54\u6848\u3001\u89e3\u6790\u3001\u6807\u7b7e\u3001\u5907\u6ce8\u6216\u6765\u6e90")
         self.search_edit.setAccessibleName("搜索题库")
         self.search_edit.setAccessibleDescription("输入关键词后按回车搜索题目")
@@ -1138,7 +1118,6 @@ class MainWindow(QMainWindow):
         set_tab_order_chain(
             self.local_search_button,
             self.ai_search_button,
-            self.search_scope_combo,
             self.search_edit,
             self.search_button,
             self.clear_search_button,
@@ -2379,37 +2358,6 @@ class MainWindow(QMainWindow):
         self.library_breadcrumb.setText(str(path or "题库"))
         if hasattr(self, "library_page_title"):
             self.library_page_title.setText(self.library_breadcrumb.text())
-        self._refresh_search_scope_control()
-
-    def _refresh_search_scope_control(self) -> None:
-        if not hasattr(self, "search_scope_combo"):
-            return
-        current_path = self.library_breadcrumb.text()
-        current_label = current_path.split(" / ", 1)[-1]
-        self.search_scope_combo.blockSignals(True)
-        self.search_scope_combo.setItemText(0, current_label)
-        if self._library_view == "process":
-            self.search_scope_combo.setCurrentIndex(0)
-            self.search_scope_combo.setEnabled(False)
-            self.search_scope_combo.setToolTip(
-                "处理中心搜索固定在当前视图范围，避免混入其他题目"
-            )
-        else:
-            self.search_scope_combo.setEnabled(True)
-            self.search_scope_combo.setToolTip(
-                "可搜索当前知识范围，或临时扩展到全部正式题目"
-            )
-        self.search_scope_combo.blockSignals(False)
-
-    def _on_search_scope_changed(self, _index: int) -> None:
-        if self._is_ai_search_mode():
-            self._invalidate_ai_search(cancel=True)
-            self.search_privacy_hint.setText(
-                "AI 搜索范围已变化，请再次点击搜索；普通搜索仍可随时切换。"
-            )
-            self.refresh_problems()
-        elif self.search_edit.text().strip():
-            self.refresh_problems()
 
     def _clear_library_search(self) -> None:
         if not self.search_edit.text() and self._ai_search_problem_ids is None:
@@ -2461,10 +2409,6 @@ class MainWindow(QMainWindow):
         self._start_ai_search(query)
 
     def _current_ai_search_boundary(self) -> SearchBoundary:
-        use_all_active = (
-            self._library_view == "browse"
-            and self.search_scope_combo.currentData() == "all_active"
-        )
         allowed_problem_ids: frozenset[str] | None = None
         if self._library_view == "process":
             statuses = (
@@ -2480,9 +2424,6 @@ class MainWindow(QMainWindow):
                         self._filter_from_nav(include_query=False)
                     )
                 )
-        elif use_all_active:
-            statuses = ("active",)
-            scope = None
         else:
             statuses = ("active",)
             scope = self._knowledge_scope_from_nav()
@@ -2609,9 +2550,6 @@ class MainWindow(QMainWindow):
         self.search_button.setEnabled(not busy)
         self.search_button.setText("AI 搜索中…" if busy else "搜索")
         self.ai_search_button.setEnabled(not busy)
-        self.search_scope_combo.setEnabled(
-            not busy and self._library_view != "process"
-        )
 
     def _invalidate_ai_search(self, *, cancel: bool) -> None:
         if cancel and self._ai_search_worker and self._ai_search_worker.isRunning():
@@ -2658,19 +2596,12 @@ class MainWindow(QMainWindow):
         )
 
     def _search_current_view(self, query: str) -> list[Problem]:
-        use_all_active = (
-            self._library_view == "browse"
-            and self.search_scope_combo.currentData() == "all_active"
-        )
         if self._library_view == "process":
             statuses = (
                 ("active",)
                 if self._nav_mode in {"active", "due", "favorite", "recent"}
                 else (self._nav_mode,)
             )
-            scope = None
-        elif use_all_active:
-            statuses = ("active",)
             scope = None
         else:
             statuses = ("active",)
@@ -2686,8 +2617,7 @@ class MainWindow(QMainWindow):
             hit.problem_id for hit in hits
         )
         if (
-            not use_all_active
-            and self._library_view in {"browse", "process"}
+            self._library_view in {"browse", "process"}
             and self._nav_mode in {"due", "favorite", "recent"}
         ):
             allowed_ids = {
@@ -2734,7 +2664,7 @@ class MainWindow(QMainWindow):
                 "当前范围暂无题目（0 条结果）；可切换目录、筛选条件或新建题目。"
             )
         elif query and result_count is not None:
-            scope = self.search_scope_combo.currentText()
+            scope = self.library_breadcrumb.text().split(" / ", 1)[-1]
             if (
                 self._is_ai_search_mode()
                 and self._ai_search_result is not None
