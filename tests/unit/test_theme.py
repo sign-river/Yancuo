@@ -313,3 +313,48 @@ def test_tree_branch_style_is_shared_and_keeps_branch_surface_transparent() -> N
     assert "QTreeWidget#KnowledgeTree::branch:selected" not in app_stylesheet("light")
     tree.close()
     app.processEvents()
+
+
+
+def test_combo_popup_mask_tracks_view_after_popup_resize() -> None:
+    """
+    下拉弹层变高后，圆角遮罩必须跟随内部列表的最终尺寸。
+
+    QComboBoxPrivateContainer 在内部列表完成布局之前就会发出 Resize 事件，
+    如果只根据容器事件计算遮罩，_fit_combo_popup 把弹层变高后遮罩仍停留在旧的
+    （往往只有一半）高度，弹层下半部分会被裁掉；窗口最小化再恢复会触发重新布局，
+    所以看起来像是“恢复后正常”。本用例确保遮罩在列表视图上报最终尺寸后被刷新。
+    """
+    app = QApplication.instance() or QApplication([])
+    original_stylesheet = app.styleSheet()
+    original_palette = app.palette()
+    manager = ThemeManager(app, "light")
+    combo = QComboBox()
+    for index in range(30):
+        combo.addItem(f"项目 {index + 1}")
+    combo.show()
+    combo.showPopup()
+    app.processEvents()
+
+    popup = combo.view().window()
+    assert popup.metaObject().className() == "QComboBoxPrivateContainer"
+    initial_height = popup.height()
+    initial_mask = popup.mask().boundingRect()
+
+    # 与 _fit_combo_popup 相同：把弹层加高，内部列表随后异步重新布局。
+    popup.resize(popup.width(), initial_height + 240)
+    app.processEvents()
+
+    view = combo.view()
+    assert view.height() > initial_mask.height()
+    final_mask = popup.mask().boundingRect()
+    assert final_mask.height() >= view.height() - 1
+    assert final_mask.bottom() >= view.geometry().bottom() - 1
+
+    combo.hidePopup()
+    combo.close()
+    app.removeEventFilter(manager)
+    manager.deleteLater()
+    app.setStyleSheet(original_stylesheet)
+    app.setPalette(original_palette)
+    app.processEvents()

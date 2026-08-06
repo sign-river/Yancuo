@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainterPath, QPalette, QRegion
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QFrame, QWidget
 
@@ -1561,6 +1561,17 @@ class ThemeManager(QObject):
                     lambda popup=watched: self._fit_combo_popup(popup)
                 )
                 fit_timer.start(0)
+        elif (
+            event.type() in (QEvent.Type.Resize, QEvent.Type.Show)
+            and isinstance(watched, QAbstractItemView)
+            and (container := watched.parentWidget()) is not None
+            and container.metaObject().className() == "QComboBoxPrivateContainer"
+        ):
+            # The container reports Resize/Show before its list view has been
+            # laid out at the final size, so a mask computed from the stale
+            # view geometry clips the popup to the old (often half) height.
+            # Reapply the mask once the view itself reports final geometry.
+            self._style_combo_popup(container)
         return super().eventFilter(watched, event)
 
     @staticmethod
@@ -1574,12 +1585,21 @@ class ThemeManager(QObject):
             popup.setFrameShape(QFrame.Shape.NoFrame)
 
         view = popup.findChild(QAbstractItemView)
-        if view is not None and view.width() > 0 and view.height() > 0:
+        view_rect = view.geometry() if view is not None else QRect()
+        if (
+            view is not None
+            and view.width() > 0
+            and view.height() > 0
+            and view_rect.left() >= 0
+            and view_rect.top() >= 0
+            and view_rect.right() <= popup.width()
+            and view_rect.bottom() <= popup.height() + 1
+        ):
             path = QPainterPath()
             # The private container reserves native top/bottom chrome around
             # the real list view. Exclude that chrome from the window region
             # instead of painting or rounding it as a second surface.
-            path.addRoundedRect(view.geometry().toRectF(), 12.0, 12.0)
+            path.addRoundedRect(view_rect.toRectF(), 12.0, 12.0)
             popup.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
         if view is not None and not view.property("yancuoDropdownDelegate"):
@@ -1668,6 +1688,14 @@ class ThemeManager(QObject):
         target = max(popup.height(), min(required, limit))
         if target > popup.height():
             popup.resize(popup.width(), target)
+            # The resize event fires before the inner view is laid out; refresh
+            # the rounded window mask once the view reports its final geometry.
+            QTimer.singleShot(
+                0,
+                lambda p=popup: (
+                    ThemeManager._style_combo_popup(p) if _qobject_valid(p) else None
+                ),
+            )
 
     def set_mode(self, mode: str) -> str:
         self.mode = normalize_theme_mode(mode)
