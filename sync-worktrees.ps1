@@ -9,7 +9,9 @@ Write-Host '==> 1/3 拉取远端更新'
 git -C $root fetch origin
 
 Write-Host '==> 2/3 更新本地 main（快进到 origin/main）'
-git -C $root merge --ff-only origin/main
+$ErrorActionPreference = 'Continue'
+$null = git -C $root merge --ff-only origin/main 2>&1
+$ErrorActionPreference = 'Stop'
 if ($LASTEXITCODE -ne 0) {
     Write-Warning '本地 main 无法快进（可能 main 上有尚未推送的 AI 整合提交），继续用本地 main 作为同步基准。'
 }
@@ -32,11 +34,15 @@ foreach ($line in $lines) {
             continue
         }
         # 先尝试安全快进：如果 main 已经包含子分支的提交（普通 merge），直接移动指针即可
-        git -C $wt merge --ff-only main 2>$null | Out-Null
+        $ErrorActionPreference = 'Continue'
+$null = git -C $wt merge --ff-only main 2>&1
+$ErrorActionPreference = 'Stop'
         if ($LASTEXITCODE -ne 0) {
             # 快进失败说明 main 是 squash/改写方式整合的，子分支已无保留价值，直接覆盖为 main
             Write-Host '      无法快进（AI 可能用了 squash 整合），改为直接覆盖为 main'
-            git -C $wt reset --hard main
+            $ErrorActionPreference = 'Continue'
+$null = git -C $wt reset --hard main 2>&1
+$ErrorActionPreference = 'Stop'
         }
         $wt = $null
     }
