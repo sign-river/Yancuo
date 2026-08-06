@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QListView,
     QListWidget,
     QListWidgetItem,
+    QInputDialog,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -67,6 +68,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yancuo_win.config.settings import (
+    load_intake_prompt_templates,
+    save_intake_prompt_templates,
+)
 from yancuo_win.application.intake_service import (
     IntakeCandidate,
     ProblemIntakeService,
@@ -1403,6 +1408,9 @@ class IntakePage(QWidget):
         super().__init__(parent)
         self.intake = intake
         self.coordinator = coordinator or AIJobCoordinator(intake.ai, self)
+        self._prompt_templates = load_intake_prompt_templates(
+            self.intake.runtime.paths.root
+        )
         self.manual_images: list[Path] = []
         self.ai_files: list[Path] = []
         self.ai_job_id: str | None = None
@@ -1642,13 +1650,26 @@ class IntakePage(QWidget):
         )
         self.ai_instruction.setMaximumHeight(120)
         prompt.body.addWidget(self.ai_instruction)
-        templates = QHBoxLayout()
-        for text in ("红圈处是目标错题", "只提取第 3 题", "手写内容是我的作答"):
-            button = ghost_button(text)
-            button.clicked.connect(lambda _checked=False, value=text: self._append_instruction(value))
-            templates.addWidget(button)
-        templates.addStretch(1)
-        prompt.body.addLayout(templates)
+        self._template_row = QHBoxLayout()
+        self._template_row.setSpacing(8)
+        prompt.body.addLayout(self._template_row)
+        self._rebuild_prompt_templates()
+        manage = QHBoxLayout()
+        manage.setSpacing(8)
+        self._add_template_button = ghost_button("新增")
+        self._add_template_button.setToolTip("新增一条默认提示词")
+        self._add_template_button.clicked.connect(self._add_prompt_template)
+        self._edit_template_button = ghost_button("编辑")
+        self._edit_template_button.setToolTip("编辑一条默认提示词")
+        self._edit_template_button.clicked.connect(self._edit_prompt_template)
+        self._delete_template_button = ghost_button("删除")
+        self._delete_template_button.setToolTip("删除一条默认提示词")
+        self._delete_template_button.clicked.connect(self._delete_prompt_template)
+        manage.addWidget(self._add_template_button)
+        manage.addWidget(self._edit_template_button)
+        manage.addWidget(self._delete_template_button)
+        manage.addStretch(1)
+        prompt.body.addLayout(manage)
         layout.addWidget(prompt)
         layout.addStretch(1)
 
@@ -2612,6 +2633,98 @@ class IntakePage(QWidget):
         )
         self._answer_image_viewer = viewer
         viewer.show()
+
+    def _rebuild_prompt_templates(self) -> None:
+        while self._template_row.count():
+            item = self._template_row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for text in self._prompt_templates:
+            button = ghost_button(text)
+            button.setToolTip("点击将该提示词追加到上方输入框")
+            button.clicked.connect(
+                lambda _checked=False, value=text: self._append_instruction(value)
+            )
+            self._template_row.addWidget(button)
+        self._template_row.addStretch(1)
+
+    def _add_prompt_template(self, text: str | None = None) -> None:
+        if text is None:
+            text, accepted = QInputDialog.getText(
+                self, "新增默认提示词", "提示词内容："
+            )
+            if not accepted:
+                return
+        text = text.strip()
+        if not text:
+            return
+        if text in self._prompt_templates:
+            self.status_message.emit("该默认提示词已存在")
+            return
+        self._prompt_templates.append(text)
+        self._save_prompt_templates()
+
+    def _edit_prompt_template(self, index: int | None = None, text: str | None = None) -> None:
+        if not self._prompt_templates:
+            self.status_message.emit("暂无默认提示词可编辑")
+            return
+        if index is None:
+            choice, accepted = QInputDialog.getItem(
+                self,
+                "编辑默认提示词",
+                "选择要编辑的提示词：",
+                self._prompt_templates,
+                0,
+                False,
+            )
+            if not accepted or not choice:
+                return
+            index = self._prompt_templates.index(choice)
+        if text is None:
+            text, accepted = QInputDialog.getText(
+                self,
+                "编辑默认提示词",
+                "新内容：",
+                text=self._prompt_templates[index],
+            )
+            if not accepted:
+                return
+        text = text.strip()
+        if not text:
+            return
+        self._prompt_templates[index] = text
+        self._save_prompt_templates()
+
+    def _delete_prompt_template(self, index: int | None = None) -> None:
+        if not self._prompt_templates:
+            self.status_message.emit("暂无默认提示词可删除")
+            return
+        if index is None:
+            choice, accepted = QInputDialog.getItem(
+                self,
+                "删除默认提示词",
+                "选择要删除的提示词：",
+                self._prompt_templates,
+                0,
+                False,
+            )
+            if not accepted or not choice:
+                return
+            index = self._prompt_templates.index(choice)
+        self._prompt_templates.pop(index)
+        self._save_prompt_templates()
+
+    def _save_prompt_templates(self) -> None:
+        try:
+            save_intake_prompt_templates(
+                self.intake.runtime.paths.root, self._prompt_templates
+            )
+        except Exception:  # noqa: BLE001
+            self.status_message.emit("默认提示词保存失败")
+            return
+        self._rebuild_prompt_templates()
+        self.status_message.emit("默认提示词已更新")
 
     def _append_instruction(self, text: str) -> None:
         current = self.ai_instruction.toPlainText().strip()

@@ -20,7 +20,11 @@ from yancuo_win.application.intake_service import (
     ProblemIntakeService,
     RegionRecognitionProposal,
 )
-from yancuo_win.config.settings import default_toml_path
+from yancuo_win.config.settings import (
+    DEFAULT_INTAKE_PROMPT_TEMPLATES,
+    default_toml_path,
+    load_intake_prompt_templates,
+)
 from yancuo_win.data.models import (
     AiJob,
     Chapter,
@@ -36,7 +40,11 @@ from yancuo_win.data.models import (
     Version,
 )
 from yancuo_win.domain.rules import DomainError
-from yancuo_win.ui.intake_page import ProblemForm, _RegionRecognitionCompareDialog
+from yancuo_win.ui.intake_page import (
+    IntakePage,
+    ProblemForm,
+    _RegionRecognitionCompareDialog,
+)
 from yancuo_win.ui.problem_editor import ProblemEditorPage
 
 
@@ -1354,3 +1362,23 @@ def test_user_answer_recognition_uses_settings_snapshot(
     assert answer == "snapshot answer"
     assert captured["provider_name"] == "mock"
     assert captured["model"] == "model-before-switch"
+
+def test_intake_prompt_templates_support_add_edit_delete_and_persist(
+    intake: ProblemIntakeService,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    page = IntakePage(intake)
+    assert page._prompt_templates == list(DEFAULT_INTAKE_PROMPT_TEMPLATES)
+
+    page._add_prompt_template("只提取第 5 题")
+    assert "只提取第 5 题" in page._prompt_templates
+    page._edit_prompt_template(index=0, text="红圈处是目标题")
+    assert page._prompt_templates[0] == "红圈处是目标题"
+    page._delete_prompt_template(index=0)
+    assert "红圈处是目标题" not in page._prompt_templates
+
+    loaded = load_intake_prompt_templates(intake.runtime.paths.root)
+    assert loaded == page._prompt_templates
+    page.close()
+

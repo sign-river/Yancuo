@@ -21,6 +21,13 @@ from pydantic_settings import (
 MAX_PREFERENCES_BYTES = 1024 * 1024
 
 
+DEFAULT_INTAKE_PROMPT_TEMPLATES = (
+    "红圈处是目标错题",
+    "只提取第 3 题",
+    "手写内容是我的作答",
+)
+
+
 class ApplicationConfig(BaseModel):
     language: str = "zh_CN"
     theme: str = "system"
@@ -505,6 +512,33 @@ def save_preview_zoom_preference(data_root: Path, scale: float) -> Path:
         application = {}
     application["preview_zoom_scale"] = normalized
     payload["application"] = application
+    _write_preferences(path, payload)
+    return path
+
+
+def load_intake_prompt_templates(data_root: Path) -> list[str]:
+    """读取用户自定义的 AI 录题默认提示词；无配置时返回内置默认。"""
+    path = Path(data_root) / "preferences.json"
+    payload = _load_preferences(path)
+    intake = payload.get("intake")
+    templates = intake.get("prompt_templates") if isinstance(intake, dict) else None
+    if (
+        isinstance(templates, list)
+        and templates
+        and all(isinstance(value, str) and value.strip() for value in templates)
+    ):
+        return [value.strip() for value in templates]
+    return list(DEFAULT_INTAKE_PROMPT_TEMPLATES)
+
+
+def save_intake_prompt_templates(data_root: Path, templates: list[str]) -> Path:
+    """将用户自定义的 AI 录题默认提示词持久化到 preferences.json。"""
+    cleaned = [value.strip() for value in templates if value and value.strip()]
+    root = Path(data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "preferences.json"
+    payload = _load_preferences(path)
+    payload["intake"] = {"prompt_templates": cleaned}
     _write_preferences(path, payload)
     return path
 
