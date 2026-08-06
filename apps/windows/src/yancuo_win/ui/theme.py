@@ -23,7 +23,7 @@ THEME_MODES = {"system", "light", "dark"}
 
 
 def _check_mark_url() -> str:
-    """定位勾选对勾图标的 URL，兼容源码与打包运行。"""
+    """定位勾选对勾图标路径（正斜杠），兼容源码与打包运行。"""
     candidates = [Path(__file__).resolve().parent / "check_mark.png"]
     if getattr(sys, "frozen", False):
         candidates.insert(
@@ -35,7 +35,7 @@ def _check_mark_url() -> str:
         )
     for candidate in candidates:
         if candidate.is_file():
-            return candidate.as_uri()
+            return str(candidate).replace("\\", "/")
     return ""
 
 

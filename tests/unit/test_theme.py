@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -22,6 +23,7 @@ from yancuo_win.ui.theme import (
     LIGHT_THEME,
     ThemeManager,
     UI_METRICS,
+    _check_mark_url,
     app_stylesheet,
     normalize_theme_mode,
     resolve_theme_mode,
@@ -183,6 +185,14 @@ def test_stylesheet_covers_dark_tabs_inputs_and_cards() -> None:
     assert "QTreeWidget#KnowledgeTree::item:selected" in rendered
     assert "QComboBox QAbstractItemView" in rendered
     assert LIGHT_THEME.bg not in rendered
+
+
+def test_check_mark_asset_is_loadable_as_local_path() -> None:
+    # file:/// URI 在 Qt 下无法被 QPixmap 加载，导致选中框只剩蓝底；必须返回本地正斜杠路径。
+    path = _check_mark_url()
+    assert path
+    assert not path.startswith("file://")
+    assert QPixmap(path).isNull() is False
 
 
 @pytest.mark.parametrize(
