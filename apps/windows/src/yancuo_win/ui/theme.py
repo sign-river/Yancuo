@@ -1067,13 +1067,6 @@ def app_stylesheet(theme: str = "light") -> str:
         padding: 8px 14px;
         min-height: 20px;
     }}
-    QComboBox#SearchModeCombo, QComboBox#SearchScopeCombo {{
-        background: {t.surface_subtle};
-        border: 1px solid {t.divider};
-        border-radius: {m.radius_control}px;
-        padding: 5px 30px 5px 8px;
-        min-height: 20px;
-    }}
     QLineEdit#SearchInput {{
         background: {t.surface};
         border: 1px solid {t.divider};
