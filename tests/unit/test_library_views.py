@@ -1070,6 +1070,33 @@ def test_library_manage_button_is_primary(window: MainWindow) -> None:
     assert button.objectName() == "PrimaryButton"
 
 
+def test_inline_preview_size_syncs_after_content_height_change(
+    window: MainWindow,
+) -> None:
+    # regression: reader height change must invalidate the details item cache
+    # so the list row grows with the rendered preview instead of staying at
+    # the pre-render height until the window is re-shown.
+    app = QApplication.instance()
+    first = window.problem_list.item(0)
+    window._toggle_question_expansion(first)
+    app.processEvents()
+    item = window.problem_list.item(0)
+    widget = window.problem_list.itemWidget(item)
+    assert widget is not None
+    reader = widget.findChild(MathContentView)
+    assert reader is not None
+    collapsed_height = item.sizeHint().height()
+    # simulate render completion with a real content height
+    reader._content_height = 300
+    reader.setFixedHeight(300)
+    reader.updateGeometry()
+    reader.content_height_changed.emit()
+    for _ in range(20):
+        app.processEvents()
+    assert item.sizeHint().height() > collapsed_height
+    assert widget.height() > collapsed_height
+
+
 def test_catalog_actions_follow_selected_node_type_and_position(
     window: MainWindow,
 ) -> None:

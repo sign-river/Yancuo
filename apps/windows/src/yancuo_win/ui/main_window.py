@@ -245,7 +245,7 @@ class _InlineQuestionItem(QWidget):
         reader.setObjectName("InlineQuestionPreview")
         # reserve_height=False: 预览框高度随内容自适应，不再固定为最大值留出大片空白
         reader.set_fit_content_height(True, expand_widget=True)
-        reader.content_height_changed.connect(self.updateGeometry)
+        reader.content_height_changed.connect(self._on_preview_height_changed)
         question_markdown = problem.question_markdown or ""
         if problem.question_latex and problem.question_latex not in question_markdown:
             question_markdown = (
@@ -264,6 +264,16 @@ class _InlineQuestionItem(QWidget):
         )
         details_layout.addWidget(reader)
         layout.addWidget(self._details)
+
+    def _on_preview_height_changed(self) -> None:
+        details = getattr(self, "_details", None)
+        if details is not None:
+            # reader 高度变化只让 details 内部布局缓存失效；
+            # details 作为外层布局子项的 QWidgetItem 缓存仍需显式失效，
+            # 否则外层 sizeHint 会一直停留在展开瞬间的旧高度，预览内容被截断。
+            details.updateGeometry()
+        self.updateGeometry()
+
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
         self._title_label.setText(
