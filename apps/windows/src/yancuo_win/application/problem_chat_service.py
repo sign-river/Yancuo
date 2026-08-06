@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import base64
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -26,6 +27,7 @@ from yancuo_win.infrastructure.atomic_file import atomic_text_writer
 _MAX_CHAT_REFERENCE_COUNT = 20
 _MAX_CHAT_REFERENCE_SOURCE_PIXELS = 25_000_000
 _MAX_CHAT_REFERENCE_TOTAL_BYTES = 32 * 1024 * 1024
+RENDER_PAGE_ROLE = "render_page"
 
 
 @dataclass(frozen=True)
@@ -140,12 +142,33 @@ class ProblemChatService:
             return rows
 
     def list_reference_sources(self, problem_id: str) -> list[dict[str, Any]]:
-        """Return formal derived figures in question-content order."""
+        """Return rendered PDF page sources, falling back to legacy figure blocks."""
 
+        store = ObjectStore(self.runtime.paths.asset_objects_dir)
         with self._session() as session:
             problem = session.get(Problem, problem_id)
             if problem is None:
                 return []
+            render_pages = list(
+                session.scalars(
+                    select(Asset)
+                    .where(
+                        Asset.problem_id == problem_id,
+                        Asset.role == RENDER_PAGE_ROLE,
+                    )
+                    .order_by(Asset.created_at, Asset.id)
+                )
+            )
+            if render_pages:
+                return [
+                    {
+                        "asset_id": asset.id,
+                        "page_index": index,
+                        "path": store.resolve(asset.relative_path),
+                    }
+                    for index, asset in enumerate(render_pages)
+                    if store.resolve(asset.relative_path).is_file()
+                ]
             try:
                 blocks = json.loads(problem.question_content_json or "[]")
             except json.JSONDecodeError:
@@ -174,12 +197,91 @@ class ProblemChatService:
                 for asset_id in ordered_ids
                 if asset_id in assets
             ]
+            return [
+                {
+                    "asset_id": asset_id,
+                    "page_index": index,
+                    "path": store.resolve(relative_path),
+                }
+                for index, (asset_id, relative_path) in enumerate(sources)
+                if store.resolve(relative_path).is_file()
+            ]
+
+
+    def ensure_render_sources(
+        self, problem_id: str, pages: Sequence[bytes]
+    ) -> list[dict[str, Any]]:
+        """Persist rendered PDF pages as immutable render_page sources.
+
+        Pages are stored content-addressed and reused when unchanged; stale
+        pages from an older render are removed so page order follows the PDF.
+        """
+        if not pages:
+            return []
         store = ObjectStore(self.runtime.paths.asset_objects_dir)
-        return [
-            {"asset_id": asset_id, "page_index": index, "path": store.resolve(relative_path)}
-            for index, (asset_id, relative_path) in enumerate(sources)
-            if store.resolve(relative_path).is_file()
-        ]
+        cache_dir = self.runtime.paths.cache_dir / "render_pages"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        with self._session() as session:
+            problem = session.get(Problem, problem_id)
+            if problem is None:
+                return []
+            existing = {
+                asset.sha256: asset
+                for asset in session.scalars(
+                    select(Asset).where(
+                        Asset.problem_id == problem_id,
+                        Asset.role == RENDER_PAGE_ROLE,
+                    )
+                )
+            }
+            ordered: list[Asset] = []
+            changed = False
+            for data in pages:
+                if not data:
+                    continue
+                tmp_path = cache_dir / f"render-{uuid.uuid4().hex}.png"
+                try:
+                    tmp_path.write_bytes(data)
+                    stored = store.store_copy(tmp_path, role=RENDER_PAGE_ROLE)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+                asset = existing.get(stored.sha256)
+                if asset is None:
+                    asset = Asset(
+                        id=new_id("asset"),
+                        problem_id=problem_id,
+                        role=RENDER_PAGE_ROLE,
+                        sha256=stored.sha256,
+                        relative_path=stored.relative_path,
+                        mime_type="image/png",
+                        size_bytes=stored.size_bytes,
+                    )
+                    session.add(asset)
+                    changed = True
+                ordered.append(asset)
+            if changed:
+                keep_ids = {asset.id for asset in ordered}
+                for stale in session.scalars(
+                    select(Asset).where(
+                        Asset.problem_id == problem_id,
+                        Asset.role == RENDER_PAGE_ROLE,
+                    )
+                ):
+                    if stale.id not in keep_ids:
+                        session.delete(stale)
+                session.commit()
+            sources = [
+                {
+                    "asset_id": asset.id,
+                    "page_index": index,
+                    "path": store.resolve(asset.relative_path),
+                }
+                for index, asset in enumerate(ordered)
+                if store.resolve(asset.relative_path).is_file()
+            ]
+            session.expunge_all()
+        return sources
+
 
     def get_conversation(self, conversation_id: str) -> ProblemConversation | None:
         with self._session() as session:
@@ -415,7 +517,7 @@ class ProblemChatService:
                 for asset in session.scalars(
                     select(Asset).where(
                         Asset.problem_id == problem_id,
-                        Asset.role == "derived_figure",
+                        Asset.role.in_(["derived_figure", RENDER_PAGE_ROLE]),
                     )
                 )
             }

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -31,7 +30,6 @@ import yancuo_win.ui.settings_dialog as settings_dialog_module
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
-from yancuo_win.data.models import Asset
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.main_window import MainWindow
 from yancuo_win.ui.math_content import MathContentView
@@ -397,7 +395,7 @@ def test_problem_detail_chat_prefers_reader_width_and_image_reference_canvas(
 
     assert page.reader_stack.count() == 2
     assert page.reader_stack.currentWidget() is page.reader
-    assert page.reference_canvas.parentWidget() is page.reader_stack
+    assert page.reference_canvas.parentWidget() is page.reference_scroll.viewport()
 
 
 def test_problem_detail_chat_preserves_focus_layout_scroll_and_conversation(
@@ -465,13 +463,13 @@ def test_problem_detail_reference_canvas_stays_embedded_and_keeps_normalized_reg
 
     page.reference_canvas.set_source("asset_reference", 0, image_path)
 
-    page.reader_stack.setCurrentWidget(page.reference_canvas)
+    page.reader_stack.setCurrentWidget(page.reference_scroll)
     page.reference_canvas.add_normalized_region(0.1, 0.2, 0.3, 0.4)
     before = page.reference_canvas.references()
     page.reference_canvas.resize(640, 480)
 
-    assert page.reference_canvas.parentWidget() is page.reader_stack
-    assert page.reader_stack.currentWidget() is page.reference_canvas
+    assert page.reference_canvas.parentWidget() is page.reference_scroll.viewport()
+    assert page.reader_stack.currentWidget() is page.reference_scroll
     assert page.reference_canvas.references() == before
     assert page.reference_previews.count() == 1
     assert page.reference_summary.text() == "本次引用 1 个区域"
@@ -493,7 +491,7 @@ def test_problem_detail_box_select_disabled_without_figure_sources(
     assert page._reference_sources == []
     assert page.reference_source_combo.count() == 0
     assert not page.add_reference_button.isEnabled()
-    assert "没有可框选的题图" in page.add_reference_button.toolTip()
+    assert "PDF" in page.add_reference_button.toolTip()
 
     captured = []
     monkeypatch.setattr(
@@ -505,7 +503,7 @@ def test_problem_detail_box_select_disabled_without_figure_sources(
     assert len(captured) == 1
     actions = {action.text(): action for action in captured[0].actions()}
     assert not actions["框选题图"].isEnabled()
-    assert "没有可框选的题图" in actions["框选题图"].toolTip()
+    assert "PDF" in actions["框选题图"].toolTip()
     assert not actions["清除全部引用"].isEnabled()
     assert not actions["删除选中引用"].isEnabled()
     assert not actions["退出框选"].isEnabled()
@@ -513,48 +511,31 @@ def test_problem_detail_box_select_disabled_without_figure_sources(
     messages: list[str] = []
     page.status_message.connect(messages.append)
     page._enable_reference_mode()
-    assert messages == ["本题没有可框选的题图；将按整题文字提问"]
+    assert messages == ["题目 PDF 尚未生成，请稍后再试"]
     assert page.reader_stack.currentWidget() is page.reader
 
 
-def test_problem_detail_box_select_enabled_with_figure_sources(
+def test_problem_detail_box_select_enabled_with_rendered_pdf_sources(
     window: MainWindow,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = QApplication.instance()
     assert app is not None
     page = window.problem_detail_page
-    source = tmp_path / "figure.png"
-    image = QImage(40, 30, QImage.Format.Format_RGB32)
+    image = QImage(60, 80, QImage.Format.Format_RGB32)
     image.fill(QColor("#FFFFFF"))
-    assert image.save(str(source), "PNG")
-    stored = window.services.store.store_copy(source, role="derived_figure")
-    problem = window.services.create_problem(title="有题图题", status="active")
-    with window.problem_chat._session() as session:
-        session.add(
-            Asset(
-                id="asset_figure",
-                problem_id=problem.id,
-                role="derived_figure",
-                sha256=stored.sha256,
-                relative_path=stored.relative_path,
-                mime_type="image/png",
-            )
-        )
-        stored_problem = session.get(type(problem), problem.id)
-        stored_problem.question_content_json = json.dumps(
-            [{"type": "figure", "derived_asset_id": "asset_figure"}]
-        )
-        session.commit()
-
+    page.reader.render_pages = lambda *_args, **_kwargs: [image]
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
     window._open_problem_detail(problem.id)
     app.processEvents()
 
     assert len(page._reference_sources) == 1
     assert page.reference_source_combo.count() == 1
+    assert page.reference_source_combo.itemText(0) == "PDF 第 1 页"
     assert page.add_reference_button.isEnabled()
-    assert "拖拽框选" in page.add_reference_button.toolTip()
+    assert "PDF" in page.add_reference_button.toolTip()
     assert page.reference_summary.text() == "未引用区域；将按整题提问"
 
     captured = []
@@ -569,7 +550,7 @@ def test_problem_detail_box_select_enabled_with_figure_sources(
     assert actions["框选题图"].isEnabled()
 
     page._enable_reference_mode()
-    assert page.reader_stack.currentWidget() is page.reference_canvas
+    assert page.reader_stack.currentWidget() is page.reference_scroll
     assert page.reference_canvas._selection_enabled
     assert not page.reference_canvas._pixmap.isNull()
 

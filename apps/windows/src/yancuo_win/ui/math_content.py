@@ -12,7 +12,7 @@ from typing import Any
 
 from latex2mathml import converter
 from PySide6.QtCore import QBuffer, QIODevice, QMargins, QMarginsF, QSize, QSizeF, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPageLayout, QPageSize, QPalette
+from PySide6.QtGui import QColor, QImage, QPageLayout, QPageSize, QPalette
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
@@ -809,6 +809,31 @@ class MathContentView(QWidget):
         """Reapply width fitting after an enclosing splitter changes size."""
 
         self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+
+    def render_pages(self, scale: float = 2.0) -> list[QImage]:
+        """Render the current PDF document to one QImage per page.
+
+        A 2x scale keeps crops crisp while the total pixel budget stays below
+        the chat reference source limit; extremely tall pages shrink slightly.
+        """
+        document = self._document
+        if document is None or document.pageCount() < 1:
+            return []
+        pages: list[QImage] = []
+        for index in range(document.pageCount()):
+            point = document.pagePointSize(index)
+            if point.width() <= 0 or point.height() <= 0:
+                continue
+            width = max(1, round(point.width() * scale))
+            height = max(1, round(point.height() * scale))
+            if width * height > 20_000_000:
+                shrink = (20_000_000 / (width * height)) ** 0.5
+                width = max(1, round(width * shrink))
+                height = max(1, round(height * shrink))
+            image = document.render(index, QSize(width, height))
+            if not image.isNull():
+                pages.append(image)
+        return pages
 
     def _apply_canvas_background(self, theme: str | None = None) -> None:
         background = QColor(theme_tokens(theme or current_theme_name()).bg)
