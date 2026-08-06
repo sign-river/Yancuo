@@ -302,6 +302,13 @@ class FineScrollListWidget(QListWidget):
 
     _WHEEL_STEP_PX = 72
 
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        # Scroll in pixels, not items: the default ScrollPerItem mode would
+        # treat our pixel step as a row count and jump to the bottom in one
+        # wheel notch.
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         pixel = event.pixelDelta().y()
         if pixel:
