@@ -35,8 +35,8 @@
 - `tests/conftest.py` 会把仓库本地 `apps/windows/src` 插入 `sys.path` 最前，
   保证测的是当前代码而不是其他 checkout 的 editable 安装。**不要再设置 PYTHONPATH**；
   若怀疑加载了错误副本，先打印 `yancuo_win.__file__` 确认。
-- 小改动先跑定向用例（如 `python -m pytest tests/unit/test_theme.py tests/unit/test_dropdown.py tests/unit/test_library_views.py`），
-  全量 `tests/unit`（约 5 分钟）只在最后跑一次。
+- **小改动只做最小冒烟验证**：确认程序能启动即可（如 offscreen 构造主窗口、`python -c "import yancuo_win"` 或跑一两个最相关的定向用例），不要每次跑全量测试。
+- 全量 `tests/unit`（约 5 分钟）只在用户明确要求、或用户攒了一批修改后统一修复时再跑一次。
 - 调试 Qt 时可用 offscreen 或临时窗口脚本，但不要提交会弹出真实窗口的测试。
 
 ## UI 问题排查纪律（防止截图返工）
