@@ -170,6 +170,7 @@ class AIJobDetailPage(QWidget):
         refresh.clicked.connect(self.refresh)
         rerun = default_button("重新运行")
         rerun.clicked.connect(self._rerun)
+        self.rerun_button = rerun
         cancel_btn = danger_button("取消任务")
         cancel_btn.clicked.connect(self._cancel)
         row.addWidget(refresh)
@@ -209,6 +210,10 @@ class AIJobDetailPage(QWidget):
             return
         self.meta.setText(_job_detail_summary(job))
         self.response.setPlainText(job.response_text or "")
+        completed_clean = job.status in _DONE_STATUSES and not int(
+            job.failed_items or 0
+        )
+        self.rerun_button.setEnabled(not completed_clean)
         if job.status in _DONE_STATUSES | _FAILED_STATUSES:
             self._timer.stop()
 
@@ -286,6 +291,9 @@ class _QueuePane(QWidget):
             cancel_btn = danger_button("取消运行中")
             cancel_btn.clicked.connect(self._cancel_running)
             row.addWidget(cancel_btn)
+            rerun = default_button("重新运行")
+            rerun.clicked.connect(self._run_selected)
+            row.addWidget(rerun)
         elif kind == "failed":
             rerun = default_button("重新运行")
             rerun.clicked.connect(self._run_selected)

@@ -364,10 +364,12 @@ class ProblemChatService:
             if (
                 latest is not None
                 and latest.role == "user"
-                and latest.status == "failed"
+                and latest.status in {"pending", "failed"}
                 and latest.content_markdown == content
                 and latest.reference_snapshot_json == reference_json
             ):
+                # pending 表示上一次请求因程序中断/取消未完成，
+                # 重新请求时复用该消息，避免重复发送同一内容。
                 user_message = latest
                 user_message.status = "pending"
                 user_message.error_message = ""

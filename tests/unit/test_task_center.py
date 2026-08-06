@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from yancuo_win.data.models import AiJob
-from yancuo_win.ui.task_center import TaskQueuePage, _job_label
+from yancuo_win.ui.task_center import AIJobDetailPage, TaskQueuePage, _job_label
 
 
 def _job(job_id: str, domain: str, status: str = "running") -> AiJob:
@@ -130,3 +130,27 @@ def test_clear_records_rebuilds_queue_when_all_jobs_removed(monkeypatch) -> None
     assert pane.list.item(0).data(256) is None
     assert "暂无" in pane.list.item(0).text()
     page.close()
+
+def test_active_pane_offers_rerun_for_interrupted_jobs() -> None:
+    _ = QApplication.instance() or QApplication([])
+    ai = _FakeAI([_job("q1", "question_intake", status="running")])
+    page = TaskQueuePage(ai)
+    buttons = [b.text() for b in page.active_pane.findChildren(QPushButton)]
+    assert "重新运行" in buttons
+    assert "取消运行中" in buttons
+    page.close()
+
+
+def test_job_detail_rerun_enabled_for_retryable_but_disabled_for_clean_done() -> None:
+    _ = QApplication.instance() or QApplication([])
+    ai = _FakeAI([
+        _job("f1", "question_intake", status="failed"),
+        _job("c1", "question_intake", status="completed"),
+    ])
+    page = AIJobDetailPage(ai)
+    page.open_job("f1")
+    assert page.rerun_button.isEnabled()
+    page.open_job("c1")
+    assert not page.rerun_button.isEnabled()
+    page.close()
+

@@ -24,7 +24,8 @@ from yancuo_win.application.problem_chat_service import (
 )
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
-from yancuo_win.data.models import Asset
+from yancuo_win.data.ids import new_id
+from yancuo_win.data.models import Asset, ProblemMessage
 from yancuo_win.domain.rules import DomainError
 
 
@@ -335,6 +336,40 @@ def test_retry_reuses_failed_user_message_without_duplicate_prompt(
         if message["role"] == "user" and message["content"] == "保留这条问题"
     ]
     assert len(successful_user_prompts) == 1
+
+
+def test_retry_reuses_interrupted_pending_user_message_without_duplicate(
+    chat: tuple[AppServices, ProblemChatService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services, problem_chat = chat
+    problem = services.create_problem(title="中断题", status="active")
+    provider = _CapturingChatProvider()
+    monkeypatch.setattr(chat_module, "get_provider", lambda *_args: provider)
+    conversation = problem_chat.create_conversation(problem.id)
+
+    # 模拟 AI 回复中程序中断：user 消息停在 pending
+    with problem_chat._session() as session:
+        message = ProblemMessage(
+            id=new_id("message"),
+            conversation_id=conversation.id,
+            sequence=1,
+            role="user",
+            content_markdown="解释一下",
+            status="pending",
+            reference_snapshot_json="[]",
+        )
+        session.add(message)
+        session.commit()
+
+    reply = problem_chat.send_message(conversation.id, "解释一下")
+    assert reply.role == "assistant"
+    loaded = problem_chat.get_conversation(conversation.id)
+    assert loaded is not None
+    assert [(m.role, m.status, m.sequence) for m in loaded.messages] == [
+        ("user", "complete", 1),
+        ("assistant", "complete", 2),
+    ]
 
 
 def test_visual_reference_snapshot_is_ordered_and_immutable(
