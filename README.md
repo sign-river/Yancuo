@@ -6,6 +6,8 @@
 
 从 [`docs/README.md`](docs/README.md) 开始阅读。
 
+AI 代理（Codex / Cursor / Copilot 等）在开始任务前必须先阅读 [`AGENTS.md`](AGENTS.md)，其中包含测试、UI 排查、编码与提交的强制约定。
+
 日常协作只需要关注：
 
 - [`docs/问题收集箱.md`](docs/问题收集箱.md)：用户连续提交、尚未排期的问题；
