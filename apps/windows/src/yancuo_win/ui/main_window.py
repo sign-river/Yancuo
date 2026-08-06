@@ -1120,7 +1120,7 @@ class MainWindow(QMainWindow):
         self.search_scope_combo.setObjectName("SearchScopeCombo")
         self.search_scope_combo.addItem("\u5f53\u524d\u8303\u56f4", "current")
         self.search_scope_combo.addItem("\u5168\u90e8\u6b63\u5f0f\u9898\u76ee", "all_active")
-        self.search_scope_combo.setMinimumWidth(150)
+        self.search_scope_combo.setMinimumWidth(190)
         self.search_scope_combo.setFixedHeight(36)
         self.search_scope_combo.currentIndexChanged.connect(self._on_search_scope_changed)
         search_row.addWidget(self.search_scope_combo)
