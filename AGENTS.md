@@ -3,6 +3,9 @@
 本文件是仓库对 AI 代理的强制约定。开始任何任务前先读本文件；涉及 UI、测试、
 提交时尤其遵守下列规则，避免已知的高成本返工。
 
+## 回复语言
+- 所有对用户的回复一律使用中文（代码、命令、报错原文、专有名词除外）。
+
 ## 项目结构
 - Windows 桌面客户端：`apps/windows/`（PySide6，源码在 `apps/windows/src/yancuo_win/`）。
 - 单元测试：`tests/`；Qt 测试由 `tests/conftest.py` 固定为 offscreen 平台。
