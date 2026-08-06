@@ -942,9 +942,20 @@ def test_catalog_menu_and_editor_use_valid_full_paths(window: MainWindow) -> Non
     ]
 
 
-def test_library_search_combo_uses_scope_combo_style(window: MainWindow) -> None:
-    assert window.library_search_combo.objectName() == "SearchModeCombo"
-    assert window.library_search_combo.height() == window.search_scope_combo.height()
+def test_library_search_mode_uses_expanded_buttons(window: MainWindow) -> None:
+    # 搜索方式直接以两个按钮并排展示，不再使用带下三角的下拉框
+    assert not hasattr(window, "library_search_combo")
+    assert not window.local_search_button.isHidden()
+    assert not window.ai_search_button.isHidden()
+    assert window.local_search_button.parentWidget() is window.search_scope_combo.parentWidget()
+    assert window.ai_search_button.parentWidget() is window.search_scope_combo.parentWidget()
+
+
+def test_library_new_button_is_primary_intake_action(window: MainWindow) -> None:
+    button = window.library_new_button
+    assert button.objectName() == "PrimaryButton"
+    assert button.text() == "录入题目"
+    assert not button.isHidden()
 
 
 def test_library_view_switch_fits_navigation_panel(window: MainWindow) -> None:

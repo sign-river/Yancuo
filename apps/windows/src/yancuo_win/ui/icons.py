@@ -109,6 +109,12 @@ def symbolic_icon(name: str, theme: str | None = None) -> QIcon:
     return _cached_icon(name, tokens.muted, tokens.primary, tokens.border_strong)
 
 
+def colored_icon(name: str, color: str) -> QIcon:
+    """Return an icon rendered in a fixed color (e.g. white on a primary button)."""
+
+    return _cached_icon(name, color, color, color)
+
+
 class _IconBinding(QObject):
     def __init__(
         self,

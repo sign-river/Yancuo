@@ -70,7 +70,7 @@ from yancuo_win.tasks.ai_coordinator import AIJobCoordinator
 from yancuo_win.tasks.worker import CallableWorker
 from yancuo_win.tasks.search_worker import AiSearchWorker
 from yancuo_win.ui.duplicate_dialog import DuplicateDialog
-from yancuo_win.ui.icons import bind_icon
+from yancuo_win.ui.icons import bind_icon, colored_icon
 from yancuo_win.ui.intake_page import IntakePage
 from yancuo_win.ui.math_content import MathContentView, set_preview_zoom_scale
 from yancuo_win.ui.note_page import NotePage
@@ -1069,21 +1069,21 @@ class MainWindow(QMainWindow):
 
         header = PageHeader("\u9898\u5e93 / \u5168\u90e8\u6b63\u5f0f\u9898\u76ee", "")
         self.library_page_title = header.title
-        self.library_new_combo = QComboBox()
-        self.library_new_combo.setAccessibleName("\u65b0\u5efa\u9898\u76ee")
-        self.library_new_combo.addItem("\uff0b \u65b0\u5efa", None)
-        self.library_new_combo.addItem("AI \u56fe\u7247\u5f55\u9898", "image")
-        self.library_new_combo.addItem("\u624b\u52a8\u5f55\u9898", "manual")
-        self.library_new_combo.setMinimumWidth(120)
-        self.library_new_combo.currentIndexChanged.connect(
-            self._on_library_new_combo_changed
-        )
+        self.library_new_button = QPushButton("\u5f55\u5165\u9898\u76ee")
+        self.library_new_button.setObjectName("PrimaryButton")
+        self.library_new_button.setAccessibleName("\u5f55\u5165\u9898\u76ee")
+        self.library_new_button.setMinimumWidth(120)
+        self.library_new_button.setMinimumHeight(36)
+        self.library_new_button.setIcon(colored_icon("chevron-down", "#FFFFFF"))
+        self.library_new_button.setIconSize(QSize(16, 16))
+        self.library_new_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.library_new_button.clicked.connect(self._show_library_new_menu)
         imports = QPushButton("\u66f4\u591a")
         bind_icon(imports, "more-horizontal")
         imports.setToolTip("\u5bfc\u5165\u3001\u5bfc\u51fa\u548c\u6279\u91cf\u9898\u5e93\u64cd\u4f5c")
         imports.clicked.connect(self._library_more_menu)
         imports.setMinimumHeight(36)
-        header.add_action(self.library_new_combo)
+        header.add_action(self.library_new_button)
         header.add_action(imports)
         outer.addWidget(header)
 
@@ -1105,17 +1105,8 @@ class MainWindow(QMainWindow):
             self.search_mode_group.addButton(button)
             button.clicked.connect(self._on_search_mode_changed)
         self.local_search_button.setChecked(True)
-        self.library_search_combo = QComboBox()
-        self.library_search_combo.setObjectName("SearchModeCombo")
-        self.library_search_combo.setAccessibleName("\u9898\u5e93\u641c\u7d22\u65b9\u5f0f")
-        self.library_search_combo.addItem("\u666e\u901a\u641c\u7d22", "local")
-        self.library_search_combo.addItem("AI \u641c\u7d22", "ai")
-        self.library_search_combo.setMinimumWidth(120)
-        self.library_search_combo.setFixedHeight(36)
-        self.library_search_combo.currentIndexChanged.connect(
-            self._on_library_search_combo_changed
-        )
-        search_row.addWidget(self.library_search_combo)
+        search_row.addWidget(self.local_search_button)
+        search_row.addWidget(self.ai_search_button)
         self.search_scope_combo = QComboBox()
         self.search_scope_combo.setObjectName("SearchScopeCombo")
         self.search_scope_combo.addItem("\u5f53\u524d\u8303\u56f4", "current")
@@ -1391,34 +1382,17 @@ class MainWindow(QMainWindow):
         self.refresh_problems()
         self.note_page.reload()
 
-    def _sync_search_mode_combo(self) -> None:
-        combo = getattr(self, "library_search_combo", None)
-        if combo is None:
-            return
-        combo.blockSignals(True)
-        combo.setCurrentIndex(1 if self._is_ai_search_mode() else 0)
-        combo.blockSignals(False)
+    def _show_library_new_menu(self) -> None:
+        from PySide6.QtWidgets import QMenu
 
-
-    def _on_library_search_combo_changed(self, index: int) -> None:
-        mode = self.library_search_combo.itemData(index)
-        self.local_search_button.blockSignals(True)
-        self.ai_search_button.blockSignals(True)
-        self.local_search_button.setChecked(mode == "local")
-        self.ai_search_button.setChecked(mode == "ai")
-        self.local_search_button.blockSignals(False)
-        self.ai_search_button.blockSignals(False)
-        self._on_search_mode_changed()
-
-
-    def _on_library_new_combo_changed(self, index: int) -> None:
-        action = self.library_new_combo.itemData(index)
-        if action == "image":
-            self._show_ai_intake()
-        elif action == "manual":
-            self._show_manual_intake()
-        if index != 0:
-            self.library_new_combo.setCurrentIndex(0)
+        menu = QMenu(self)
+        menu.addAction("AI \u56fe\u7247\u5f55\u9898", self._show_ai_intake)
+        menu.addAction("\u624b\u52a8\u5f55\u9898", self._show_manual_intake)
+        sender = self.sender()
+        if isinstance(sender, QPushButton):
+            menu.exec(sender.mapToGlobal(sender.rect().bottomLeft()))
+        else:
+            menu.exec(self.cursor().pos())
 
     def _library_more_menu(self) -> None:
         from PySide6.QtWidgets import QMenu
@@ -2464,7 +2438,6 @@ class MainWindow(QMainWindow):
             self.search_privacy_hint.setText(
                 "普通搜索完全离线，只查询本机索引，不产生 AI 请求或费用。"
             )
-        self._sync_search_mode_combo()
         self.refresh_problems()
 
     def _on_search_text_edited(self, _text: str) -> None:
