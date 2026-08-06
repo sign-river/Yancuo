@@ -463,6 +463,11 @@ class TaskQueuePage(QWidget):
 
         return predicate
 
+    def open_review_queue(self) -> None:
+        """Select the pending-review sub-queue (used by the intake page)."""
+        self.tabs.setCurrentWidget(self.panes["review"])
+        self.refresh()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self.refresh()

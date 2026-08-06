@@ -408,6 +408,7 @@ class MainWindow(QMainWindow):
             lambda message: self.statusBar().showMessage(message)
         )
         self.intake_page.ai_review_ready.connect(self._show_ai_completion_notification)
+        self.intake_page.review_queue_requested.connect(self._open_review_queue)
         self.intake_page.dashboard_requested.connect(
             lambda: self._handle_intake_back("dashboard")
         )
@@ -2094,6 +2095,11 @@ class MainWindow(QMainWindow):
     def _open_task_queue(self) -> None:
         """Open the embedded task queue page instead of a modal dialog."""
         self.task_queue_page.refresh()
+        self._show_navigation_page(_PAGE_TASK_QUEUE)
+
+    def _open_review_queue(self) -> None:
+        """审核结果入口：打开任务队列并选中“待审核”子队列。"""
+        self.task_queue_page.open_review_queue()
         self._show_navigation_page(_PAGE_TASK_QUEUE)
 
     def _job_needs_review(self, job) -> bool:
