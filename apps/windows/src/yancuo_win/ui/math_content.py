@@ -39,7 +39,8 @@ def set_preview_zoom_scale(scale: float) -> None:
     global _PREVIEW_ZOOM_SCALE
     _PREVIEW_ZOOM_SCALE = max(0.8, min(1.5, float(scale)))
     for view in tuple(_PREVIEW_VIEWS):
-        view.set_zoom_scale(_PREVIEW_ZOOM_SCALE)
+        if view.follows_global_zoom():
+            view.set_zoom_scale(_PREVIEW_ZOOM_SCALE)
 
 
 _MATH_PATTERN = re.compile(
@@ -773,6 +774,7 @@ class MathContentView(QWidget):
         self._minimum_content_height = 80
         self._compact = False
         self._zoom_scale = preview_zoom_scale()
+        self._follow_global_zoom = True
         self._content_height: int | None = None
         self._section_layout: dict[str, dict[str, int]] = {}
         self._content_height_px = 0
@@ -899,6 +901,20 @@ class MathContentView(QWidget):
         """Apply a reader-only scale without changing the host container."""
         normalized = max(0.5, min(1.5, float(scale)))
         if self._zoom_scale == normalized:
+            return
+        self._zoom_scale = normalized
+        self._apply_zoom_scale()
+
+    def follows_global_zoom(self) -> bool:
+        """Whether this reader tracks the shared preview-zoom setting."""
+        return self._follow_global_zoom
+
+    def set_fixed_zoom_scale(self, scale: float) -> None:
+        """Lock this reader to a fixed scale, independent of the shared zoom."""
+        self._follow_global_zoom = False
+        normalized = max(0.5, min(1.5, float(scale)))
+        if self._zoom_scale == normalized:
+            self._apply_zoom_scale()
             return
         self._zoom_scale = normalized
         self._apply_zoom_scale()

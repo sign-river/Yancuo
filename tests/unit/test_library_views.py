@@ -58,6 +58,13 @@ class _ReaderStub(QWidget):
     def set_zoom_scale(self, *_args, **_kwargs) -> None:
         pass
 
+    def set_fixed_zoom_scale(self, scale) -> None:
+        self.fixed_zoom_scale = scale
+        self._follow_global_zoom = False
+
+    def follows_global_zoom(self) -> bool:
+        return getattr(self, "_follow_global_zoom", True)
+
     def set_fragment(self, *_args, **_kwargs) -> None:
         pass
 
@@ -850,6 +857,18 @@ def test_formula_content_surfaces_use_bounded_adaptive_height(
     assert window.intake_page.ai_result_preview.adaptive_height_limit == 520
     assert window.intake_page.ai_form.render_view is not None
     assert window.intake_page.ai_form.render_view.adaptive_height_limit == 1200
+    assert window.intake_page.ai_form.render_view.fixed_zoom_scale == 1.0
+    assert window.intake_page.ai_form.render_view.follows_global_zoom() is False
+    edit_splitter = window.intake_page.ai_form.splitter
+    edit_splitter.setParent(None)
+    edit_splitter.show()
+    QApplication.processEvents()
+    edit_splitter.setSizes([500, 500])
+    edit_splitter.resize(1200, 400)
+    QApplication.processEvents()
+    edit_sizes = edit_splitter.sizes()
+    assert len(edit_sizes) == 2
+    assert abs(edit_sizes[0] - edit_sizes[1]) <= 2
 
 
 def test_due_navigation_returns_to_processing_center(window: MainWindow) -> None:

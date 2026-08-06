@@ -243,6 +243,24 @@ def test_reserved_adaptive_reader_keeps_stable_height() -> None:
     app.processEvents()
 
 
+def test_fixed_zoom_scale_is_independent_from_shared_preview_zoom() -> None:
+    app = QApplication.instance() or QApplication([])
+    original = math_content_module.preview_zoom_scale()
+    reader = MathContentView()
+    try:
+        reader.set_fixed_zoom_scale(1.0)
+        assert reader.follows_global_zoom() is False
+        assert reader._zoom_scale == 1.0
+
+        math_content_module.set_preview_zoom_scale(0.8)
+        assert math_content_module.preview_zoom_scale() == 0.8
+        assert reader._zoom_scale == 1.0
+    finally:
+        math_content_module.set_preview_zoom_scale(original)
+        reader.close()
+        app.processEvents()
+
+
 def test_content_sized_problem_document_does_not_force_viewport_height() -> None:
     rendered = build_problem_html(
         {"title": "短题", "question_markdown": "求 $x+1$。"},
