@@ -6,6 +6,15 @@
 ## 回复语言
 - 所有对用户的回复一律使用中文（代码、命令、报错原文、专有名词除外）。
 
+## 图片展示约定
+- 本机 Codex 会话的**工具图片输出通道不可用**
+  （view_image / emitImage 只返回 `[Unsupported Image]`），
+  对话里无法内嵌渲染工具图片；这与仓库代码无关。
+- 需要向用户展示图片时，不要依赖内嵌图片：
+  给出图片的**绝对路径/链接**（Markdown 链接或纯路径均可），
+  让用户点击打开；需要理解图片内容时，用
+  `agent-vision see "<路径>" -q "..."` 转成文字描述后再回答。
+
 ## 项目结构
 - Windows 桌面客户端：`apps/windows/`（PySide6，源码在 `apps/windows/src/yancuo_win/`）。
 - 单元测试：`tests/`；Qt 测试由 `tests/conftest.py` 固定为 offscreen 平台。
