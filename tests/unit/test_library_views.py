@@ -1097,6 +1097,20 @@ def test_inline_preview_size_syncs_after_content_height_change(
     assert widget.height() > collapsed_height
 
 
+def test_problem_editor_opens_as_embedded_page(window: MainWindow) -> None:
+    item = window.problem_list.item(0)
+    assert item is not None
+    problem_id = str(item.data(Qt.ItemDataRole.UserRole))
+    previous = window.stack.currentIndex()
+    window._open_editor(problem_id)
+    assert window.stack.currentIndex() == window.stack.indexOf(
+        window.problem_editor_page
+    )
+    assert window.problem_editor_page.title_edit.text() != ""
+    window._close_problem_editor()
+    assert window.stack.currentIndex() == previous
+
+
 def test_catalog_actions_follow_selected_node_type_and_position(
     window: MainWindow,
 ) -> None:

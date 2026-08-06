@@ -37,7 +37,7 @@ from yancuo_win.data.models import (
 )
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.intake_page import ProblemForm, _RegionRecognitionCompareDialog
-from yancuo_win.ui.problem_editor import ProblemEditorDialog
+from yancuo_win.ui.problem_editor import ProblemEditorPage
 
 
 @pytest.fixture()
@@ -357,22 +357,23 @@ def test_problem_editor_exposes_complete_accessible_form(
         question_markdown="求函数极限",
         status="active",
     )
-    dialog = ProblemEditorDialog(intake.app, problem)
+    page = ProblemEditorPage(intake.app)
+    page.set_problem(problem)
 
-    assert dialog.title_edit.accessibleName() == "题目标题"
-    assert dialog.priority.accessibleName() == "题目优先级"
-    assert dialog.status.accessibleName() == "题目状态"
-    assert dialog.subject.accessibleName() == "题目科目"
-    assert dialog.chapter.accessibleName() == "题目章节"
-    assert dialog.question.accessibleName() == "题干"
-    assert dialog.solution.accessibleName() == "题目解析"
-    assert dialog.notes.accessibleName() == "题目备注"
-    dialog.show()
-    dialog.title_edit.setFocus()
-    QTest.keyClick(dialog.title_edit, Qt.Key.Key_Tab)
+    assert page.title_edit.accessibleName() == "题目标题"
+    assert page.priority.accessibleName() == "题目优先级"
+    assert page.status.accessibleName() == "题目状态"
+    assert page.subject.accessibleName() == "题目科目"
+    assert page.chapter.accessibleName() == "题目章节"
+    assert page.question.accessibleName() == "题干"
+    assert page.solution.accessibleName() == "题目解析"
+    assert page.notes.accessibleName() == "题目备注"
+    page.show()
+    page.title_edit.setFocus()
+    QTest.keyClick(page.title_edit, Qt.Key.Key_Tab)
     app.processEvents()
-    assert dialog.priority.hasFocus()
-    dialog.close()
+    assert page.priority.hasFocus()
+    page.close()
     app.processEvents()
 
 

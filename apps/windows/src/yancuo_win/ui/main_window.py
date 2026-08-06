@@ -79,7 +79,7 @@ from yancuo_win.ui.operation_results import (
     show_transfer_result,
 )
 from yancuo_win.ui.problem_detail import ProblemDetailPage
-from yancuo_win.ui.problem_editor import ProblemEditorDialog
+from yancuo_win.ui.problem_editor import ProblemEditorPage
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
 from yancuo_win.ui.settings_dialog import ServiceSettingsPage
@@ -116,6 +116,7 @@ _PAGE_PROBLEM_DETAIL = 6
 _PAGE_AI_COMPLETION = 7
 _PAGE_TASK_QUEUE = 8
 _PAGE_AI_JOB_DETAIL = 9
+_PAGE_PROBLEM_EDITOR = 10
 
 
 def _format_backup_stamp(tag: str) -> str:
@@ -340,6 +341,8 @@ class MainWindow(QMainWindow):
         self._ctx_buttons: list[QPushButton] = []
         self._detail_return_page = _PAGE_LIBRARY
         self._ai_completion_return_page = _PAGE_LIBRARY
+        self._editor_return_page = _PAGE_LIBRARY
+        self._editor_detail_return_page = _PAGE_LIBRARY
         self._task_queue_pending = False
         self._sidebar_collapsed = False
         self._sidebar_narrow_open = False
@@ -481,6 +484,10 @@ class MainWindow(QMainWindow):
         self.ai_job_detail_page = AIJobDetailPage(self.ai, self.ai_coordinator)
         self.ai_job_detail_page.back_requested.connect(self._close_ai_job_detail)
         self.stack.addWidget(self.ai_job_detail_page)
+        self.problem_editor_page = ProblemEditorPage(self.services)
+        self.problem_editor_page.saved.connect(self._on_problem_editor_saved)
+        self.problem_editor_page.cancelled.connect(self._close_problem_editor)
+        self.stack.addWidget(self.problem_editor_page)
         layout.addWidget(self.stack, stretch=1)
         root_layout.addLayout(layout, stretch=1)
 
@@ -3086,7 +3093,9 @@ class MainWindow(QMainWindow):
         if pid:
             self._open_problem_detail(pid)
 
-    def _open_problem_detail(self, problem_id: str) -> None:
+    def _open_problem_detail(
+        self, problem_id: str, *, preserve_return_page: bool = False
+    ) -> None:
         problem = self.services.get_problem(problem_id)
         if not problem:
             self._show_status_toast("题目不存在或已被删除")
@@ -3114,7 +3123,7 @@ class MainWindow(QMainWindow):
                 )
 
         current_page = self.stack.currentIndex()
-        if current_page != _PAGE_PROBLEM_DETAIL:
+        if current_page != _PAGE_PROBLEM_DETAIL and not preserve_return_page:
             self._detail_return_page = (
                 current_page if 0 <= current_page <= _PAGE_SETTINGS else _PAGE_LIBRARY
             )
@@ -3156,10 +3165,6 @@ class MainWindow(QMainWindow):
 
     def _edit_problem_from_detail(self, problem_id: str) -> None:
         self._open_editor(problem_id)
-        if self.services.get_problem(problem_id):
-            self._open_problem_detail(problem_id)
-        else:
-            self._close_problem_detail()
 
     def _detail_problem_ids(self) -> list[str]:
         if self._detail_return_page == _PAGE_REVIEW:
@@ -3262,9 +3267,38 @@ class MainWindow(QMainWindow):
         p = self.services.get_problem(problem_id)
         if not p:
             return
-        dlg = ProblemEditorDialog(self.services, p, self)
-        if dlg.exec():
-            self._refresh_problem_item(problem_id, select=True)
+        current_page = self.stack.currentIndex()
+        if current_page == _PAGE_PROBLEM_DETAIL:
+            self._editor_return_page = _PAGE_PROBLEM_DETAIL
+            self._editor_detail_return_page = self._detail_return_page
+        elif 0 <= current_page <= _PAGE_SETTINGS:
+            self._editor_return_page = current_page
+        else:
+            self._editor_return_page = _PAGE_LIBRARY
+        self.problem_editor_page.set_problem(p)
+        self.stack.setCurrentIndex(_PAGE_PROBLEM_EDITOR)
+
+    def _on_problem_editor_saved(self, problem_id: str) -> None:
+        self._finish_problem_editor(saved=True, problem_id=problem_id)
+
+    def _close_problem_editor(self) -> None:
+        self._finish_problem_editor(saved=False)
+
+    def _finish_problem_editor(
+        self, *, saved: bool, problem_id: str | None = None
+    ) -> None:
+        target = self._editor_return_page
+        if target == _PAGE_PROBLEM_DETAIL:
+            self._detail_return_page = self._editor_detail_return_page
+            if saved and problem_id and self.services.get_problem(problem_id):
+                self._open_problem_detail(problem_id, preserve_return_page=True)
+            else:
+                self.stack.setCurrentIndex(_PAGE_PROBLEM_DETAIL)
+        else:
+            if saved and problem_id:
+                self._refresh_problem_item(problem_id, select=True)
+            self.stack.setCurrentIndex(target)
+            self._show_navigation_page(target)
 
     def _promote_selected(self) -> None:
         pid = self._require_one()

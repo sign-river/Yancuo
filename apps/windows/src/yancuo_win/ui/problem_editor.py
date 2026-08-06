@@ -1,13 +1,11 @@
-"""题目编辑对话框。"""
+"""题目编辑页（嵌入主窗口，直接替换当前界面）。"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from PySide6.QtWidgets import (
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -27,32 +25,48 @@ from yancuo_win.data.models import Problem
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.ui.widgets import (
     CardFrame,
+    IconButton,
     PageHeader,
     describe_field,
+    primary_button,
     set_tab_order_chain,
 )
 
 
-class ProblemEditorDialog(QDialog):
-    def __init__(self, services: AppServices, problem: Problem, parent=None) -> None:
+class ProblemEditorPage(QWidget):
+    """题目编辑页：保存或取消后通过信号通知主窗口返回。"""
+
+    saved = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, services: AppServices, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.services = services
-        self.problem_id = problem.id
-        self.setWindowTitle(f"编辑题目 · {problem.title or problem.id[:12]}")
-        self.resize(720, 640)
+        self.problem_id: str | None = None
+        self.setObjectName("PageRoot")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(12)
-        layout.addWidget(
-            PageHeader("编辑题目", "修改题目内容、分类和复习状态；保存后立即同步到题库。")
+
+        self.back_button = IconButton("chevron-left", "返回")
+        self.back_button.clicked.connect(self.cancelled.emit)
+        self.save_button = primary_button("保存")
+        self.save_button.setMinimumHeight(36)
+        self.save_button.clicked.connect(self._save)
+        self.header = PageHeader(
+            "编辑题目",
+            "修改题目内容、分类和复习状态；保存后立即同步到题库。",
         )
+        self.header.add_leading(self.back_button)
+        self.header.add_action(self.save_button)
+        layout.addWidget(self.header)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        # 左栏：实时渲染预览
         self.preview_view = MathContentView()
         self.preview_view.set_adaptive_content_height(1200, reserve_height=True)
         splitter.addWidget(self.preview_view)
-        # 右栏：编辑控件
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -62,12 +76,12 @@ class ProblemEditorDialog(QDialog):
         body_layout.setSpacing(12)
         form = QFormLayout()
 
-        self.title_edit = QLineEdit(problem.title or "")
+        self.title_edit = QLineEdit()
         self.priority = QSpinBox()
         describe_field(self.title_edit, "题目标题")
         describe_field(self.priority, "题目优先级")
         self.priority.setRange(1, 5)
-        self.priority.setValue(problem.priority or 3)
+        self.priority.setValue(3)
 
         self.status = QComboBox()
         describe_field(self.status, "题目状态")
@@ -78,27 +92,16 @@ class ProblemEditorDialog(QDialog):
             ("trashed", "回收站"),
         ):
             self.status.addItem(label, st)
-        idx = self.status.findData(problem.status)
-        if idx >= 0:
-            self.status.setCurrentIndex(idx)
 
         self.subject = QComboBox()
         describe_field(self.subject, "题目科目")
         self.subject.addItem("（未指定）", None)
         for sub in services.list_subjects():
             self.subject.addItem(sub.name, sub.id)
-        if problem.subject_id:
-            i = self.subject.findData(problem.subject_id)
-            if i >= 0:
-                self.subject.setCurrentIndex(i)
+        self.subject.currentIndexChanged.connect(self._reload_chapters)
         self.chapter = QComboBox()
         describe_field(self.chapter, "题目章节")
-        self.subject.currentIndexChanged.connect(self._reload_chapters)
         self._reload_chapters()
-        if problem.chapter_id:
-            i = self.chapter.findData(problem.chapter_id)
-            if i >= 0:
-                self.chapter.setCurrentIndex(i)
 
         form.addRow("标题", self.title_edit)
         form.addRow("优先级", self.priority)
@@ -106,14 +109,14 @@ class ProblemEditorDialog(QDialog):
         form.addRow("科目", self.subject)
         form.addRow("章节", self.chapter)
 
-        self.question = QTextEdit(problem.question_markdown or "")
+        self.question = QTextEdit()
         self.question.setPlaceholderText("原题 Markdown / 文本")
-        self.latex = QTextEdit(problem.question_latex or "")
+        self.latex = QTextEdit()
         self.latex.setMaximumHeight(80)
-        self.user_answer = QTextEdit(problem.user_answer or "")
-        self.correct = QTextEdit(problem.correct_answer or "")
-        self.solution = QTextEdit(problem.solution_markdown or "")
-        self.notes = QTextEdit(problem.notes or "")
+        self.user_answer = QTextEdit()
+        self.correct = QTextEdit()
+        self.solution = QTextEdit()
+        self.notes = QTextEdit()
         describe_field(self.question, "题干")
         describe_field(self.latex, "题干 LaTeX")
         describe_field(self.user_answer, "我的作答")
@@ -158,14 +161,7 @@ class ProblemEditorDialog(QDialog):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([380, 420])
         layout.addWidget(splitter, stretch=1)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self._save)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
-        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+
         set_tab_order_chain(
             self.title_edit,
             self.priority,
@@ -178,11 +174,9 @@ class ProblemEditorDialog(QDialog):
             self.correct,
             self.solution,
             self.notes,
-            save_button,
-            cancel_button,
+            self.save_button,
         )
 
-        # 编辑器级撤销：QTextEdit 自带 Undo
         for w in (
             self.question,
             self.latex,
@@ -191,8 +185,8 @@ class ProblemEditorDialog(QDialog):
             self.solution,
             self.notes,
         ):
-            w.setUndoRedoEnabled(True)
-        # 左侧预览随编辑实时刷新
+            w.setUndoRedoEnabled(True)
+
         for w in (
             self.title_edit,
             self.question,
@@ -210,8 +204,31 @@ class ProblemEditorDialog(QDialog):
                 w.valueChanged.connect(self._refresh_preview)
             else:
                 w.currentIndexChanged.connect(self._refresh_preview)
-        self._refresh_preview()
 
+    def set_problem(self, problem: Problem) -> None:
+        self.problem_id = problem.id
+        self.title_edit.setText(problem.title or "")
+        self.priority.setValue(problem.priority or 3)
+        idx = self.status.findData(problem.status)
+        self.status.setCurrentIndex(idx if idx >= 0 else 0)
+        if problem.subject_id:
+            i = self.subject.findData(problem.subject_id)
+            self.subject.setCurrentIndex(i if i >= 0 else 0)
+        else:
+            self.subject.setCurrentIndex(0)
+        self._reload_chapters()
+        if problem.chapter_id:
+            i = self.chapter.findData(problem.chapter_id)
+            self.chapter.setCurrentIndex(i if i >= 0 else 0)
+        else:
+            self.chapter.setCurrentIndex(0)
+        self.question.setPlainText(problem.question_markdown or "")
+        self.latex.setPlainText(problem.question_latex or "")
+        self.user_answer.setPlainText(problem.user_answer or "")
+        self.correct.setPlainText(problem.correct_answer or "")
+        self.solution.setPlainText(problem.solution_markdown or "")
+        self.notes.setPlainText(problem.notes or "")
+        self._refresh_preview()
 
     def _refresh_preview(self, *_args) -> None:
         subject_name = self.subject.currentText() if self.subject.currentData() else ""
@@ -231,6 +248,8 @@ class ProblemEditorDialog(QDialog):
         )
 
     def _save(self) -> None:
+        if not self.problem_id:
+            return
         try:
             fields = {
                 "title": self.title_edit.text().strip() or None,
@@ -252,7 +271,7 @@ class ProblemEditorDialog(QDialog):
             current = self.services.get_problem(self.problem_id)
             if current and new_status and current.status != new_status:
                 self.services.set_problem_status(self.problem_id, new_status)
-            self.accept()
+            self.saved.emit(self.problem_id)
         except DomainError as exc:
             QMessageBox.warning(self, "无法保存", str(exc))
 
@@ -267,3 +286,4 @@ class ProblemEditorDialog(QDialog):
                     self.chapter.addItem(" / ".join(choice.chapter_path), choice.chapter_id)
         index = self.chapter.findData(current)
         self.chapter.setCurrentIndex(index if index >= 0 else 0)
+
