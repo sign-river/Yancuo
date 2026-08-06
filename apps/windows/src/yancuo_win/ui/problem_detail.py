@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPoint, QRect, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import QBuffer, QIODevice, QPoint, QRect, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -97,6 +97,7 @@ class _ReferenceCanvas(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._pixmap = QPixmap()
+        self._display_size = QSize()
         self._asset_id = ""
         self._page_index = 0
         self._regions: list[ProblemReference] = []
@@ -114,9 +115,25 @@ class _ReferenceCanvas(QWidget):
         self.setMouseTracking(True)
         self.setVisible(False)
 
-    def set_source(self, asset_id: str, page_index: int, path: Path | None) -> None:
+    def set_source(
+        self,
+        asset_id: str,
+        page_index: int,
+        path: Path | None,
+        fit_width: int | None = None,
+    ) -> None:
         self._asset_id, self._page_index = asset_id, page_index
         self._pixmap = QPixmap(str(path)) if path else QPixmap()
+        self._display_size = QSize()
+        if fit_width and not self._pixmap.isNull():
+            self._display_size = self._pixmap.size().scaled(
+                QSize(fit_width, 100_000),
+                Qt.AspectRatioMode.KeepAspectRatio,
+            )
+            self.setFixedSize(self._display_size)
+        else:
+            self.setMinimumSize(0, 160)
+            self.setMaximumSize(16_777_215, 16_777_215)
         self._selected_index = next(
             (index for index, value in enumerate(self._regions) if value.asset_id == asset_id),
             -1,
@@ -174,9 +191,12 @@ class _ReferenceCanvas(QWidget):
     def _image_rect(self) -> QRect:
         if self._pixmap.isNull():
             return QRect()
-        size = self._pixmap.size().scaled(
-            self.size() - QSize(12, 12), Qt.AspectRatioMode.KeepAspectRatio
-        )
+        if not self._display_size.isEmpty():
+            size = self._display_size
+        else:
+            size = self._pixmap.size().scaled(
+                self.size() - QSize(12, 12), Qt.AspectRatioMode.KeepAspectRatio
+            )
         return QRect(
             (self.width() - size.width()) // 2,
             (self.height() - size.height()) // 2,
@@ -643,12 +663,16 @@ class ProblemDetailPage(QWidget):
         self.reader.setMinimumWidth(0)
         if hasattr(self.reader, "render_completed"):
             self.reader.render_completed.connect(self._restore_reader_scroll)
+            self.reader.render_completed.connect(self._on_reader_rendered)
         self.reference_canvas = _ReferenceCanvas()
         self.reference_canvas.changed.connect(self._update_reference_summary)
         self.reference_canvas.selection_finished.connect(self._reference_selection_finished)
         self.reader_stack = QStackedWidget()
         self.reader_stack.addWidget(self.reader)
-        self.reader_stack.addWidget(self.reference_canvas)
+        self.reference_scroll = QScrollArea()
+        self.reference_scroll.setWidgetResizable(False)
+        self.reference_scroll.setWidget(self.reference_canvas)
+        self.reader_stack.addWidget(self.reference_scroll)
         self.workspace = QSplitter(Qt.Orientation.Horizontal)
         self.workspace.setChildrenCollapsible(False)
         self.workspace.setHandleWidth(10)
@@ -904,6 +928,8 @@ class ProblemDetailPage(QWidget):
             self.reader_stack.setVisible(True)
             if self.reader_stack.currentWidget() is self.reader:
                 self.reader.setVisible(True)
+            elif self.reader_stack.currentWidget() is self.reference_scroll:
+                self._fit_reference_canvas()
             self.chat_button.setText("AI 讨论")
             if self.chat_card.isVisible():
                 self._set_chat_split_sizes()
@@ -914,24 +940,54 @@ class ProblemDetailPage(QWidget):
 
     def _configure_reference_source(self) -> None:
         self._reference_sources = (
-            self.chat.list_reference_sources(self.problem_id)
-            if self.chat and self.problem_id
-            else []
+            self._ensure_render_sources() if self.chat and self.problem_id else []
         )
         self.reference_source_combo.blockSignals(True)
         self.reference_source_combo.clear()
         for source in self._reference_sources:
-            self.reference_source_combo.addItem(f"题图 {int(source['page_index']) + 1}", source)
+            self.reference_source_combo.addItem(f"PDF 第 {int(source['page_index']) + 1} 页", source)
         self.reference_source_combo.blockSignals(False)
         self._set_reference_source()
         enabled = bool(self._reference_sources)
         self.add_reference_button.setEnabled(enabled)
         self.add_reference_button.setToolTip(
-            "在左侧题图上拖拽框选" if enabled else "本题没有可框选的题图"
+            "在左侧 PDF 上拖拽框选" if enabled else "正在生成题目 PDF…"
         )
         self.clear_references_button.setEnabled(enabled)
         self.reference_source_combo.setEnabled(enabled and len(self._reference_sources) > 1)
         self._update_reference_summary()
+
+    def _ensure_render_sources(self) -> list[dict[str, Any]]:
+        render_pages = getattr(self.reader, "render_pages", None)
+        if not callable(render_pages):
+            return []
+        pages = render_pages()
+        if not pages:
+            return []
+        encoded: list[bytes] = []
+        for image in pages:
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            image.save(buffer, "PNG")
+            encoded.append(bytes(buffer.data()))
+            buffer.close()
+        return self.chat.ensure_render_sources(self.problem_id, encoded)
+
+    def _on_reader_rendered(self, *_args) -> None:
+        if self.problem_id:
+            self._configure_reference_source()
+
+    def _fit_reference_canvas(self) -> None:
+        source = self.reference_source_combo.currentData()
+        if not isinstance(source, dict):
+            return
+        width = max(120, self.reference_scroll.viewport().width() - 8)
+        self.reference_canvas.set_source(
+            str(source["asset_id"]),
+            int(source["page_index"]),
+            source["path"],
+            fit_width=width,
+        )
 
     def _set_reference_source(self, *_args) -> None:
         source = self.reference_source_combo.currentData()
@@ -941,22 +997,24 @@ class ProblemDetailPage(QWidget):
             str(source["asset_id"]) if source else "",
             int(source["page_index"]) if source else 0,
             source["path"] if source else None,
+            fit_width=max(120, self.reference_scroll.viewport().width() - 8),
         )
         self._update_reference_summary()
 
     def _enable_reference_mode(self) -> None:
         if self.reference_source_combo.currentData() is None:
-            self.status_message.emit("本题没有可框选的题图；将按整题文字提问")
+            self.status_message.emit("题目 PDF 尚未生成，请稍后再试")
             return
-        self.reader_stack.setCurrentWidget(self.reference_canvas)
-        self.reference_canvas.show()
+        self.reader_stack.setCurrentWidget(self.reference_scroll)
+        self.reference_scroll.show()
+        self._fit_reference_canvas()
         if self.width() < 860:
             self.reader_stack.setVisible(True)
             self.chat_card.setVisible(False)
             self.chat_button.setText("返回讨论")
         self.reference_canvas.begin_selection()
         self.finish_reference_button.setVisible(True)
-        self.add_reference_button.setText("请在题图上拖拽框选")
+        self.add_reference_button.setText("请在 PDF 上拖拽框选")
 
     def _reference_selection_finished(self) -> None:
         self.add_reference_button.setText("框选题图")
@@ -979,8 +1037,9 @@ class ProblemDetailPage(QWidget):
                 self.reference_source_combo.setCurrentIndex(source_index)
                 break
         self.reference_canvas.select_reference(index)
-        self.reader_stack.setCurrentWidget(self.reference_canvas)
-        self.reference_canvas.show()
+        self.reader_stack.setCurrentWidget(self.reference_scroll)
+        self.reference_scroll.show()
+        self._fit_reference_canvas()
         self.finish_reference_button.setVisible(True)
 
     def _clear_references(self) -> None:
@@ -1001,7 +1060,7 @@ class ProblemDetailPage(QWidget):
         elif self._reference_sources:
             summary = "未引用区域；将按整题提问"
         else:
-            summary = "本题没有可框选的题图；将按整题文字提问"
+            summary = "PDF 尚未生成；将按整题文字提问"
         self.reference_summary.setText(summary)
         self.reference_previews.clear()
         for index, reference in enumerate(references):
@@ -1010,7 +1069,7 @@ class ProblemDetailPage(QWidget):
             preview = self._reference_preview(reference)
             if not preview.isNull():
                 item.setIcon(QIcon(preview))
-            item.setToolTip(f"引用区域 {index + 1} · 第 {reference.page_index + 1} 张题图")
+            item.setToolTip(f"引用区域 {index + 1} · 第 {reference.page_index + 1} 页 PDF")
             self.reference_previews.addItem(item)
         self.reference_previews.setVisible(bool(references))
         self.delete_reference_button.setEnabled(bool(references))
@@ -1089,7 +1148,7 @@ class ProblemDetailPage(QWidget):
                     references = []
                 if references and bubble.label is not None:
                     labels = "、".join(
-                        f"{index}（题图 {int(value.get('page_index', 0)) + 1}）"
+                        f"{index}（PDF 第 {int(value.get('page_index', 0)) + 1} 页）"
                         for index, value in enumerate(references, start=1)
                         if isinstance(value, dict)
                     )
@@ -1219,14 +1278,14 @@ class ProblemDetailPage(QWidget):
         box_action = menu.addAction("框选题图", self._enable_reference_mode)
         box_action.setEnabled(bool(self._reference_sources))
         box_action.setToolTip(
-            "在左侧题图上拖拽框选" if self._reference_sources else "本题没有可框选的题图"
+            "在左侧 PDF 上拖拽框选" if self._reference_sources else "题目 PDF 尚未生成"
         )
         clear_action = menu.addAction("清除全部引用", self._clear_references)
         clear_action.setEnabled(bool(self.reference_canvas.references()))
         delete_action = menu.addAction("删除选中引用", self.reference_canvas.delete_selected)
         delete_action.setEnabled(self.reference_canvas._selected_index >= 0)
         finish_action = menu.addAction("退出框选", self._finish_reference_mode)
-        finish_action.setEnabled(self.reader_stack.currentWidget() is self.reference_canvas)
+        finish_action.setEnabled(self.reader_stack.currentWidget() is self.reference_scroll)
         show_dropdown_menu(menu, self._attach_button)
 
     def _toggle_reference_card(self) -> None:

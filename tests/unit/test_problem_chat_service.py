@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QColor, QImage
 
 import yancuo_win.application.problem_chat_service as chat_module
@@ -170,6 +171,85 @@ def test_reference_sources_follow_derived_figure_block_order(
         "asset_first",
         "asset_later",
     ]
+
+
+def _png_bytes(color: str) -> bytes:
+    image = QImage(20, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor(color))
+    buffer = QBuffer()
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    image.save(buffer, "PNG")
+    data = bytes(buffer.data())
+    buffer.close()
+    return data
+
+
+def test_render_page_sources_reuse_and_replace(
+    chat: tuple[AppServices, ProblemChatService],
+) -> None:
+    services, problem_chat = chat
+    problem = services.create_problem(title="PDF题", status="active")
+    first = _png_bytes("#FF0000")
+    second = _png_bytes("#00FF00")
+    sources = problem_chat.ensure_render_sources(problem.id, [first, second])
+    assert [item["page_index"] for item in sources] == [0, 1]
+    assert all(Path(item["path"]).is_file() for item in sources)
+
+    reused = problem_chat.ensure_render_sources(problem.id, [first, second])
+    assert [item["asset_id"] for item in reused] == [item["asset_id"] for item in sources]
+
+    replaced = problem_chat.ensure_render_sources(
+        problem.id, [first, _png_bytes("#0000FF")]
+    )
+    listed = problem_chat.list_reference_sources(problem.id)
+    assert [item["asset_id"] for item in listed] == [item["asset_id"] for item in replaced]
+    assert len(listed) == 2
+
+
+def test_render_page_reference_image_context(
+    chat: tuple[AppServices, ProblemChatService],
+) -> None:
+    services, problem_chat = chat
+    problem = services.create_problem(title="PDF题", status="active")
+    sources = problem_chat.ensure_render_sources(problem.id, [_png_bytes("#112233")])
+    reference = ProblemReference(sources[0]["asset_id"], 0, 0.1, 0.1, 0.5, 0.5)
+    content = problem_chat._reference_image_context(problem.id, [reference.as_dict()])
+    images = [
+        part["image_url"]["url"]
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    assert len(images) == 1
+    assert images[0].startswith("data:image/png;base64,")
+
+
+def test_render_reference_validates_and_sends_images(
+    chat: tuple[AppServices, ProblemChatService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services, problem_chat = chat
+    problem = services.create_problem(title="PDF题", status="active")
+    sources = problem_chat.ensure_render_sources(problem.id, [_png_bytes("#445566")])
+    provider = _CapturingChatProvider()
+    monkeypatch.setattr(chat_module, "get_provider", lambda *_args: provider)
+    conversation = problem_chat.create_conversation(problem.id)
+    reference = ProblemReference(sources[0]["asset_id"], 0, 0.1, 0.1, 0.5, 0.5)
+
+    reply = problem_chat.send_message(conversation.id, "看这里", [reference])
+
+    assert reply.status == "complete"
+    assert provider.requests
+    sent = []
+    for message in provider.requests[0]:
+        content = message["content"]
+        if isinstance(content, list):
+            sent.extend(content)
+    assert any(
+        isinstance(part, dict)
+        and part.get("type") == "image_url"
+        and "base64" in part["image_url"]["url"]
+        for part in sent
+    )
 
 
 def test_legacy_include_original_flag_is_ignored(
