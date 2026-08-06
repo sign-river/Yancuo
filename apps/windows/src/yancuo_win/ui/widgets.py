@@ -19,6 +19,8 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPixmap, QWheelEvent
+from shiboken6 import isValid as _shiboken_is_valid
+
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -76,10 +78,18 @@ def set_tab_order_chain(*widgets: QWidget) -> None:
             first: QWidget = current,
             second: QWidget = following,
         ) -> None:
+            try:
+                if not _shiboken_is_valid(first) or not _shiboken_is_valid(second):
+                    return
+            except RuntimeError:
+                return
             if first.window() is second.window():
                 QWidget.setTabOrder(first, second)
 
-        QTimer.singleShot(0, apply_when_attached)
+        attach_timer = QTimer(current)
+        attach_timer.setSingleShot(True)
+        attach_timer.timeout.connect(apply_when_attached)
+        attach_timer.start(0)
 
 
 def describe_field(

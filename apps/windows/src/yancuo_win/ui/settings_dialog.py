@@ -122,6 +122,7 @@ class ServiceSettingsPage(QWidget):
         self.section = section
         self._ai_model_worker: AIModelListWorker | None = None
         self._connection_worker: CallableWorker | None = None
+        self._connection_model: str | None = None
         self._cloudbase_login_worker: CallableWorker | None = None
         self._dirty = False
         self._last_connection_test = "尚未测试"
@@ -210,12 +211,12 @@ class ServiceSettingsPage(QWidget):
             zoom_row.setSpacing(6)
             zoom_down = QPushButton("−")
             zoom_down.setAccessibleName("减小预览缩放")
-            zoom_down.clicked.connect(lambda: self.preview_zoom.stepDown())
+            zoom_down.clicked.connect(self._zoom_preview_step_down)
             zoom_up = QPushButton("+")
             zoom_up.setAccessibleName("增大预览缩放")
-            zoom_up.clicked.connect(lambda: self.preview_zoom.stepUp())
+            zoom_up.clicked.connect(self._zoom_preview_step_up)
             zoom_reset = QPushButton("恢复默认")
-            zoom_reset.clicked.connect(lambda: self.preview_zoom.setValue(100))
+            zoom_reset.clicked.connect(self._zoom_preview_reset)
             zoom_row.addWidget(zoom_down)
             zoom_row.addWidget(self.preview_zoom)
             zoom_row.addWidget(zoom_up)
@@ -321,9 +322,7 @@ class ServiceSettingsPage(QWidget):
         self.ai_token_visibility_button = QPushButton("显示")
         self.ai_token_visibility_button.setAccessibleName("显示或隐藏 AI 密钥")
         self.ai_token_visibility_button.clicked.connect(
-            lambda: self._toggle_secret_visibility(
-                self.ai_token_edit, self.ai_token_visibility_button
-            )
+            self._toggle_ai_token_visibility
         )
         ai_token_row.addWidget(self.ai_token_edit, stretch=1)
         ai_token_row.addWidget(self.ai_token_visibility_button)
@@ -438,9 +437,7 @@ class ServiceSettingsPage(QWidget):
         self.cloudbase_password_visibility_button.setFixedWidth(40)
         bind_icon(self.cloudbase_password_visibility_button, "eye", size=18)
         self.cloudbase_password_visibility_button.clicked.connect(
-            lambda: self._toggle_secret_visibility(
-                self.cloudbase_password_edit, self.cloudbase_password_visibility_button
-            )
+            self._toggle_cloudbase_password_visibility
         )
         password_row.addWidget(self.cloudbase_password_visibility_button)
         password_row.addWidget(self.cloudbase_login_button)
@@ -466,9 +463,7 @@ class ServiceSettingsPage(QWidget):
         self.token_visibility_button = QPushButton("显示")
         self.token_visibility_button.setAccessibleName("显示或隐藏云端令牌")
         self.token_visibility_button.clicked.connect(
-            lambda: self._toggle_secret_visibility(
-                self.token_edit, self.token_visibility_button
-            )
+            self._toggle_cloud_token_visibility
         )
         token_row.addWidget(self.token_edit, stretch=1)
         token_row.addWidget(self.token_visibility_button)
@@ -762,15 +757,41 @@ class ServiceSettingsPage(QWidget):
             self.test_ai_button.setText("测试 Faro 连接")
             self._on_ai_connection_failed(str(exc))
             return
+        self._connection_model = model
         self._connection_worker = CallableWorker(
             lambda: list_models(timeout_seconds=20), self
         )
         self._connection_worker.finished_ok.connect(
-            lambda models: self._on_ai_connection_finished(model, models)
+            self._on_ai_connection_models
         )
         self._connection_worker.failed.connect(self._on_ai_connection_failed)
         self._connection_worker.finished.connect(self._on_connection_worker_finished)
         self._connection_worker.start()
+
+    def _zoom_preview_step_down(self) -> None:
+        self.preview_zoom.stepDown()
+
+    def _zoom_preview_step_up(self) -> None:
+        self.preview_zoom.stepUp()
+
+    def _zoom_preview_reset(self) -> None:
+        self.preview_zoom.setValue(100)
+
+    def _toggle_ai_token_visibility(self) -> None:
+        self._toggle_secret_visibility(
+            self.ai_token_edit, self.ai_token_visibility_button
+        )
+
+    def _toggle_cloudbase_password_visibility(self) -> None:
+        self._toggle_secret_visibility(
+            self.cloudbase_password_edit, self.cloudbase_password_visibility_button
+        )
+
+    def _toggle_cloud_token_visibility(self) -> None:
+        self._toggle_secret_visibility(self.token_edit, self.token_visibility_button)
+
+    def _on_ai_connection_models(self, models: object) -> None:
+        self._on_ai_connection_finished(self._connection_model, models)
 
     def _on_ai_connection_finished(self, model: str, value: object) -> None:
         models = [str(item) for item in value] if isinstance(value, list) else []

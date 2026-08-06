@@ -10,6 +10,15 @@ from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainterPath, QPalette, QRegion
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QFrame, QWidget
 
+from shiboken6 import isValid as _shiboken_is_valid
+
+
+def _qobject_valid(widget: QWidget | None) -> bool:
+    try:
+        return widget is not None and _shiboken_is_valid(widget)
+    except RuntimeError:
+        return False
+
 THEME_MODES = {"system", "light", "dark"}
 
 
@@ -1558,10 +1567,12 @@ class ThemeManager(QObject):
             self._style_combo_popup(watched)
             if event.type() == QEvent.Type.Show:
                 self._offset_combo_popup(watched)
-                QTimer.singleShot(
-                    0,
-                    lambda popup=watched: self._fit_combo_popup(popup),
+                fit_timer = QTimer(watched)
+                fit_timer.setSingleShot(True)
+                fit_timer.timeout.connect(
+                    lambda popup=watched: self._fit_combo_popup(popup)
                 )
+                fit_timer.start(0)
         return super().eventFilter(watched, event)
 
     @staticmethod
@@ -1610,6 +1621,8 @@ class ThemeManager(QObject):
         """
 
         def apply() -> None:
+            if not _qobject_valid(popup):
+                return
             if not popup.isVisible():
                 return
             combo = popup.parentWidget()
@@ -1635,10 +1648,14 @@ class ThemeManager(QObject):
             if abs(target_y - popup.y()) > 0.5:
                 popup.move(popup.x(), round(target_y))
 
-        QTimer.singleShot(0, apply)
-
+        offset_timer = QTimer(popup)
+        offset_timer.setSingleShot(True)
+        offset_timer.timeout.connect(apply)
+        offset_timer.start(0)
     @staticmethod
     def _fit_combo_popup(popup: QWidget) -> None:
+        if not _qobject_valid(popup):
+            return
         """把下拉弹层按条目数完全展开（受屏幕高度限制），避免只露出两行。"""
         view = popup.findChild(QAbstractItemView)
         model = view.model() if view is not None else None

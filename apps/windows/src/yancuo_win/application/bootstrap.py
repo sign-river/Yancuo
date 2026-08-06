@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
+from pathlib import Path
+import shutil
+import tempfile
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -47,6 +51,43 @@ class RuntimeContext:
     logger: logging.Logger
 
 
+def _test_fast_enabled() -> bool:
+    """Test-only fast bootstrap: reuse one fully migrated golden database.
+
+    pytest sets YANCUO_TEST_FAST=1 (see tests/conftest.py).  A fresh test data
+    root then copies a pre-migrated SQLite file instead of replaying every
+    schema migration, while all other bootstrap behaviour stays identical.
+    """
+    return os.environ.get("YANCUO_TEST_FAST") == "1"
+
+
+def _test_golden_database() -> Path:
+    return Path(tempfile.gettempdir()) / f"yancuo-test-golden-v{SCHEMA_VERSION}.sqlite"
+
+
+def _build_test_golden(golden: Path) -> None:
+    """Migrate one pristine database and cache it for the whole pytest session."""
+    staging = Path(tempfile.mkdtemp(prefix="yancuo-test-golden-"))
+    try:
+        database = staging / "golden.sqlite"
+        engine = make_engine(database)
+        migrate(engine, target_version=SCHEMA_VERSION)
+        ensure_search_index_schema(engine)
+        engine.dispose()
+        staged = golden.with_name(golden.name + f".{os.getpid()}.tmp")
+        shutil.copy2(database, staged)
+        os.replace(staged, golden)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _ensure_test_database(database_path: Path) -> None:
+    golden = _test_golden_database()
+    if not golden.is_file():
+        _build_test_golden(golden)
+    shutil.copy2(golden, database_path)
+
+
 def bootstrap_runtime(*, run_migrate: bool = True) -> RuntimeContext:
     """加载配置、创建目录、身份、数据库；可选执行迁移。"""
     try:
@@ -72,6 +113,8 @@ def bootstrap_runtime(*, run_migrate: bool = True) -> RuntimeContext:
         identity.database_id,
     )
 
+    if _test_fast_enabled() and run_migrate and not paths.database.is_file():
+        _ensure_test_database(paths.database)
     engine = make_engine(paths.database)
     schema_version = 0
     if run_migrate:
