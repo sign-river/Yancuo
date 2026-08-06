@@ -81,6 +81,17 @@ def test_refresh_skips_rebuild_when_unchanged() -> None:
     page.close()
 
 
+def test_open_review_queue_selects_review_tab() -> None:
+    _ = QApplication.instance() or QApplication([])
+    ai = _FakeAI([_job("q1", "question_intake", status="completed")])
+    page = TaskQueuePage(ai, pending_review=lambda job: job.id == "q1")
+    page.tabs.setCurrentIndex(0)
+    page.open_review_queue()
+    assert page.tabs.currentWidget() is page.review_pane
+    assert page.review_pane.list.count() == 1
+    page.close()
+
+
 def test_refresh_keeps_selected_job_after_rebuild() -> None:
     _ = QApplication.instance() or QApplication([])
     ai = _FakeAI([_job("q1", "question_intake"), _job("q2", "question_intake")])

@@ -1342,3 +1342,54 @@ def test_inline_question_summary_does_not_shift_on_expand(window: MainWindow) ->
     assert expanded._summary.mapTo(window, expanded._summary.rect().topLeft()).y() == summary_y
     window._toggle_question_expansion(first)
     app.processEvents()
+
+
+def _pending_intake_batch(window: MainWindow, tmp_path: Path):
+    """Create one completed question-intake job with a pending candidate."""
+    intake = window.intake
+    subject = intake.app.create_subject("线性代数")
+    image = tmp_path / "circled-question.jpg"
+    image.write_bytes(b"\xff\xd8\xffai-intake-image")
+    started = intake.start_ai([image], user_instruction="只提取画红圈的题目")
+    intake.ai.run_job(started.job_id)
+    return started, subject
+
+
+def test_intake_review_result_button_opens_pending_review_queue(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    started, _subject = _pending_intake_batch(window, tmp_path)
+    page = window.intake_page
+    page.ai_job_id = None
+    page.show_ai()
+    assert page.ai_task_button.text() == "审核结果"
+    assert page.ai_task_surface.isVisibleTo(page)
+    page._open_ai_task_button()
+    assert window.stack.currentWidget() is window.task_queue_page
+    assert window.task_queue_page.tabs.currentWidget() is window.task_queue_page.review_pane
+
+
+def test_intake_page_clears_stale_review_banner_after_batch_reviewed(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    started, subject = _pending_intake_batch(window, tmp_path)
+    page = window.intake_page
+    page.ai_job_id = None
+    page.show_ai()
+    assert page.ai_task_surface.isVisibleTo(page)
+    candidate = window.intake.list_candidates(started.job_id)[0]
+    fields = dict(candidate.fields)
+    fields.update(
+        {
+            "subject_id": subject.id,
+            "chapter_id": None,
+            "problem_type": "选择题",
+            "priority": 4,
+        }
+    )
+    window.intake.commit_ai_candidate(candidate.review_item_id, fields)
+    page.show_ai()
+    assert page.ai_job_id is None
+    assert not page.ai_task_surface.isVisibleTo(page)
+    page._open_ai_task_button()
+    assert window.stack.currentWidget() is not window.task_queue_page

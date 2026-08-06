@@ -1390,6 +1390,7 @@ class IntakePage(QWidget):
     library_requested = Signal()
     open_problem_requested = Signal(str)
     ai_review_ready = Signal(str, int)
+    review_queue_requested = Signal()
 
     def __init__(
         self,
@@ -1549,7 +1550,7 @@ class IntakePage(QWidget):
         self.ai_task_status = QLabel("AI 任务正在排队")
         self.ai_task_status.setWordWrap(True)
         self.ai_task_button = primary_button("查看实时回复")
-        self.ai_task_button.clicked.connect(self._open_current_ai_task)
+        self.ai_task_button.clicked.connect(self._open_ai_task_button)
         task_row.addWidget(self.ai_task_status, stretch=1)
         task_row.addWidget(self.ai_task_button)
         self.ai_task_surface.hide()
@@ -2284,13 +2285,21 @@ class IntakePage(QWidget):
             )
             self.ai_task_button.setText("审核结果")
         elif self.ai_job_id:
-            self.ai_task_surface.show()
-            self.ai_task_button.setText("查看实时回复")
-            if self.coordinator.active_job_id != self.ai_job_id:
-                self._start_worker(self.ai_job_id)
+            if self.ai_job_id in self._resumable_ai_job_ids():
+                self.ai_task_surface.show()
+                self.ai_task_button.setText("查看实时回复")
+                if self.coordinator.active_job_id != self.ai_job_id:
+                    self._start_worker(self.ai_job_id)
+                else:
+                    self.progress_timer.start()
+                    self._poll_progress()
             else:
-                self.progress_timer.start()
-                self._poll_progress()
+                # 任务已全部处理完（例如已在别处审核完）：不要再展示过期入口。
+                self.ai_job_id = None
+                self.ai_candidates.clear()
+                self.ai_task_surface.hide()
+        else:
+            self.ai_task_surface.hide()
 
     def show_ai_review(self, job_id: str) -> bool:
         """Open exactly the review batch named by a completion notification."""
@@ -2310,6 +2319,47 @@ class IntakePage(QWidget):
         self._load_candidate()
         self.stack.setCurrentIndex(_PAGE_AI_CONFIRM)
         return True
+
+    def _pending_ai_candidates(self) -> list[IntakeCandidate]:
+        """Fresh pending/conflict candidates for the current job."""
+        if not self.ai_job_id:
+            return []
+        try:
+            return [
+                item
+                for item in self.intake.list_candidates(self.ai_job_id)
+                if item.status in {"pending", "conflict"}
+            ]
+        except DomainError:
+            return []
+
+    def _resumable_ai_job_ids(self) -> set[str]:
+        """Jobs that still need attention (running, failed, or pending review)."""
+        try:
+            return {
+                batch.job_id
+                for batch in self.intake.list_resumable_ai_batches()
+            }
+        except DomainError:
+            return set()
+
+    def _open_ai_task_button(self) -> None:
+        """Status strip button: review result opens the pending-review queue."""
+        if not self.ai_job_id:
+            return
+        pending = self._pending_ai_candidates()
+        if pending:
+            self.ai_candidates = pending
+            self.review_queue_requested.emit()
+            return
+        job = self.intake.ai.get_job(self.ai_job_id)
+        if job is None or job.status in {"completed", "done", "canceled", "cancelled"}:
+            # 任务已全部处理完（例如已在别处审核完）：不要再展示过期入口。
+            self.ai_job_id = None
+            self.ai_candidates.clear()
+            self.ai_task_surface.hide()
+            return
+        self._open_current_ai_task()
 
     def _abandon_ai(self) -> None:
         job_id = self.ai_job_id or ""
@@ -2336,6 +2386,7 @@ class IntakePage(QWidget):
             self.ai_job_id = None
             self.ai_candidates.clear()
             self.progress_timer.stop()
+            self.ai_task_surface.hide()
         self.status_message.emit("已放弃选中的 AI 录题批次")
         self.library_requested.emit()
 
@@ -2693,6 +2744,7 @@ class IntakePage(QWidget):
             if progress.job_id == self.ai_job_id:
                 self.ai_job_id = None
                 self.ai_candidates.clear()
+                self.ai_task_surface.hide()
                 self.processing_status.setText("任务已取消")
                 self.stack.setCurrentIndex(_PAGE_AI_UPLOAD)
                 QTimer.singleShot(0, self.show_ai_upload)
@@ -3283,6 +3335,7 @@ class IntakePage(QWidget):
                 self.ai_file_list.clear()
                 self._close_ai_image_viewer()
                 self.ai_instruction.clear()
+                self.ai_task_surface.hide()
                 self._show_done(
                     f"“{problem.title or 'AI 识别题目'}”已进入正式题库。"
                 )
@@ -3318,6 +3371,7 @@ class IntakePage(QWidget):
             )
             if not failures:
                 self.ai_job_id = None
+                self.ai_task_surface.hide()
             self.processing_error.setText(
                 (
                     f"候选题已处理，但本批仍有 {len(failures)} 张图片识别失败。"
@@ -3340,6 +3394,7 @@ class IntakePage(QWidget):
     def _new_ai(self) -> None:
         self.ai_job_id = None
         self.ai_candidates.clear()
+        self.ai_task_surface.hide()
         self.ai_files.clear()
         self.ai_file_list.clear()
         self._close_ai_image_viewer()
