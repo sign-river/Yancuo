@@ -1168,6 +1168,13 @@ class ProblemDetailPage(QWidget):
     def _new_conversation(self) -> None:
         if self.chat is None or not self.problem_id:
             return
+        # 当前已是一个没有任何消息的新对话时，
+        # 点击加号不再重复新建，避免空对话堆积。
+        current_id = self._conversation_id()
+        if current_id:
+            current = self.chat.get_conversation(current_id)
+            if current is not None and not current.messages:
+                return
         conversation = self.chat.create_conversation(self.problem_id)
         self._refresh_conversations()
         self.conversation_combo.setCurrentIndex(self.conversation_combo.findData(conversation.id))

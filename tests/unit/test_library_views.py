@@ -451,6 +451,38 @@ def test_problem_detail_chat_preserves_focus_layout_scroll_and_conversation(
     assert page.conversation_combo.findData(first.id) >= 0
 
 
+def test_problem_detail_new_chat_skips_empty_current_conversation(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
+    window._open_problem_detail(problem.id)
+    page = window.problem_detail_page
+    chat = window.problem_chat
+
+    empty = chat.create_conversation(problem.id, title="空对话")
+    page._refresh_conversations()
+    page.conversation_combo.setCurrentIndex(page.conversation_combo.findData(empty.id))
+    app.processEvents()
+    before = len(chat.list_conversations(problem.id))
+
+    # 当前已是没有消息的新对话：再点加号不应新建
+    page._new_conversation()
+    app.processEvents()
+    assert len(chat.list_conversations(problem.id)) == before
+    assert page.conversation_combo.currentData() == empty.id
+
+    # 已有消息的对话：点加号正常新建
+    chat.send_message(empty.id, "提问")
+    page._new_conversation()
+    app.processEvents()
+    assert len(chat.list_conversations(problem.id)) == before + 1
+    assert page.conversation_combo.currentData() != empty.id
+
+
 def test_problem_detail_reference_canvas_stays_embedded_and_keeps_normalized_regions(
     window: MainWindow,
     tmp_path: Path,
