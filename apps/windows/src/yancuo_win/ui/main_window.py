@@ -165,6 +165,19 @@ def _profile_choice_label(item: dict[str, object]) -> str:
     return f"备份于 {stamp}" if stamp else "云端备份快照"
 
 
+def _format_bytes(size: int) -> str:
+    """Format a byte count into a compact human-readable string."""
+    value = float(size)
+    units = ("B", "KB", "MB", "GB", "TB")
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} B"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
 class _InlineQuestionItem(QWidget):
     """One question row with one header and an optional inline preview."""
 
@@ -320,6 +333,9 @@ class MainWindow(QMainWindow):
         self._search_index_worker: CallableWorker | None = None
         self._cloud_profile_worker: CallableWorker | None = None
         self._cloud_operation_worker: CallableWorker | None = None
+        self._cloud_manage_worker: CallableWorker | None = None
+        self._cloud_manage_backups: list[dict[str, Any]] = []
+        self._cloud_manage_refresh_pending = False
         self._pending_cloud_restore: tuple[CloudBackupService, Path, str] | None = None
         self._local_restore_worker: CallableWorker | None = None
         self._local_backup_worker: CallableWorker | None = None
@@ -1631,6 +1647,36 @@ class MainWindow(QMainWindow):
         insert_at = max(0, page.content_layout.count() - 1)
         page.content_layout.insertWidget(insert_at, profiles)
         page.content_layout.insertWidget(insert_at + 1, operations)
+        management = CardFrame()
+        management.setProperty("surfaceRole", "settings")
+        management.add_title("远端备份管理")
+        management.add_hint("列出仓库内的全部备份快照；可删除单个备份或按资料档清理旧备份。删除只影响云端，不会改动本地数据。")
+        self.cloud_manage_summary = QLabel("尚未加载备份列表")
+        self.cloud_manage_summary.setObjectName("MutedLabel")
+        self.cloud_manage_summary.setWordWrap(True)
+        management.body.addWidget(self.cloud_manage_summary)
+        self.cloud_backup_list = QListWidget()
+        self.cloud_backup_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.cloud_backup_list.setMinimumHeight(120)
+        self.cloud_backup_list.setMaximumHeight(260)
+        self.cloud_backup_list.setAccessibleName("远端备份列表")
+        self.cloud_backup_list.itemSelectionChanged.connect(self._on_cloud_backup_selection_changed)
+        management.body.addWidget(self.cloud_backup_list)
+        self.cloud_manage_refresh_button = ghost_button("刷新备份列表")
+        self.cloud_manage_refresh_button.clicked.connect(self._refresh_cloud_backups)
+        self.cloud_manage_delete_button = danger_button("删除选中备份")
+        self.cloud_manage_delete_button.setEnabled(False)
+        self.cloud_manage_delete_button.clicked.connect(self._delete_cloud_backup)
+        self.cloud_manage_cleanup_button = QPushButton("清理旧备份…")
+        self.cloud_manage_cleanup_button.clicked.connect(self._cleanup_cloud_backups)
+        management.body.addLayout(
+            button_row(
+                self.cloud_manage_refresh_button,
+                self.cloud_manage_delete_button,
+                self.cloud_manage_cleanup_button,
+            )
+        )
+        page.content_layout.insertWidget(insert_at + 2, management)
         return page
 
     def _build_account_page(self) -> QWidget:
@@ -1809,6 +1855,224 @@ class MainWindow(QMainWindow):
         self._set_settings_action_idle(self.inspect_cloud_profiles_button, "查看云端资料")
         if worker is not None:
             worker.deleteLater()
+
+    def _refresh_cloud_backups(self) -> None:
+        if self._cloud_manage_worker is not None:
+            return
+        self._set_settings_action_busy(self.cloud_manage_refresh_button, "正在刷新…")
+        self.cloud_manage_delete_button.setEnabled(False)
+        self.cloud_manage_cleanup_button.setEnabled(False)
+        try:
+            cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+        except DomainError as exc:
+            self._set_settings_action_idle(self.cloud_manage_refresh_button, "刷新备份列表")
+            self.cloud_manage_cleanup_button.setEnabled(True)
+            self.cloud_manage_summary.setText(f"无法读取云端备份：{exc}")
+            return
+        self._cloud_manage_worker = CallableWorker(cloud.list_backups, self)
+        self._cloud_manage_worker.finished_ok.connect(self._on_cloud_backups_loaded)
+        self._cloud_manage_worker.failed.connect(self._on_cloud_manage_refresh_failed)
+        self._cloud_manage_worker.finished.connect(self._on_cloud_manage_worker_finished)
+        self._cloud_manage_worker.start()
+
+    def _on_cloud_backups_loaded(self, value: object) -> None:
+        backups = value if isinstance(value, list) else []
+        self._cloud_manage_backups = [item for item in backups if isinstance(item, dict)]
+        self.cloud_backup_list.clear()
+        for item in self._cloud_manage_backups:
+            tag = str(item.get("tag") or "")
+            stamp = _format_backup_stamp(tag)
+            label = f"备份于 {stamp}" if stamp else (tag or "未知备份")
+            parts = [label]
+            size = int(item.get("asset_size") or 0)
+            if size > 0:
+                parts.append(_format_bytes(size))
+            if item.get("is_latest"):
+                parts.append("当前资料")
+            row = QListWidgetItem(" · ".join(parts))
+            row.setData(Qt.ItemDataRole.UserRole, tag)
+            self.cloud_backup_list.addItem(row)
+        if not self._cloud_manage_backups:
+            self.cloud_manage_summary.setText("云端仓库还没有备份快照。")
+            self.cloud_manage_delete_button.setEnabled(False)
+            return
+        self.cloud_manage_summary.setText(
+            f"共 {len(self._cloud_manage_backups)} 份备份；删除只影响云端快照，本地数据不会改变。"
+        )
+        self.cloud_manage_delete_button.setEnabled(
+            self.cloud_backup_list.currentItem() is not None
+        )
+
+    def _on_cloud_manage_refresh_failed(self, error: str) -> None:
+        self.cloud_manage_summary.setText(
+            f"无法读取云端备份：{self._friendly_cloud_error(error)}"
+        )
+        self._show_status_toast("刷新云端备份列表失败")
+
+    def _on_cloud_backup_selection_changed(self) -> None:
+        self.cloud_manage_delete_button.setEnabled(
+            bool(self._cloud_manage_backups)
+            and self.cloud_backup_list.currentItem() is not None
+        )
+
+    def _delete_cloud_backup(self) -> None:
+        if self._cloud_manage_worker is not None:
+            return
+        current = self.cloud_backup_list.currentItem()
+        if current is None:
+            self._show_status_toast("请先在列表中选择要删除的备份")
+            return
+        tag = str(current.data(Qt.ItemDataRole.UserRole) or "")
+        if not tag:
+            return
+        item = next(
+            (b for b in self._cloud_manage_backups if str(b.get("tag") or "") == tag),
+            None,
+        )
+        if item is None:
+            return
+        stamp = _format_backup_stamp(tag)
+        label = f"备份于 {stamp}" if stamp else tag
+        warning = ""
+        if item.get("is_latest"):
+            warning = (
+                "\n\n注意：这是某资料档的当前最新快照。删除后该资料档在云端将失去"
+                "最新快照指向（本地数据不受影响）。"
+            )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("确认删除备份")
+        box.setText(
+            f"确定删除这份远端备份吗？\n\n{label}\n\n"
+            "删除后不可恢复，且只影响云端，本地数据不会改变。"
+            f"{warning}"
+        )
+        delete_button = box.addButton("删除", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not delete_button:
+            return
+        self._set_settings_action_busy(self.cloud_manage_delete_button, "正在删除…")
+        self.cloud_manage_refresh_button.setEnabled(False)
+        self.cloud_manage_cleanup_button.setEnabled(False)
+        try:
+            cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+        except DomainError as exc:
+            self._set_settings_action_idle(self.cloud_manage_delete_button, "删除选中备份")
+            self.cloud_manage_refresh_button.setEnabled(True)
+            self.cloud_manage_cleanup_button.setEnabled(True)
+            self._show_operation_result(
+                "删除备份失败",
+                "无法删除所选备份。",
+                details=str(exc),
+                is_error=True,
+            )
+            return
+        self._cloud_manage_worker = CallableWorker(lambda: cloud.delete_backup(tag), self)
+        self._cloud_manage_worker.finished_ok.connect(
+            lambda _value: self._on_cloud_backup_deleted(tag)
+        )
+        self._cloud_manage_worker.failed.connect(self._on_cloud_manage_failed)
+        self._cloud_manage_worker.finished.connect(self._on_cloud_manage_worker_finished)
+        self._cloud_manage_worker.start()
+
+    def _on_cloud_backup_deleted(self, tag: str) -> None:
+        stamp = _format_backup_stamp(tag)
+        self._show_status_toast(f"已删除远端备份：{stamp or tag}")
+        self.cloud_manage_delete_button.setEnabled(False)
+        self._cloud_manage_refresh_pending = True
+
+    def _cleanup_cloud_backups(self) -> None:
+        if self._cloud_manage_worker is not None:
+            return
+        retain, accepted = QInputDialog.getInt(
+            self, "清理旧备份", "每个资料档保留最近几份备份？", 10, 1, 100, 1
+        )
+        if not accepted:
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("确认清理旧备份")
+        box.setText(
+            f"将按资料档保留最近 {retain} 份备份，删除更早的远端快照。\n\n"
+            "删除后不可恢复，且只影响云端，本地数据不会改变。继续吗？"
+        )
+        clean_button = box.addButton("清理", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not clean_button:
+            return
+        self._set_settings_action_busy(self.cloud_manage_cleanup_button, "正在清理…")
+        self.cloud_manage_refresh_button.setEnabled(False)
+        self.cloud_manage_delete_button.setEnabled(False)
+        try:
+            cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+        except DomainError as exc:
+            self._set_settings_action_idle(self.cloud_manage_cleanup_button, "清理旧备份…")
+            self.cloud_manage_refresh_button.setEnabled(True)
+            self._show_operation_result(
+                "清理备份失败",
+                "无法清理旧备份。",
+                details=str(exc),
+                is_error=True,
+            )
+            return
+        self._cloud_manage_worker = CallableWorker(lambda: cloud.cleanup_backups(retain), self)
+        self._cloud_manage_worker.finished_ok.connect(self._on_cloud_backups_cleaned)
+        self._cloud_manage_worker.failed.connect(self._on_cloud_manage_failed)
+        self._cloud_manage_worker.finished.connect(self._on_cloud_manage_worker_finished)
+        self._cloud_manage_worker.start()
+
+    def _on_cloud_backups_cleaned(self, value: object) -> None:
+        deleted = value if isinstance(value, list) else []
+        if not deleted:
+            self._show_status_toast("没有需要清理的旧备份")
+        else:
+            lines = []
+            for item in deleted[:20]:
+                if not isinstance(item, dict):
+                    continue
+                tag = str(item.get("tag") or "")
+                stamp = _format_backup_stamp(tag)
+                lines.append(f"- {stamp or tag}")
+            if len(deleted) > 20:
+                lines.append(f"…共 {len(deleted)} 份")
+            self._show_operation_result(
+                "清理完成",
+                f"已删除 {len(deleted)} 份旧备份，保留每个资料档的最近快照。",
+                details="\n".join(lines),
+            )
+        self._cloud_manage_refresh_pending = True
+
+    def _on_cloud_manage_failed(self, error: str) -> None:
+        self._show_operation_result(
+            "云端备份管理失败",
+            "无法完成云端备份管理操作。",
+            details=self._friendly_cloud_error(error),
+            is_error=True,
+        )
+
+    def _on_cloud_manage_worker_finished(self) -> None:
+        worker = self._cloud_manage_worker
+        self._cloud_manage_worker = None
+        self._set_settings_action_idle(self.cloud_manage_refresh_button, "刷新备份列表")
+        self._set_settings_action_idle(self.cloud_manage_delete_button, "删除选中备份")
+        self._set_settings_action_idle(self.cloud_manage_cleanup_button, "清理旧备份…")
+        self.cloud_manage_delete_button.setEnabled(
+            bool(self._cloud_manage_backups)
+            and self.cloud_backup_list.currentItem() is not None
+        )
+        if worker is not None:
+            worker.deleteLater()
+        if self._cloud_manage_refresh_pending:
+            self._cloud_manage_refresh_pending = False
+            self._refresh_cloud_backups()
 
     def _restore_cloud_profile(self) -> None:
         try:
