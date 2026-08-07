@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import uuid
+import zipfile
 
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.search_service import SearchIndexService
@@ -22,7 +23,7 @@ from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.domain.identity import bind_profile, record_snapshot_head
 from yancuo_win.data.models import Base
-from yancuo_win.import_export.ebpack import EbpackService
+from yancuo_win.import_export.ebpack import EbpackService, FORMAT_NAME
 
 
 def _sha256(path: Path) -> str:
@@ -208,6 +209,133 @@ class CloudBackupService:
         finally:
             self.provider.release_lock(self.owner, self.repo, device_id)
 
+    def list_profiles(self) -> list[dict[str, Any]]:
+        """Return cloud profiles with display metadata and backup counts."""
+        index = self._profile_index()
+        profiles = (
+            index.get("profiles") if isinstance(index.get("profiles"), dict) else {}
+        )
+        backups = self.list_backups()
+        counts: dict[str, int] = {}
+        for backup in backups:
+            pid = str(backup.get("profile_id") or "unknown")
+            counts[pid] = counts.get(pid, 0) + 1
+        local_id = self.runtime.identity.profile_id
+        canonical_local = self._resolve_profile(index, local_id)
+        rows: list[dict[str, Any]] = []
+        for profile_id, snapshot in profiles.items():
+            if not isinstance(snapshot, dict):
+                continue
+            rows.append(
+                {
+                    "profile_id": profile_id,
+                    "canonical_profile_id": self._resolve_profile(index, profile_id),
+                    "tag": snapshot.get("tag"),
+                    "snapshot_id": snapshot.get("snapshot_id"),
+                    "uploaded_at": snapshot.get("uploaded_at"),
+                    "display_name": snapshot.get("display_name"),
+                    "archived": bool(snapshot.get("archived")),
+                    "backup_count": counts.get(profile_id, 0),
+                    "is_current": profile_id == canonical_local,
+                }
+            )
+        known = {row["profile_id"] for row in rows}
+        for item in self.discover_profiles():
+            pid = str(item.get("profile_id") or "")
+            if pid not in known:
+                rows.append(
+                    {
+                        "profile_id": pid,
+                        "canonical_profile_id": str(
+                            item.get("canonical_profile_id") or pid
+                        ),
+                        "tag": item.get("tag"),
+                        "snapshot_id": item.get("snapshot_id"),
+                        "uploaded_at": item.get("uploaded_at"),
+                        "display_name": None,
+                        "archived": False,
+                        "backup_count": counts.get(pid, 0),
+                        "is_current": pid == canonical_local,
+                    }
+                )
+        rows.sort(key=lambda row: str(row.get("uploaded_at") or ""), reverse=True)
+        rows.sort(key=lambda row: bool(row["archived"]))
+        return rows
+
+    def rename_profile(self, profile_id: str, display_name: str) -> dict[str, Any]:
+        """Set a friendly display name for a cloud profile (metadata only)."""
+        display_name = display_name.strip()
+        if not display_name:
+            raise DomainError("资料档名称不能为空")
+        if len(display_name) > 80:
+            raise DomainError("资料档名称不能超过 80 个字符")
+        device_id = self.runtime.identity.device_id
+        if not self.provider.acquire_lock(self.owner, self.repo, device_id):
+            raise DomainError("无法获取主写入锁：另一台设备可能正在修改云端资料")
+        try:
+            index = self._profile_index()
+            canonical = self._resolve_profile(index, profile_id)
+            profiles = index.get("profiles")
+            if not isinstance(profiles, dict) or canonical not in profiles:
+                raise DomainError("云端不存在该资料档")
+            profiles[canonical]["display_name"] = display_name
+            index["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+            return {"profile_id": canonical, "display_name": display_name}
+        finally:
+            self.provider.release_lock(self.owner, self.repo, device_id)
+
+    def set_profile_archived(self, profile_id: str, archived: bool) -> dict[str, Any]:
+        """Mark a cloud profile as archived (metadata only, data retained)."""
+        device_id = self.runtime.identity.device_id
+        if not self.provider.acquire_lock(self.owner, self.repo, device_id):
+            raise DomainError("无法获取主写入锁：另一台设备可能正在修改云端资料")
+        try:
+            index = self._profile_index()
+            canonical = self._resolve_profile(index, profile_id)
+            profiles = index.get("profiles")
+            if not isinstance(profiles, dict) or canonical not in profiles:
+                raise DomainError("云端不存在该资料档")
+            profiles[canonical]["archived"] = bool(archived)
+            index["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+            return {"profile_id": canonical, "archived": bool(archived)}
+        finally:
+            self.provider.release_lock(self.owner, self.repo, device_id)
+
+    def delete_profile(self, profile_id: str) -> dict[str, Any]:
+        """Permanently delete a cloud profile and all of its remote backups.
+
+        Local data is never touched; the caller must confirm this action in the UI.
+        """
+        device_id = self.runtime.identity.device_id
+        if not self.provider.acquire_lock(self.owner, self.repo, device_id):
+            raise DomainError("无法获取主写入锁：另一台设备可能正在修改云端资料")
+        try:
+            index = self._profile_index()
+            canonical = self._resolve_profile(index, profile_id)
+            profiles = index.get("profiles")
+            if not isinstance(profiles, dict) or canonical not in profiles:
+                raise DomainError("云端不存在该资料档")
+            deleted_tags: list[str] = []
+            for backup in self.list_backups():
+                if str(backup.get("profile_id") or "") == canonical:
+                    tag = str(backup.get("tag") or "")
+                    if tag:
+                        self.delete_backup(tag)
+                        deleted_tags.append(tag)
+            profiles.pop(canonical, None)
+            aliases = index.get("aliases")
+            if isinstance(aliases, dict):
+                for source, target in list(aliases.items()):
+                    if source == canonical or target == canonical:
+                        aliases.pop(source, None)
+            index["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+            return {"profile_id": canonical, "deleted_tags": deleted_tags}
+        finally:
+            self.provider.release_lock(self.owner, self.repo, device_id)
+
     def upload_backup(self) -> dict[str, Any]:
         """手动云备份：上传完整包成功后才更新 latest。"""
         if not self.runtime.settings.cloud.enabled and self.provider.name != "local_folder":
@@ -344,6 +472,13 @@ class CloudBackupService:
                 if pack is not None:
                     pack.unlink(missing_ok=True)
 
+    def storage_usage(self) -> dict[str, Any] | None:
+        """Return cloud storage usage/quota; None when the backend has no quota API."""
+        try:
+            return self.provider.get_storage_usage(self.owner, self.repo)
+        except DomainError:
+            return None
+
     def list_backups(self) -> list[dict[str, Any]]:
         releases = self.provider.list_releases(self.owner, self.repo)
         index = self._profile_index()
@@ -362,6 +497,10 @@ class CloudBackupService:
                     "profile_id": profile_id,
                     "snapshot_id": metadata.get("snapshot_id"),
                     "parent_snapshot_id": metadata.get("parent_snapshot_id"),
+                    "uploaded_at": metadata.get("uploaded_at"),
+                    "asset_size": int(rel.assets[0].get("size") or 0)
+                    if rel.assets and isinstance(rel.assets[0], dict)
+                    else 0,
                     "is_latest": any(
                         isinstance(item, dict) and item.get("tag") == rel.tag
                         for item in latest_profiles.values()
@@ -369,6 +508,47 @@ class CloudBackupService:
                 }
             )
         return rows
+
+    def delete_backup(self, tag: str) -> dict[str, Any]:
+        """删除远端单个备份（Release 与索引引用），本地数据不受影响。"""
+        if not tag or tag == "latest-pointer":
+            raise DomainError("无效的备份标识")
+        index = self._profile_index()
+        removed_profiles: list[str] = []
+        profiles = index.get("profiles")
+        if isinstance(profiles, dict):
+            for profile_id, snapshot in list(profiles.items()):
+                if isinstance(snapshot, dict) and snapshot.get("tag") == tag:
+                    profiles.pop(profile_id, None)
+                    removed_profiles.append(profile_id)
+        self.provider.delete_release(self.owner, self.repo, tag=tag)
+        if removed_profiles:
+            index["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+        return {"tag": tag, "removed_profiles": removed_profiles}
+
+    def cleanup_backups(self, retain: int = 10) -> list[dict[str, Any]]:
+        """按资料档保留最近 retain 份快照，删除更旧的远端备份。"""
+        if retain < 1:
+            raise DomainError("保留份数至少为 1")
+        backups = self.list_backups()
+        by_profile: dict[str, list[dict[str, Any]]] = {}
+        for backup in backups:
+            by_profile.setdefault(str(backup.get("profile_id") or "unknown"), []).append(
+                backup
+            )
+        deleted: list[dict[str, Any]] = []
+        for profile_id, rows in by_profile.items():
+            # uploaded_at 含微秒，比 tag 内嵌秒级时间戳更精确
+            rows.sort(
+                key=lambda item: str(item.get("uploaded_at") or item.get("tag") or ""),
+                reverse=True,
+            )
+            for old in rows[retain:]:
+                tag = str(old["tag"])
+                self.delete_backup(tag)
+                deleted.append({"tag": tag, "profile_id": profile_id})
+        return deleted
 
     def download_backup(self, tag: str, dest_dir: Path) -> Path:
         index = self._profile_index()
@@ -414,6 +594,48 @@ class CloudBackupService:
         finally:
             candidate.unlink(missing_ok=True)
         return dest
+
+    def preview_backup(self, tag: str) -> dict[str, Any]:
+        """下载远端备份到缓存并读取包内清单，不覆盖本地数据。"""
+        backups = self.list_backups()
+        row = next(
+            (item for item in backups if str(item.get("tag") or "") == tag), None
+        )
+        if row is None:
+            raise DomainError("云端不存在该备份")
+        pack = self.download_backup(
+            tag, self.runtime.paths.cache_dir / "cloud_preview"
+        )
+        try:
+            try:
+                with zipfile.ZipFile(pack, "r") as zf:
+                    raw = zf.read("manifest.json")
+                manifest = json.loads(raw.decode("utf-8"))
+            except (
+                zipfile.BadZipFile,
+                KeyError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise DomainError("备份包清单无效，无法预览") from exc
+            if manifest.get("format") != FORMAT_NAME:
+                raise DomainError("备份包不是研错库 ebpack，无法预览")
+            return {
+                "tag": tag,
+                "profile_id": row.get("profile_id"),
+                "uploaded_at": row.get("uploaded_at"),
+                "asset_size": row.get("asset_size"),
+                "is_latest": row.get("is_latest"),
+                "created_at": manifest.get("created_at"),
+                "problem_count": manifest.get("problem_count"),
+                "note_count": manifest.get("note_count"),
+                "asset_count": manifest.get("asset_count"),
+                "schema_version": manifest.get("schema_version"),
+                "data_format_version": manifest.get("data_format_version"),
+                "app_version": manifest.get("app_version"),
+            }
+        finally:
+            pack.unlink(missing_ok=True)
 
     def restore_profile_to(self, profile_id: str, target_root: Path) -> dict[str, Any]:
         """Restore a selected remote profile to a user-chosen directory."""

@@ -485,3 +485,19 @@ GRANT EXECUTE ON FUNCTION public.yancuo_upload_claim(text, text) TO service_role
 GRANT EXECUTE ON FUNCTION public.yancuo_upload_complete(text, text, bigint) TO service_role, authenticated, anon;
 GRANT EXECUTE ON FUNCTION public.yancuo_upload_recover(text, text, bigint) TO service_role, authenticated, anon;
 GRANT EXECUTE ON FUNCTION public.yancuo_upload_unclaim(text) TO service_role, authenticated, anon;
+-- quota/usage
+CREATE OR REPLACE FUNCTION public.yancuo_storage_usage(p_subject text, p_user_storage_bytes bigint)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE v_used bigint;
+BEGIN
+  SELECT ((SELECT coalesce(sum(a.byte_size), 0) FROM yancuo.release_assets a
+             JOIN yancuo.repositories r ON r.repository_id = a.repository_id WHERE r.subject_id = p_subject)
+        + (SELECT coalesce(sum(u.expected_size), 0) FROM yancuo.upload_sessions u
+             WHERE u.subject_id = p_subject AND u.expires_at >= now()))::bigint
+  INTO v_used;
+  RETURN jsonb_build_object('ok', true, 'data', jsonb_build_object(
+    'used_bytes', v_used,
+    'quota_bytes', p_user_storage_bytes));
+END $$;
+
+GRANT EXECUTE ON FUNCTION public.yancuo_storage_usage(text, bigint) TO service_role, authenticated, anon;

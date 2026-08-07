@@ -71,6 +71,7 @@ Content-Type: application/json
 | `users/me` | 返回 `login`、`display_name`。 |
 | `repositories/list/create/get` | 管理私有逻辑仓库；`create` 强制 `private=true`。 |
 | `manifest/read/write` | 读取/写入一个 JSON 索引。`write` 使用 PostgreSQL 单行事务更新。 |
+| `quota/usage` | 返回当前用户已用存储 `used_bytes` 与配额 `quota_bytes`（网关 `USER_STORAGE_BYTES`）。 |
 | `releases/list/create/delete` | 管理不可变快照元数据，`body` 为现有客户端写入的 JSON 字符串。 |
 | `assets/upload-url` | 返回一次性 `url`、含 `X-Yancuo-Upload-Token` 的 `headers`、`upload_id`；目标为 Cloud Storage 私有对象。凭据不得放入 URL。 |
 | `assets/commit` | 校验对象存在且大小匹配，再把附件记录与快照关联。 |

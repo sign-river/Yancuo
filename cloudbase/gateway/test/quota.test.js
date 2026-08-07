@@ -14,6 +14,14 @@ test("per-user quotas are serialized inside the database function", () => {
   assert.match(rpc, /yancuo_upload_url\([^)]*p_max_assets integer[^)]*\)/s);
 });
 
+test("quota/usage action exposes per-user storage usage", () => {
+  assert.match(gateway, /if \(name === "quota\/usage"\)/);
+  assert.match(gateway, /callRpc\("yancuo_storage_usage"/);
+  assert.match(gateway, /p_user_storage_bytes: USER_STORAGE_BYTES/);
+  assert.match(rpc, /CREATE OR REPLACE FUNCTION public\.yancuo_storage_usage\(p_subject text, p_user_storage_bytes bigint\)/);
+  assert.match(rpc, /'used_bytes', v_used/);
+});
+
 test("storage quota reserves every live upload session", () => {
   assert.match(rpc, /sum\(u\.expected_size\)[\s\S]{0,200}expires_at >= now\(\)/i);
   assert.match(gateway, /p_user_storage_bytes: USER_STORAGE_BYTES/);
