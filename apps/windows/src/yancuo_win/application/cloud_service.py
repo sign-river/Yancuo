@@ -362,6 +362,10 @@ class CloudBackupService:
                     "profile_id": profile_id,
                     "snapshot_id": metadata.get("snapshot_id"),
                     "parent_snapshot_id": metadata.get("parent_snapshot_id"),
+                    "uploaded_at": metadata.get("uploaded_at"),
+                    "asset_size": int(rel.assets[0].get("size") or 0)
+                    if rel.assets and isinstance(rel.assets[0], dict)
+                    else 0,
                     "is_latest": any(
                         isinstance(item, dict) and item.get("tag") == rel.tag
                         for item in latest_profiles.values()
@@ -369,6 +373,47 @@ class CloudBackupService:
                 }
             )
         return rows
+
+    def delete_backup(self, tag: str) -> dict[str, Any]:
+        """删除远端单个备份（Release 与索引引用），本地数据不受影响。"""
+        if not tag or tag == "latest-pointer":
+            raise DomainError("无效的备份标识")
+        index = self._profile_index()
+        removed_profiles: list[str] = []
+        profiles = index.get("profiles")
+        if isinstance(profiles, dict):
+            for profile_id, snapshot in list(profiles.items()):
+                if isinstance(snapshot, dict) and snapshot.get("tag") == tag:
+                    profiles.pop(profile_id, None)
+                    removed_profiles.append(profile_id)
+        self.provider.delete_release(self.owner, self.repo, tag=tag)
+        if removed_profiles:
+            index["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+        return {"tag": tag, "removed_profiles": removed_profiles}
+
+    def cleanup_backups(self, retain: int = 10) -> list[dict[str, Any]]:
+        """按资料档保留最近 retain 份快照，删除更旧的远端备份。"""
+        if retain < 1:
+            raise DomainError("保留份数至少为 1")
+        backups = self.list_backups()
+        by_profile: dict[str, list[dict[str, Any]]] = {}
+        for backup in backups:
+            by_profile.setdefault(str(backup.get("profile_id") or "unknown"), []).append(
+                backup
+            )
+        deleted: list[dict[str, Any]] = []
+        for profile_id, rows in by_profile.items():
+            # uploaded_at 含微秒，比 tag 内嵌秒级时间戳更精确
+            rows.sort(
+                key=lambda item: str(item.get("uploaded_at") or item.get("tag") or ""),
+                reverse=True,
+            )
+            for old in rows[retain:]:
+                tag = str(old["tag"])
+                self.delete_backup(tag)
+                deleted.append({"tag": tag, "profile_id": profile_id})
+        return deleted
 
     def download_backup(self, tag: str, dest_dir: Path) -> Path:
         index = self._profile_index()
