@@ -24,6 +24,7 @@ from yancuo_win.config.settings import (
     DEFAULT_INTAKE_PROMPT_TEMPLATES,
     default_toml_path,
     load_intake_prompt_templates,
+    save_intake_prompt_templates,
 )
 from yancuo_win.data.models import (
     AiJob,
@@ -1380,5 +1381,43 @@ def test_intake_prompt_templates_support_add_edit_delete_and_persist(
 
     loaded = load_intake_prompt_templates(intake.runtime.paths.root)
     assert loaded == page._prompt_templates
+    page.close()
+
+def test_intake_prompt_templates_empty_list_stays_empty(
+    intake: ProblemIntakeService,
+) -> None:
+    save_intake_prompt_templates(intake.runtime.paths.root, [])
+    assert load_intake_prompt_templates(intake.runtime.paths.root) == []
+
+
+def test_intake_prompt_templates_add_after_delete_all(
+    intake: ProblemIntakeService,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    page = IntakePage(intake)
+    for index in range(len(page._prompt_templates) - 1, -1, -1):
+        page._delete_prompt_template(index=index)
+    assert page._prompt_templates == []
+    first = page._template_row.itemAt(0).widget()
+    assert first is not None and "暂无默认提示词" in first.text()
+    page._add_prompt_template("新提示语")
+    assert page._prompt_templates == ["新提示语"]
+    assert load_intake_prompt_templates(intake.runtime.paths.root) == ["新提示语"]
+    page.close()
+
+
+def test_intake_prompt_templates_edit_delete_any_index(
+    intake: ProblemIntakeService,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    page = IntakePage(intake)
+    original = list(page._prompt_templates)
+    page._edit_prompt_template(index=2, text="修改后的提示词")
+    assert page._prompt_templates[2] == "修改后的提示词"
+    page._delete_prompt_template(index=1)
+    assert len(page._prompt_templates) == len(original) - 1
+    assert page._prompt_templates[1] == "修改后的提示词"
     page.close()
 

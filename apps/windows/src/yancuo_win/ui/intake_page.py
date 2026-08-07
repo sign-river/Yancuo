@@ -1657,13 +1657,13 @@ class IntakePage(QWidget):
         manage = QHBoxLayout()
         manage.setSpacing(8)
         self._add_template_button = ghost_button("新增")
-        self._add_template_button.setToolTip("新增一条默认提示词")
+        self._add_template_button.setToolTip("添加一条常用提示语，之后可以点击一键追加到输入框")
         self._add_template_button.clicked.connect(self._add_prompt_template)
         self._edit_template_button = ghost_button("编辑")
-        self._edit_template_button.setToolTip("编辑一条默认提示词")
+        self._edit_template_button.setToolTip("选择一条提示词并修改内容")
         self._edit_template_button.clicked.connect(self._edit_prompt_template)
         self._delete_template_button = ghost_button("删除")
-        self._delete_template_button.setToolTip("删除一条默认提示词")
+        self._delete_template_button.setToolTip("选择一条提示词并删除")
         self._delete_template_button.clicked.connect(self._delete_prompt_template)
         manage.addWidget(self._add_template_button)
         manage.addWidget(self._edit_template_button)
@@ -2640,13 +2640,18 @@ class IntakePage(QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        for text in self._prompt_templates:
-            button = ghost_button(text)
-            button.setToolTip("点击将该提示词追加到上方输入框")
-            button.clicked.connect(
-                lambda _checked=False, value=text: self._append_instruction(value)
-            )
-            self._template_row.addWidget(button)
+        if not self._prompt_templates:
+            empty = QLabel("暂无默认提示词；点击右侧“新增”添加一条常用提示语")
+            empty.setObjectName("MutedLabel")
+            self._template_row.addWidget(empty)
+        else:
+            for text in self._prompt_templates:
+                button = ghost_button(text)
+                button.setToolTip("点击将该提示词追加到上方输入框")
+                button.clicked.connect(
+                    lambda _checked=False, value=text: self._append_instruction(value)
+                )
+                self._template_row.addWidget(button)
         self._template_row.addStretch(1)
 
     def _add_prompt_template(self, text: str | None = None) -> None:
@@ -2665,22 +2670,46 @@ class IntakePage(QWidget):
         self._prompt_templates.append(text)
         self._save_prompt_templates()
 
+    def _choose_prompt_template(self, title: str, prompt: str) -> int | None:
+        """弹出可滚动的提示词列表，返回用户选中项的下标；取消返回 None。"""
+        if not self._prompt_templates:
+            self.status_message.emit("暂无默认提示词，请先点击“新增”")
+            return None
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QListWidget
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(prompt))
+        listing = QListWidget(dialog)
+        for value in self._prompt_templates:
+            listing.addItem(value)
+        listing.setCurrentRow(0)
+        listing.setMinimumHeight(160)
+        layout.addWidget(listing)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        row = listing.currentRow()
+        return row if 0 <= row < len(self._prompt_templates) else None
+
     def _edit_prompt_template(self, index: int | None = None, text: str | None = None) -> None:
         if not self._prompt_templates:
-            self.status_message.emit("暂无默认提示词可编辑")
+            self.status_message.emit("暂无默认提示词，请先点击“新增”")
             return
         if index is None:
-            choice, accepted = QInputDialog.getItem(
-                self,
-                "编辑默认提示词",
-                "选择要编辑的提示词：",
-                self._prompt_templates,
-                0,
-                False,
+            index = self._choose_prompt_template(
+                "编辑默认提示词", "选择要编辑的提示词："
             )
-            if not accepted or not choice:
+            if index is None:
                 return
-            index = self._prompt_templates.index(choice)
         if text is None:
             text, accepted = QInputDialog.getText(
                 self,
@@ -2698,20 +2727,14 @@ class IntakePage(QWidget):
 
     def _delete_prompt_template(self, index: int | None = None) -> None:
         if not self._prompt_templates:
-            self.status_message.emit("暂无默认提示词可删除")
+            self.status_message.emit("暂无默认提示词，请先点击“新增”")
             return
         if index is None:
-            choice, accepted = QInputDialog.getItem(
-                self,
-                "删除默认提示词",
-                "选择要删除的提示词：",
-                self._prompt_templates,
-                0,
-                False,
+            index = self._choose_prompt_template(
+                "删除默认提示词", "选择要删除的提示词："
             )
-            if not accepted or not choice:
+            if index is None:
                 return
-            index = self._prompt_templates.index(choice)
         self._prompt_templates.pop(index)
         self._save_prompt_templates()
 

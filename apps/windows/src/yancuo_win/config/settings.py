@@ -517,17 +517,21 @@ def save_preview_zoom_preference(data_root: Path, scale: float) -> Path:
 
 
 def load_intake_prompt_templates(data_root: Path) -> list[str]:
-    """读取用户自定义的 AI 录题默认提示词；无配置时返回内置默认。"""
+    """读取用户自定义的 AI 录题默认提示词。
+
+    用户已显式保存过配置时（包括空列表）按保存内容返回，
+    避免用户删光后重启又恢复内置默认；仅在从未配置过时返回内置默认。
+    """
     path = Path(data_root) / "preferences.json"
     payload = _load_preferences(path)
     intake = payload.get("intake")
-    templates = intake.get("prompt_templates") if isinstance(intake, dict) else None
-    if (
-        isinstance(templates, list)
-        and templates
-        and all(isinstance(value, str) and value.strip() for value in templates)
-    ):
-        return [value.strip() for value in templates]
+    if isinstance(intake, dict) and "prompt_templates" in intake:
+        templates = intake.get("prompt_templates")
+        if isinstance(templates, list) and all(
+            isinstance(value, str) and value.strip() for value in templates
+        ):
+            return [value.strip() for value in templates]
+        return []
     return list(DEFAULT_INTAKE_PROMPT_TEMPLATES)
 
 
