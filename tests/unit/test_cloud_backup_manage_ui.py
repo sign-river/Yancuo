@@ -42,6 +42,7 @@ def test_cloud_backup_manage_card_populates(window: MainWindow) -> None:
     assert main.cloud_backup_list.count() == 2
     assert "备份于" in main.cloud_backup_list.item(0).text()
     assert "当前资料" in main.cloud_backup_list.item(0).text()
+    assert "总占用" in main.cloud_manage_summary.text()
 
     main.cloud_backup_list.setCurrentRow(0)
     assert main.cloud_manage_delete_button.isEnabled() is True

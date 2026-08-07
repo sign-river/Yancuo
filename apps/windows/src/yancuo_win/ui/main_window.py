@@ -1908,9 +1908,18 @@ class MainWindow(QMainWindow):
             self.cloud_manage_delete_button.setEnabled(False)
             self.cloud_manage_preview_button.setEnabled(False)
             return
-        self.cloud_manage_summary.setText(
-            f"共 {len(self._cloud_manage_backups)} 份备份；删除只影响云端快照，本地数据不会改变。"
+        total = sum(
+            int(item.get("asset_size") or 0) for item in self._cloud_manage_backups
         )
+        if total > 0:
+            self.cloud_manage_summary.setText(
+                f"共 {len(self._cloud_manage_backups)} 份备份，总占用 {_format_bytes(total)}；"
+                "删除只影响云端快照，本地数据不会改变。"
+            )
+        else:
+            self.cloud_manage_summary.setText(
+                f"共 {len(self._cloud_manage_backups)} 份备份；删除只影响云端快照，本地数据不会改变。"
+            )
         self.cloud_manage_delete_button.setEnabled(
             self.cloud_backup_list.currentItem() is not None
         )
