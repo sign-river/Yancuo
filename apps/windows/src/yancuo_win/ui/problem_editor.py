@@ -66,8 +66,9 @@ class ProblemEditorPage(QWidget):
         self.preview_view = MathContentView()
         # 独立缩放：固定 100% 显示，不随全局预览缩放变化
         self.preview_view.set_fixed_zoom_scale(1.0)
-        # 内容高度自适应：完整显示，超过 1200px 时出现纵向滚动条
-        self.preview_view.set_adaptive_content_height(1200, reserve_height=False)
+        # 预览占满容器高度，内容超出时在阅读器内部出现纵向滚动条；
+        # 避免固定内容高度把整个编辑面板撑高、控件被挤到页面下方。
+        self.preview_view.set_fit_content_height(expand_widget=False)
         splitter.addWidget(self.preview_view)
 
         scroll = QScrollArea()
