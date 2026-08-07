@@ -98,3 +98,29 @@ def test_storage_usage_reports_local_usage(runtime, tmp_path: Path) -> None:
     assert usage is not None
     assert int(usage["used_bytes"]) > 0
     assert usage["quota_bytes"] is None
+
+
+def test_profile_rename_archive_and_delete(runtime, tmp_path: Path) -> None:
+    _seed_problem(runtime)
+    cloud = _cloud(runtime, tmp_path)
+    cloud.upload_backup()
+
+    profiles = cloud.list_profiles()
+    assert len(profiles) == 1
+    pid = profiles[0]["profile_id"]
+    assert profiles[0]["backup_count"] == 1
+    assert profiles[0]["archived"] is False
+
+    cloud.rename_profile(pid, "我的错题本")
+    profiles = cloud.list_profiles()
+    assert profiles[0]["display_name"] == "我的错题本"
+
+    cloud.set_profile_archived(pid, True)
+    profiles = cloud.list_profiles()
+    assert profiles[0]["archived"] is True
+    cloud.set_profile_archived(pid, False)
+
+    deleted = cloud.delete_profile(pid)
+    assert len(deleted["deleted_tags"]) == 1
+    assert cloud.list_backups() == []
+    assert cloud.list_profiles() == []

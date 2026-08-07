@@ -21,6 +21,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -176,6 +177,174 @@ def _format_bytes(size: int) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return f"{size} B"
+
+
+class _CloudProfilesDialog(QDialog):
+    """Manage cloud profiles: rename, archive, or permanently delete."""
+
+    def __init__(
+        self,
+        parent: QWidget,
+        profiles: list[dict[str, object]],
+        cloud: CloudBackupService,
+        on_changed: Callable[[], None],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("管理云端资料档")
+        self.setMinimumWidth(560)
+        self.cloud = cloud
+        self.on_changed = on_changed
+        self._profiles: list[dict[str, object]] = []
+
+        layout = QVBoxLayout(self)
+        hint = QLabel(
+            "资料档是你在云端保存的一套完整数据。这里可以重命名、归档，"
+            "或彻底删除某个资料档（会连同其全部云端备份一起移除，本地数据不受影响）。"
+        )
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.list = QListWidget()
+        self.list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.list.itemSelectionChanged.connect(self._update_buttons)
+        layout.addWidget(self.list)
+        self.rename_button = QPushButton("重命名…")
+        self.rename_button.clicked.connect(self._rename)
+        self.archive_button = QPushButton("归档/恢复")
+        self.archive_button.clicked.connect(self._toggle_archive)
+        self.delete_button = danger_button("彻底删除…")
+        self.delete_button.clicked.connect(self._delete)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.accept)
+        layout.addLayout(
+            button_row(
+                self.rename_button,
+                self.archive_button,
+                self.delete_button,
+                close_button,
+            )
+        )
+        self._reload(profiles)
+
+    def _reload(self, profiles: list[dict[str, object]]) -> None:
+        self._profiles = [item for item in profiles if isinstance(item, dict)]
+        self.list.clear()
+        for item in self._profiles:
+            pid = str(item.get("profile_id") or "")
+            name = str(item.get("display_name") or "").strip() or pid
+            parts = [name]
+            count = int(item.get("backup_count") or 0)
+            parts.append(f"{count} 份备份")
+            if item.get("is_current"):
+                parts.append("当前资料")
+            if item.get("archived"):
+                parts.append("已归档")
+            row = QListWidgetItem(" · ".join(parts))
+            row.setData(Qt.ItemDataRole.UserRole, pid)
+            self.list.addItem(row)
+        self._update_buttons()
+
+    def _current(self) -> dict[str, object] | None:
+        current = self.list.currentItem()
+        if current is None:
+            return None
+        pid = str(current.data(Qt.ItemDataRole.UserRole) or "")
+        return next(
+            (item for item in self._profiles if str(item.get("profile_id") or "") == pid),
+            None,
+        )
+
+    def _update_buttons(self) -> None:
+        enabled = self._current() is not None
+        self.rename_button.setEnabled(enabled)
+        self.archive_button.setEnabled(enabled)
+        self.delete_button.setEnabled(enabled)
+
+    def _refresh(self) -> None:
+        try:
+            profiles = self.cloud.list_profiles()
+        except DomainError as exc:
+            QMessageBox.warning(self, "刷新失败", str(exc))
+            return
+        self._reload(profiles)
+        if self.on_changed is not None:
+            self.on_changed()
+
+    def _rename(self) -> None:
+        item = self._current()
+        if item is None:
+            return
+        pid = str(item.get("profile_id") or "")
+        name, accepted = QInputDialog.getText(
+            self,
+            "重命名资料档",
+            "显示名称（仅用于识别，不改变数据）：",
+            text=str(item.get("display_name") or ""),
+        )
+        if not accepted or not name.strip():
+            return
+        try:
+            self.cloud.rename_profile(pid, name)
+        except DomainError as exc:
+            QMessageBox.warning(self, "重命名失败", str(exc))
+            return
+        self._refresh()
+
+    def _toggle_archive(self) -> None:
+        item = self._current()
+        if item is None:
+            return
+        pid = str(item.get("profile_id") or "")
+        archived = bool(item.get("archived"))
+        if not archived:
+            if (
+                QMessageBox.question(
+                    self,
+                    "归档资料档",
+                    "归档后该资料档不再作为活跃资料显示，云端数据仍完整保留。继续吗？",
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+        try:
+            self.cloud.set_profile_archived(pid, not archived)
+        except DomainError as exc:
+            QMessageBox.warning(self, "操作失败", str(exc))
+            return
+        self._refresh()
+
+    def _delete(self) -> None:
+        item = self._current()
+        if item is None:
+            return
+        pid = str(item.get("profile_id") or "")
+        name = str(item.get("display_name") or "").strip() or pid
+        count = int(item.get("backup_count") or 0)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("彻底删除资料档")
+        box.setText(
+            f"确定彻底删除资料档“{name}”吗？\n\n"
+            f"将删除它在云端的 {count} 份备份，删除后不可恢复。\n"
+            "本地数据不受影响。\n\n"
+            "如不确定，请先恢复或合并该资料档后再删除。"
+        )
+        delete_button = box.addButton("彻底删除", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not delete_button:
+            return
+        try:
+            result = self.cloud.delete_profile(pid)
+        except DomainError as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "已删除",
+            f"已删除资料档“{name}”及其 {len(result.get('deleted_tags') or [])} 份云端备份。",
+        )
+        self._refresh()
 
 
 class _InlineQuestionItem(QWidget):
@@ -1632,6 +1801,9 @@ class MainWindow(QMainWindow):
         profiles.body.addLayout(
             button_row(self.inspect_cloud_profiles_button, restore_profile, preview_merge, merge_profile)
         )
+        self.cloud_profiles_manage_button = ghost_button("管理资料档…")
+        self.cloud_profiles_manage_button.clicked.connect(self._manage_cloud_profiles)
+        profiles.body.addLayout(button_row(self.cloud_profiles_manage_button))
         operations = CardFrame()
         operations.setProperty("surfaceRole", "settings")
         operations.add_title("备份与同步操作")
@@ -1800,6 +1972,39 @@ class MainWindow(QMainWindow):
 
     def _open_data_root(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.runtime.paths.root)))
+
+    def _manage_cloud_profiles(self) -> None:
+        if self._cloud_profile_worker is not None or self._cloud_manage_worker is not None:
+            return
+        self._set_settings_action_busy(self.cloud_profiles_manage_button, "正在加载…")
+        try:
+            cloud = CloudBackupService(
+                self.runtime, get_cloud_provider(self.runtime.settings)
+            )
+        except DomainError as exc:
+            self._set_settings_action_idle(self.cloud_profiles_manage_button, "管理资料档…")
+            self._show_status_toast(f"无法读取云端资料：{exc}")
+            return
+        self._cloud_profile_worker = CallableWorker(cloud.list_profiles, self)
+        self._cloud_profile_worker.finished_ok.connect(
+            lambda value: self._on_cloud_profiles_loaded_for_manage(cloud, value)
+        )
+        self._cloud_profile_worker.failed.connect(self._on_cloud_profiles_failed)
+        self._cloud_profile_worker.finished.connect(self._on_cloud_profile_worker_finished)
+        self._cloud_profile_worker.start()
+
+    def _on_cloud_profiles_loaded_for_manage(
+        self, cloud: CloudBackupService, value: object
+    ) -> None:
+        self._set_settings_action_idle(self.cloud_profiles_manage_button, "管理资料档…")
+        profiles = value if isinstance(value, list) else []
+        if not profiles:
+            self._show_status_toast("云端还没有资料档")
+            return
+        dialog = _CloudProfilesDialog(
+            self, profiles, cloud, on_changed=self._refresh_cloud_backups
+        )
+        dialog.exec()
 
     def _inspect_cloud_profiles(self) -> None:
         if self._cloud_profile_worker is not None:

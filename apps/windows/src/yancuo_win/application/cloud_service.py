@@ -209,6 +209,133 @@ class CloudBackupService:
         finally:
             self.provider.release_lock(self.owner, self.repo, device_id)
 
+    def list_profiles(self) -> list[dict[str, Any]]:
+        """Return cloud profiles with display metadata and backup counts."""
+        index = self._profile_index()
+        profiles = (
+            index.get("profiles") if isinstance(index.get("profiles"), dict) else {}
+        )
+        backups = self.list_backups()
+        counts: dict[str, int] = {}
+        for backup in backups:
+            pid = str(backup.get("profile_id") or "unknown")
+            counts[pid] = counts.get(pid, 0) + 1
+        local_id = self.runtime.identity.profile_id
+        canonical_local = self._resolve_profile(index, local_id)
+        rows: list[dict[str, Any]] = []
+        for profile_id, snapshot in profiles.items():
+            if not isinstance(snapshot, dict):
+                continue
+            rows.append(
+                {
+                    "profile_id": profile_id,
+                    "canonical_profile_id": self._resolve_profile(index, profile_id),
+                    "tag": snapshot.get("tag"),
+                    "snapshot_id": snapshot.get("snapshot_id"),
+                    "uploaded_at": snapshot.get("uploaded_at"),
+                    "display_name": snapshot.get("display_name"),
+                    "archived": bool(snapshot.get("archived")),
+                    "backup_count": counts.get(profile_id, 0),
+                    "is_current": profile_id == canonical_local,
+                }
+            )
+        known = {row["profile_id"] for row in rows}
+        for item in self.discover_profiles():
+            pid = str(item.get("profile_id") or "")
+            if pid not in known:
+                rows.append(
+                    {
+                        "profile_id": pid,
+                        "canonical_profile_id": str(
+                            item.get("canonical_profile_id") or pid
+                        ),
+                        "tag": item.get("tag"),
+                        "snapshot_id": item.get("snapshot_id"),
+                        "uploaded_at": item.get("uploaded_at"),
+                        "display_name": None,
+                        "archived": False,
+                        "backup_count": counts.get(pid, 0),
+                        "is_current": pid == canonical_local,
+                    }
+                )
+        rows.sort(key=lambda row: str(row.get("uploaded_at") or ""), reverse=True)
+        rows.sort(key=lambda row: bool(row["archived"]))
+        return rows
+
+    def rename_profile(self, profile_id: str, display_name: str) -> dict[str, Any]:
+        """Set a friendly display name for a cloud profile (metadata only)."""
+        display_name = display_name.strip()
+        if not display_name:
+            raise DomainError("资料档名称不能为空")
+        if len(display_name) > 80:
+            raise DomainError("资料档名称不能超过 80 个字符")
+        device_id = self.runtime.identity.device_id
+        if not self.provider.acquire_lock(self.owner, self.repo, device_id):
+            raise DomainError("无法获取主写入锁：另一台设备可能正在修改云端资料")
+        try:
+            index = self._profile_index()
+            canonical = self._resolve_profile(index, profile_id)
+            profiles = index.get("profiles")
+            if not isinstance(profiles, dict) or canonical not in profiles:
+                raise DomainError("云端不存在该资料档")
+            profiles[canonical]["display_name"] = display_name
+            index["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+            return {"profile_id": canonical, "display_name": display_name}
+        finally:
+            self.provider.release_lock(self.owner, self.repo, device_id)
+
+    def set_profile_archived(self, profile_id: str, archived: bool) -> dict[str, Any]:
+        """Mark a cloud profile as archived (metadata only, data retained)."""
+        device_id = self.runtime.identity.device_id
+        if not self.provider.acquire_lock(self.owner, self.repo, device_id):
+            raise DomainError("无法获取主写入锁：另一台设备可能正在修改云端资料")
+        try:
+            index = self._profile_index()
+            canonical = self._resolve_profile(index, profile_id)
+            profiles = index.get("profiles")
+            if not isinstance(profiles, dict) or canonical not in profiles:
+                raise DomainError("云端不存在该资料档")
+            profiles[canonical]["archived"] = bool(archived)
+            index["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+            return {"profile_id": canonical, "archived": bool(archived)}
+        finally:
+            self.provider.release_lock(self.owner, self.repo, device_id)
+
+    def delete_profile(self, profile_id: str) -> dict[str, Any]:
+        """Permanently delete a cloud profile and all of its remote backups.
+
+        Local data is never touched; the caller must confirm this action in the UI.
+        """
+        device_id = self.runtime.identity.device_id
+        if not self.provider.acquire_lock(self.owner, self.repo, device_id):
+            raise DomainError("无法获取主写入锁：另一台设备可能正在修改云端资料")
+        try:
+            index = self._profile_index()
+            canonical = self._resolve_profile(index, profile_id)
+            profiles = index.get("profiles")
+            if not isinstance(profiles, dict) or canonical not in profiles:
+                raise DomainError("云端不存在该资料档")
+            deleted_tags: list[str] = []
+            for backup in self.list_backups():
+                if str(backup.get("profile_id") or "") == canonical:
+                    tag = str(backup.get("tag") or "")
+                    if tag:
+                        self.delete_backup(tag)
+                        deleted_tags.append(tag)
+            profiles.pop(canonical, None)
+            aliases = index.get("aliases")
+            if isinstance(aliases, dict):
+                for source, target in list(aliases.items()):
+                    if source == canonical or target == canonical:
+                        aliases.pop(source, None)
+            index["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.provider.write_sync_manifest(self.owner, self.repo, index)
+            return {"profile_id": canonical, "deleted_tags": deleted_tags}
+        finally:
+            self.provider.release_lock(self.owner, self.repo, device_id)
+
     def upload_backup(self) -> dict[str, Any]:
         """手动云备份：上传完整包成功后才更新 latest。"""
         if not self.runtime.settings.cloud.enabled and self.provider.name != "local_folder":

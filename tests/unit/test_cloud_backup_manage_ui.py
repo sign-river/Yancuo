@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.config.settings import default_toml_path
-from yancuo_win.ui.main_window import MainWindow
+from yancuo_win.ui.main_window import MainWindow, _CloudProfilesDialog
 
 
 @pytest.fixture()
@@ -63,3 +63,25 @@ def test_cloud_backup_manage_card_populates(window: MainWindow) -> None:
     assert main.cloud_backup_list.count() == 0
     assert main.cloud_manage_delete_button.isEnabled() is False
     assert main.cloud_manage_preview_button.isEnabled() is False
+
+
+def test_cloud_profiles_dialog_lists_profiles(window: MainWindow) -> None:
+    main = window
+    dialog = _CloudProfilesDialog(
+        main,
+        [
+            {
+                "profile_id": "profile_demo",
+                "display_name": "我的错题本",
+                "backup_count": 2,
+                "is_current": True,
+                "archived": False,
+            }
+        ],
+        main.cloud,
+        on_changed=lambda: None,
+    )
+    assert dialog.list.count() == 1
+    assert "我的错题本" in dialog.list.item(0).text()
+    assert "2 份备份" in dialog.list.item(0).text()
+    dialog.close()
