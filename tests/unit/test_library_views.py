@@ -1313,6 +1313,36 @@ def test_problem_chat_page_attaches_box_select_reference(
     assert "框选区域" in chat_page.attach_status.text()
 
 
+def test_library_view_state_restores_after_editing_and_navigating_away(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    window._show_navigation_page(2)
+    app.processEvents()
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
+    window.search_edit.setText(problem.title)
+    window._submit_library_search()
+    app.processEvents()
+    if window.problem_list.count():
+        window._toggle_question_expansion(window.problem_list.item(0))
+        app.processEvents()
+
+    window._open_editor(problem.id)
+    app.processEvents()
+    assert window._library_state_snapshot is not None
+    window._show_navigation_page(4)
+    app.processEvents()
+    window._show_navigation_page(2)
+    app.processEvents()
+
+    assert window.stack.currentIndex() == 2
+    assert window.search_edit.text() == problem.title
+    assert window._expanded_question_id == problem.id
+
+
 def test_catalog_actions_follow_selected_node_type_and_position(
     window: MainWindow,
 ) -> None:

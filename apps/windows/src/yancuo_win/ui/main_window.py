@@ -345,6 +345,7 @@ class MainWindow(QMainWindow):
         self._ai_completion_return_page = _PAGE_LIBRARY
         self._editor_return_page = _PAGE_LIBRARY
         self._editor_detail_return_page = _PAGE_LIBRARY
+        self._library_state_snapshot: dict[str, Any] | None = None
         self._task_queue_pending = False
         self._sidebar_collapsed = False
         self._sidebar_narrow_open = False
@@ -613,6 +614,8 @@ class MainWindow(QMainWindow):
             return
         item = self.main_nav.item(row)
         page = item.data(Qt.ItemDataRole.UserRole) if item else _PAGE_LIBRARY
+        if self.stack.currentIndex() == _PAGE_LIBRARY and int(page) != _PAGE_LIBRARY:
+            self._capture_library_state()
         if (
             self.stack.currentIndex() == _PAGE_SETTINGS
             and int(page) != _PAGE_SETTINGS
@@ -632,7 +635,7 @@ class MainWindow(QMainWindow):
         if page == _PAGE_DASHBOARD:
             self._refresh_focus_pages()
         elif page == _PAGE_LIBRARY:
-            self.refresh_problems()
+            self._restore_library_state()
         elif page == _PAGE_REVIEW:
             self.review_page.show_home()
             self._refresh_focus_pages()
@@ -2169,6 +2172,49 @@ class MainWindow(QMainWindow):
         self._update_status()
         self._refresh_focus_pages()
 
+    def _capture_library_state(self) -> None:
+        """离开题库前保存当前查看状态，便于返回时恢复。"""
+        if self.stack.currentIndex() != _PAGE_LIBRARY:
+            return
+        self._capture_knowledge_tree_state()
+        self._library_state_snapshot = {
+            "view": self._library_view,
+            "nav": self._nav_mode,
+            "modes": dict(self._library_modes),
+            "search_text": self.search_edit.text(),
+            "ai_search": self.ai_search_button.isChecked(),
+            "ai_search_problem_ids": self._ai_search_problem_ids,
+            "ai_search_query": self._ai_search_query,
+            "selected": self._selected_problem_id,
+            "expanded": self._expanded_question_id,
+            "scroll": self.problem_list.verticalScrollBar().value(),
+        }
+
+    def _restore_library_state(self) -> None:
+        """返回题库时恢复上次查看状态。"""
+        snapshot = getattr(self, "_library_state_snapshot", None)
+        if snapshot is None:
+            self.refresh_problems()
+            return
+        self._library_view = str(snapshot["view"])
+        self._library_modes = dict(snapshot["modes"])
+        self._nav_mode = str(snapshot["nav"])
+        self.search_edit.setText(str(snapshot["search_text"] or ""))
+        self.ai_search_button.setChecked(bool(snapshot["ai_search"]))
+        self._ai_search_problem_ids = snapshot["ai_search_problem_ids"]
+        self._ai_search_query = str(snapshot["ai_search_query"] or "")
+        self._selected_problem_id = snapshot["selected"]
+        self._expanded_question_id = snapshot["expanded"]
+        self.refresh_nav()
+        self.refresh_problems(preserve_view=True)
+        scrollbar = self.problem_list.verticalScrollBar()
+        QTimer.singleShot(
+            0,
+            lambda value=snapshot["scroll"], bar=scrollbar: bar.setValue(
+                min(value, bar.maximum())
+            ),
+        )
+
     def refresh_nav(self) -> None:
         current_mode = self._nav_mode
         if self._library_view == "browse":
@@ -3133,6 +3179,8 @@ class MainWindow(QMainWindow):
     def _open_problem_detail(
         self, problem_id: str, *, preserve_return_page: bool = False
     ) -> None:
+        if self.stack.currentIndex() == _PAGE_LIBRARY:
+            self._capture_library_state()
         problem = self.services.get_problem(problem_id)
         if not problem:
             self._show_status_toast("题目不存在或已被删除")
@@ -3198,7 +3246,10 @@ class MainWindow(QMainWindow):
     def _close_problem_detail(self) -> None:
         target = self._detail_return_page
         self.stack.setCurrentIndex(target)
-        self._show_navigation_page(target)
+        if target == _PAGE_LIBRARY:
+            self._restore_library_state()
+        else:
+            self._show_navigation_page(target)
 
     def _edit_problem_from_detail(self, problem_id: str) -> None:
         self._open_editor(problem_id)
@@ -3304,6 +3355,8 @@ class MainWindow(QMainWindow):
         p = self.services.get_problem(problem_id)
         if not p:
             return
+        if self.stack.currentIndex() == _PAGE_LIBRARY:
+            self._capture_library_state()
         current_page = self.stack.currentIndex()
         if current_page == _PAGE_PROBLEM_DETAIL:
             self._editor_return_page = _PAGE_PROBLEM_DETAIL
@@ -3335,9 +3388,14 @@ class MainWindow(QMainWindow):
             if saved and problem_id:
                 self._refresh_problem_item(problem_id, select=True)
             self.stack.setCurrentIndex(target)
-            self._show_navigation_page(target)
+            if target == _PAGE_LIBRARY:
+                self._restore_library_state()
+            else:
+                self._show_navigation_page(target)
 
     def _open_problem_chat(self, problem_id: str) -> None:
+        if self.stack.currentIndex() == _PAGE_LIBRARY:
+            self._capture_library_state()
         problem = self.services.get_problem(problem_id)
         if not problem:
             self._show_status_toast("题目不存在或已被删除")
