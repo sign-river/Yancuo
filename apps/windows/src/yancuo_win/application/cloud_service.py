@@ -345,6 +345,13 @@ class CloudBackupService:
                 if pack is not None:
                     pack.unlink(missing_ok=True)
 
+    def storage_usage(self) -> dict[str, Any] | None:
+        """Return cloud storage usage/quota; None when the backend has no quota API."""
+        try:
+            return self.provider.get_storage_usage(self.owner, self.repo)
+        except DomainError:
+            return None
+
     def list_backups(self) -> list[dict[str, Any]]:
         releases = self.provider.list_releases(self.owner, self.repo)
         index = self._profile_index()

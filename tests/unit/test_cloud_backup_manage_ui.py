@@ -42,11 +42,22 @@ def test_cloud_backup_manage_card_populates(window: MainWindow) -> None:
     assert main.cloud_backup_list.count() == 2
     assert "备份于" in main.cloud_backup_list.item(0).text()
     assert "当前资料" in main.cloud_backup_list.item(0).text()
-    assert "总占用" in main.cloud_manage_summary.text()
+    assert "云端空间" in main.cloud_manage_summary.text()
+    assert "已用" in main.cloud_manage_summary.text()
 
     main.cloud_backup_list.setCurrentRow(0)
     assert main.cloud_manage_delete_button.isEnabled() is True
     assert main.cloud_manage_preview_button.isEnabled() is True
+
+    main._on_cloud_backups_loaded(
+        {
+            "backups": [
+                {"tag": "data-v1-p1-20260806T120000Z", "asset_size": 512 * 1024 * 1024, "is_latest": True}
+            ],
+            "usage": {"used_bytes": 512 * 1024 * 1024, "quota_bytes": 512 * 1024 * 1024},
+        }
+    )
+    assert "空间快满了" in main.cloud_manage_summary.text()
 
     main._on_cloud_backups_loaded([])
     assert main.cloud_backup_list.count() == 0

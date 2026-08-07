@@ -241,6 +241,15 @@ class CloudBaseGatewayProvider(CloudProvider):
             temporary.unlink(missing_ok=True)
         return dest
 
+    def get_storage_usage(self, owner: str, repo: str) -> dict[str, Any]:
+        data = self._action("quota/usage")
+        used = data.get("used_bytes")
+        quota = data.get("quota_bytes")
+        return {
+            "used_bytes": int(used) if used is not None else 0,
+            "quota_bytes": int(quota) if quota is not None else None,
+        }
+
     def delete_release(self, owner: str, repo: str, *, tag: str) -> None:
         self._action("releases/delete", {**self._write_repo(owner, repo), "tag": tag})
 

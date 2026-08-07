@@ -87,3 +87,14 @@ def test_preview_backup_reports_manifest_counts(runtime, tmp_path: Path) -> None
     assert int(preview["asset_count"] or 0) >= 0
     assert preview["schema_version"] is not None
     assert preview["is_latest"] is True
+
+
+def test_storage_usage_reports_local_usage(runtime, tmp_path: Path) -> None:
+    _seed_problem(runtime)
+    cloud = _cloud(runtime, tmp_path)
+    cloud.upload_backup()
+
+    usage = cloud.storage_usage()
+    assert usage is not None
+    assert int(usage["used_bytes"]) > 0
+    assert usage["quota_bytes"] is None

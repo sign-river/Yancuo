@@ -307,6 +307,13 @@ async function action(name, payload, identity, req) {
     });
     return { written: true };
   }
+  if (name === "quota/usage") {
+    const data = await callRpc("yancuo_storage_usage", {
+      p_subject: subject,
+      p_user_storage_bytes: USER_STORAGE_BYTES,
+    });
+    return data;
+  }
   if (name === "releases/list") {
     await cleanupPendingDeletions(subject);
     const repositoryName = boundedName(payload.repository || payload.name, "资料库名称");

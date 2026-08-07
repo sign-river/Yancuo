@@ -101,3 +101,12 @@ class CloudProvider(ABC):
 
     @abstractmethod
     def get_capabilities(self) -> CloudCapabilities: ...
+
+    @abstractmethod
+    def get_storage_usage(self, owner: str, repo: str) -> dict[str, Any]:
+        """Return current user storage usage for a repository.
+
+        Returns ``{"used_bytes": int, "quota_bytes": int | None}``; quota may be
+        unknown for backends without an explicit limit.
+        """
+        ...

@@ -335,6 +335,7 @@ class MainWindow(QMainWindow):
         self._cloud_operation_worker: CallableWorker | None = None
         self._cloud_manage_worker: CallableWorker | None = None
         self._cloud_manage_backups: list[dict[str, Any]] = []
+        self._cloud_manage_usage: dict[str, Any] | None = None
         self._cloud_manage_refresh_pending = False
         self._pending_cloud_restore: tuple[CloudBackupService, Path, str] | None = None
         self._local_restore_worker: CallableWorker | None = None
@@ -1880,14 +1881,25 @@ class MainWindow(QMainWindow):
             )
             self.cloud_manage_summary.setText(f"无法读取云端备份：{exc}")
             return
-        self._cloud_manage_worker = CallableWorker(cloud.list_backups, self)
+        def _load_manage_state() -> dict[str, object]:
+            return {
+                "backups": cloud.list_backups(),
+                "usage": cloud.storage_usage(),
+            }
+        self._cloud_manage_worker = CallableWorker(_load_manage_state, self)
         self._cloud_manage_worker.finished_ok.connect(self._on_cloud_backups_loaded)
         self._cloud_manage_worker.failed.connect(self._on_cloud_manage_refresh_failed)
         self._cloud_manage_worker.finished.connect(self._on_cloud_manage_worker_finished)
         self._cloud_manage_worker.start()
 
     def _on_cloud_backups_loaded(self, value: object) -> None:
-        backups = value if isinstance(value, list) else []
+        if isinstance(value, dict) and "backups" in value:
+            backups = value.get("backups", [])
+            usage = value.get("usage")
+        else:
+            backups = value
+            usage = None
+        self._cloud_manage_usage = usage if isinstance(usage, dict) else None
         self._cloud_manage_backups = [item for item in backups if isinstance(item, dict)]
         self.cloud_backup_list.clear()
         for item in self._cloud_manage_backups:
@@ -1911,15 +1923,21 @@ class MainWindow(QMainWindow):
         total = sum(
             int(item.get("asset_size") or 0) for item in self._cloud_manage_backups
         )
-        if total > 0:
-            self.cloud_manage_summary.setText(
-                f"共 {len(self._cloud_manage_backups)} 份备份，总占用 {_format_bytes(total)}；"
-                "删除只影响云端快照，本地数据不会改变。"
-            )
+        quota = None
+        if self._cloud_manage_usage is not None:
+            raw_quota = self._cloud_manage_usage.get("quota_bytes")
+            if isinstance(raw_quota, int) and raw_quota > 0:
+                quota = raw_quota
+        if quota:
+            used_text = f"云端空间：已用 {_format_bytes(total)} / 共 {_format_bytes(quota)}"
+            if total / quota >= 0.9:
+                used_text += "（空间快满了，建议清理旧备份）"
         else:
-            self.cloud_manage_summary.setText(
-                f"共 {len(self._cloud_manage_backups)} 份备份；删除只影响云端快照，本地数据不会改变。"
-            )
+            used_text = f"云端空间：已用 {_format_bytes(total)}"
+        self.cloud_manage_summary.setText(
+            f"{used_text}；共 {len(self._cloud_manage_backups)} 份备份，"
+            "删除只影响云端快照，本地数据不会改变。"
+        )
         self.cloud_manage_delete_button.setEnabled(
             self.cloud_backup_list.currentItem() is not None
         )
@@ -2200,12 +2218,19 @@ class MainWindow(QMainWindow):
             )
             if not target:
                 return
+            sizes = {
+                str(item.get("tag") or ""): int(item.get("asset_size") or 0)
+                for item in self.cloud.list_backups()
+            }
+            size = sizes.get(str(selected.get("tag") or ""), 0)
+            size_hint = f"\n将下载约 {_format_bytes(size)}。" if size > 0 else ""
             if (
                 QMessageBox.question(
                     self,
                     "确认恢复资料",
                     "恢复不会替换当前数据目录。\n"
-                    f"资料：{selected['profile_id']}\n目标：{target}\n\n继续？",
+                    f"资料：{selected['profile_id']}\n目标：{target}\n"
+                    f"{size_hint}\n继续？",
                 )
                 != QMessageBox.StandardButton.Yes
             ):
@@ -3979,14 +4004,23 @@ class MainWindow(QMainWindow):
             tag = str(item.get("tag") or "")
             stamp = _format_backup_stamp(tag)
             label = f"备份 · {stamp}" if stamp else tag
+            size = int(item.get("asset_size") or 0)
+            if size > 0:
+                label += f" · {_format_bytes(size)}"
             return f"{label}{'（当前资料最新）' if item.get('is_latest') else ''}"
 
         lines = "\n".join(f"- {_friendly(item)}" for item in backups[:20])
+        size_hint = ""
+        if latest:
+            size = int(latest.get("asset_size") or 0)
+            if size > 0:
+                size_hint = f"\n本次将下载约 {_format_bytes(size)}。"
         box = QMessageBox(self)
         box.setWindowTitle("确认恢复")
         box.setText(
             f"将从云端恢复以下备份到所选文件夹：\n\n{lines}\n\n"
-            "恢复会把云端数据完整导出到该文件夹，不会覆盖当前正在使用的资料。继续吗？"
+            "恢复会把云端数据完整导出到该文件夹，不会覆盖当前正在使用的资料。"
+            f"{size_hint}\n继续吗？"
         )
         restore_button = box.addButton("恢复", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("取消", QMessageBox.ButtonRole.RejectRole)

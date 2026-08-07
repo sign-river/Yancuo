@@ -346,6 +346,22 @@ class LocalFolderProvider(CloudProvider):
             destination.unlink(missing_ok=True)
             raise DomainError("Release asset changed while being copied")
 
+    def get_storage_usage(self, owner: str, repo: str) -> dict[str, Any]:
+        used = 0
+        releases = self._repo_dir(owner, repo) / "releases"
+        if releases.is_dir() and not releases.is_symlink():
+            for release_dir in releases.iterdir():
+                if not release_dir.is_dir() or release_dir.is_symlink():
+                    continue
+                for child in release_dir.iterdir():
+                    if (
+                        child.is_file()
+                        and not child.is_symlink()
+                        and child.name != "release.json"
+                    ):
+                        used += child.stat().st_size
+        return {"used_bytes": used, "quota_bytes": None}
+
     def delete_release(self, owner: str, repo: str, *, tag: str) -> None:
         tag = self._safe_component(tag, "release tag")
         d = self._repo_dir(owner, repo) / "releases" / tag
