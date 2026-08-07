@@ -41,6 +41,7 @@ from yancuo_win.data.models import (
     Version,
 )
 from yancuo_win.domain.rules import DomainError
+import yancuo_win.ui.intake_page as intake_page_module
 from yancuo_win.ui.intake_page import (
     IntakePage,
     ProblemForm,
@@ -1419,5 +1420,41 @@ def test_intake_prompt_templates_edit_delete_any_index(
     page._delete_prompt_template(index=1)
     assert len(page._prompt_templates) == len(original) - 1
     assert page._prompt_templates[1] == "修改后的提示词"
+    page.close()
+
+def test_intake_prompt_template_add_button_ignores_clicked_checked(
+    intake: ProblemIntakeService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    monkeypatch.setattr(
+        intake_page_module.QInputDialog,
+        "getText",
+        staticmethod(lambda *a, **k: ("新提示语", True)),
+    )
+    page = IntakePage(intake)
+    # clicked 信号会传入 checked(bool)，不应该引发报错
+    page._add_template_button.click()
+    app.processEvents()
+    assert "新提示语" in page._prompt_templates
+    page.close()
+
+
+def test_intake_prompt_template_edit_delete_ignore_clicked_checked(
+    intake: ProblemIntakeService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    page = IntakePage(intake)
+    original = list(page._prompt_templates)
+    # 模拟 clicked 传入 bool：bool 不应被当作 index 误操作
+    # （而是走选择流程，这里模拟用户取消）
+    monkeypatch.setattr(page, "_choose_prompt_template", lambda *a, **k: None)
+    page._delete_prompt_template(False)
+    assert page._prompt_templates == original
+    page._edit_prompt_template(True, text="修改后")
+    assert page._prompt_templates == original
     page.close()
 
