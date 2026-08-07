@@ -522,6 +522,35 @@ def test_problem_detail_chat_runs_through_task_queue(
     ]
 
 
+def test_inline_preview_height_sync_is_debounced(window: MainWindow) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    first = window.problem_list.item(0)
+    window._toggle_question_expansion(first)
+    app.processEvents()
+    item = window.problem_list.item(0)
+    widget = window.problem_list.itemWidget(item)
+    assert widget is not None
+    reader = widget.findChild(MathContentView)
+    assert reader is not None
+    base = item.sizeHint().height()
+
+    def simulate(height: int) -> None:
+        reader._content_height = height
+        reader.setFixedHeight(height)
+        reader.updateGeometry()
+        reader.content_height_changed.emit()
+        app.processEvents()
+
+    simulate(100)
+    simulate(150)
+    # 防抖窗口内不立即跳变，避免中间状态
+    assert item.sizeHint().height() == base
+    time.sleep(0.1)
+    app.processEvents()
+    assert item.sizeHint().height() == 72 + 12 + 150
+
+
 def test_problem_detail_reference_canvas_stays_embedded_and_keeps_normalized_regions(
     window: MainWindow,
     tmp_path: Path,
@@ -1162,8 +1191,8 @@ def test_inline_preview_size_syncs_after_content_height_change(
     reader.setFixedHeight(300)
     reader.updateGeometry()
     reader.content_height_changed.emit()
-    for _ in range(20):
-        app.processEvents()
+    time.sleep(0.1)
+    app.processEvents()
     assert item.sizeHint().height() > collapsed_height
     assert widget.height() > collapsed_height
 

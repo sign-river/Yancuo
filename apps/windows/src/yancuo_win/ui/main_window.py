@@ -353,6 +353,14 @@ class MainWindow(QMainWindow):
         self._problem_widget_timer.timeout.connect(
             self._materialize_visible_problem_widgets
         )
+        # 展开预览高度同步防抖：渲染/布局过程中
+        # content_height_changed 可能触发多次，合并成一次最终同步，
+        # 避免展开高度三段式跳变。
+        self._inline_size_timer = QTimer(self)
+        self._inline_size_timer.setSingleShot(True)
+        self._inline_size_timer.setInterval(60)
+        self._inline_size_timer.timeout.connect(self._flush_inline_question_size)
+        self._pending_inline_sync: tuple[str, _InlineQuestionItem] | None = None
 
         self.setWindowTitle("研错库")
         self.setMinimumSize(760, 560)
@@ -2757,7 +2765,7 @@ class MainWindow(QMainWindow):
         reader = widget.findChild(MathContentView)
         if reader is not None and hasattr(reader, "content_height_changed"):
             reader.content_height_changed.connect(
-                lambda problem_id=problem.id, source=widget: self._sync_inline_question_size(
+                lambda problem_id=problem.id, source=widget: self._schedule_inline_question_size(
                     problem_id, source
                 )
             )
@@ -2834,6 +2842,19 @@ class MainWindow(QMainWindow):
             if problem is not None:
                 self._set_inline_question_widget(item, problem)
         self._materialized_problem_rows = desired
+
+    def _schedule_inline_question_size(
+        self, problem_id: str, widget: _InlineQuestionItem
+    ) -> None:
+        self._pending_inline_sync = (problem_id, widget)
+        self._inline_size_timer.start()
+
+    def _flush_inline_question_size(self) -> None:
+        pending = self._pending_inline_sync
+        self._pending_inline_sync = None
+        if pending is not None:
+            problem_id, widget = pending
+            self._sync_inline_question_size(problem_id, widget)
 
     def _sync_inline_question_size(
         self, problem_id: str, widget: _InlineQuestionItem
