@@ -11,11 +11,11 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from latex2mathml import converter
-from PySide6.QtCore import QBuffer, QIODevice, QMargins, QMarginsF, QSize, QSizeF, QTimer, Qt, Signal
+from PySide6.QtCore import QBuffer, QIODevice, QMargins, QMarginsF, QPropertyAnimation, QSize, QSizeF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPageLayout, QPageSize, QPalette
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
-from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QSizePolicy, QVBoxLayout, QWidget
 from PySide6.QtWebEngineCore import QWebEnginePage
 
 from yancuo_win.ui.theme import current_theme_name, get_theme_manager, theme_tokens
@@ -765,6 +765,7 @@ class MathContentView(QWidget):
         self._document_buffer: QBuffer | None = None
         self._renderer: QWebEnginePage | None = None
         self._active_html: str | None = None
+        self._rendered_html: str | None = None
         self._render_generation = 0
         self._render_scheduled = False
         self._fit_content_height = False
@@ -805,6 +806,7 @@ class MathContentView(QWidget):
         self._ready_poll_timer.setInterval(30)
         self._ready_poll_timer.timeout.connect(self._poll_page_ready)
         self._ready_poll_count = 0
+        self._overlay_fade: QPropertyAnimation | None = None
         _PREVIEW_VIEWS.add(self)
         manager = get_theme_manager(QApplication.instance())
         if manager is not None:
@@ -979,10 +981,12 @@ class MathContentView(QWidget):
     def _schedule_render(self) -> None:
         if (
             not self.last_html
-            or not self.isVisible()
             or self._renderer is not None
             or self._render_scheduled
         ):
+            return
+        if self._document is not None and self._rendered_html == self.last_html:
+            # 内容与上次渲染一致且已有结果：直接复用，避免每次进入重新渲染造成闪烁
             return
         self._section_layout = {}
         self._content_height_px = 0
@@ -991,7 +995,7 @@ class MathContentView(QWidget):
 
     def _start_render(self) -> None:
         self._render_scheduled = False
-        if not self.last_html or not self.isVisible():
+        if not self.last_html:
             return
 
         self._render_generation += 1
@@ -1159,6 +1163,7 @@ class MathContentView(QWidget):
         previous_buffer = self._document_buffer
         self._document = document
         self._document_buffer = buffer
+        self._rendered_html = self._active_html
         self._view.setDocument(document)
         if not self._pdf_view_initialized:
             self._pdf_view_initialized = True
@@ -1198,8 +1203,20 @@ class MathContentView(QWidget):
         if self._is_page_rendered() or self._ready_poll_count > 200:
             self._ready_poll_timer.stop()
             overlay = getattr(self, "_loading_overlay", None)
-            if overlay is not None:
-                overlay.hide()
+            if overlay is not None and overlay.isVisible():
+                self._fade_out_overlay(overlay)
+
+    def _fade_out_overlay(self, overlay: QWidget) -> None:
+        """让遮罩淡出，下方已渲染内容平滑显现，避免内容突然出现闪一下。"""
+        effect = QGraphicsOpacityEffect(overlay)
+        overlay.setGraphicsEffect(effect)
+        animation = QPropertyAnimation(effect, b"opacity", overlay)
+        animation.setDuration(160)
+        animation.setStartValue(1.0)
+        animation.setEndValue(0.0)
+        animation.finished.connect(overlay.hide)
+        animation.start()
+        self._overlay_fade = animation
 
     def _is_page_rendered(self) -> bool:
         viewport_getter = getattr(self._view, "viewport", None)
