@@ -20,7 +20,7 @@ from yancuo_win import __version__
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.formal_assets import formal_asset_relative_paths
 from yancuo_win.application.sqlite_snapshot import create_sqlite_snapshot
-from yancuo_win.data.models import Problem
+from yancuo_win.data.models import NoteDocument, Problem
 from yancuo_win.domain.identity import DATA_FORMAT_VERSION, SCHEMA_VERSION
 from yancuo_win.domain.identity import read_identity
 from yancuo_win.domain.rules import DomainError
@@ -154,6 +154,7 @@ class EbpackService:
                 )
 
             problem_count = self._problem_count()
+            note_count = self._note_count()
             asset_count = len(object_entries)
             manifest = {
                 "format": FORMAT_NAME,
@@ -166,6 +167,7 @@ class EbpackService:
                 "schema_version": self.runtime.schema_version,
                 "data_format_version": DATA_FORMAT_VERSION,
                 "problem_count": problem_count,
+                "note_count": note_count,
                 "asset_count": asset_count,
                 "encrypted": False,
                 "encryption": None,
@@ -204,6 +206,10 @@ class EbpackService:
     def _problem_count(self) -> int:
         with self.runtime.session_factory() as s:
             return int(s.scalar(select(func.count()).select_from(Problem)) or 0)
+
+    def _note_count(self) -> int:
+        with self.runtime.session_factory() as s:
+            return int(s.scalar(select(func.count()).select_from(NoteDocument)) or 0)
 
     def _build_checksums(self, staging: Path) -> list[str]:
         lines: list[str] = []

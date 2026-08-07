@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import uuid
+import zipfile
 
 from yancuo_win.application.bootstrap import RuntimeContext
 from yancuo_win.application.search_service import SearchIndexService
@@ -22,7 +23,7 @@ from yancuo_win.cloud.factory import get_cloud_provider
 from yancuo_win.domain.rules import DomainError
 from yancuo_win.domain.identity import bind_profile, record_snapshot_head
 from yancuo_win.data.models import Base
-from yancuo_win.import_export.ebpack import EbpackService
+from yancuo_win.import_export.ebpack import EbpackService, FORMAT_NAME
 
 
 def _sha256(path: Path) -> str:
@@ -459,6 +460,48 @@ class CloudBackupService:
         finally:
             candidate.unlink(missing_ok=True)
         return dest
+
+    def preview_backup(self, tag: str) -> dict[str, Any]:
+        """下载远端备份到缓存并读取包内清单，不覆盖本地数据。"""
+        backups = self.list_backups()
+        row = next(
+            (item for item in backups if str(item.get("tag") or "") == tag), None
+        )
+        if row is None:
+            raise DomainError("云端不存在该备份")
+        pack = self.download_backup(
+            tag, self.runtime.paths.cache_dir / "cloud_preview"
+        )
+        try:
+            try:
+                with zipfile.ZipFile(pack, "r") as zf:
+                    raw = zf.read("manifest.json")
+                manifest = json.loads(raw.decode("utf-8"))
+            except (
+                zipfile.BadZipFile,
+                KeyError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise DomainError("备份包清单无效，无法预览") from exc
+            if manifest.get("format") != FORMAT_NAME:
+                raise DomainError("备份包不是研错库 ebpack，无法预览")
+            return {
+                "tag": tag,
+                "profile_id": row.get("profile_id"),
+                "uploaded_at": row.get("uploaded_at"),
+                "asset_size": row.get("asset_size"),
+                "is_latest": row.get("is_latest"),
+                "created_at": manifest.get("created_at"),
+                "problem_count": manifest.get("problem_count"),
+                "note_count": manifest.get("note_count"),
+                "asset_count": manifest.get("asset_count"),
+                "schema_version": manifest.get("schema_version"),
+                "data_format_version": manifest.get("data_format_version"),
+                "app_version": manifest.get("app_version"),
+            }
+        finally:
+            pack.unlink(missing_ok=True)
 
     def restore_profile_to(self, profile_id: str, target_root: Path) -> dict[str, Any]:
         """Restore a selected remote profile to a user-chosen directory."""

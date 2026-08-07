@@ -29,7 +29,9 @@ def test_cloud_backup_manage_card_populates(window: MainWindow) -> None:
     main = window
     assert hasattr(main, "cloud_backup_list")
     assert hasattr(main, "cloud_manage_summary")
+    assert hasattr(main, "cloud_manage_preview_button")
     assert main.cloud_manage_delete_button.isEnabled() is False
+    assert main.cloud_manage_preview_button.isEnabled() is False
 
     main._on_cloud_backups_loaded(
         [
@@ -43,7 +45,9 @@ def test_cloud_backup_manage_card_populates(window: MainWindow) -> None:
 
     main.cloud_backup_list.setCurrentRow(0)
     assert main.cloud_manage_delete_button.isEnabled() is True
+    assert main.cloud_manage_preview_button.isEnabled() is True
 
     main._on_cloud_backups_loaded([])
     assert main.cloud_backup_list.count() == 0
     assert main.cloud_manage_delete_button.isEnabled() is False
+    assert main.cloud_manage_preview_button.isEnabled() is False

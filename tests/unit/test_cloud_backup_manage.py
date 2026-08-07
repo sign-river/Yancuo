@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.cloud_service import CloudBackupService
+from yancuo_win.application.note_service import NoteService
 from yancuo_win.application.services import AppServices
 from yancuo_win.cloud.local_folder import LocalFolderProvider
 from yancuo_win.config.settings import default_toml_path
@@ -71,3 +72,18 @@ def test_cleanup_backups_retain_at_least_one(runtime, tmp_path: Path) -> None:
     cloud = _cloud(runtime, tmp_path)
     with pytest.raises(DomainError):
         cloud.cleanup_backups(retain=0)
+
+
+def test_preview_backup_reports_manifest_counts(runtime, tmp_path: Path) -> None:
+    _seed_problem(runtime)
+    NoteService(runtime).create_note(title="云端预览笔记")
+    cloud = _cloud(runtime, tmp_path)
+    result = cloud.upload_backup()
+
+    preview = cloud.preview_backup(result["tag"])
+    assert preview["tag"] == result["tag"]
+    assert int(preview["problem_count"] or 0) >= 1
+    assert int(preview["note_count"] or 0) >= 1
+    assert int(preview["asset_count"] or 0) >= 0
+    assert preview["schema_version"] is not None
+    assert preview["is_latest"] is True
