@@ -1335,6 +1335,17 @@ def test_library_view_state_restores_after_editing_and_navigating_away(
     assert window._library_state_snapshot is not None
     window._show_navigation_page(4)
     app.processEvents()
+    # 编辑页未关闭时点回“题库”，应恢复到编辑界面
+    window._show_navigation_page(2)
+    app.processEvents()
+    assert window.stack.currentIndex() == window.stack.indexOf(
+        window.problem_editor_page
+    )
+    # 关闭编辑页后再切走回来，恢复题库查看状态
+    window._close_problem_editor()
+    app.processEvents()
+    window._show_navigation_page(4)
+    app.processEvents()
     window._show_navigation_page(2)
     app.processEvents()
 

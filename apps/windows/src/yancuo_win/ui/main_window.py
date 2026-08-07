@@ -346,6 +346,9 @@ class MainWindow(QMainWindow):
         self._editor_return_page = _PAGE_LIBRARY
         self._editor_detail_return_page = _PAGE_LIBRARY
         self._library_state_snapshot: dict[str, Any] | None = None
+        # 题库活动子页面：编辑/详情/AI 讨论打开时记录，
+        # 切到其他主页面后点回“题库”时恢复到该子页面。
+        self._library_active_subpage: int | None = None
         self._task_queue_pending = False
         self._sidebar_collapsed = False
         self._sidebar_narrow_open = False
@@ -630,6 +633,11 @@ class MainWindow(QMainWindow):
                 )
             )
             self.main_nav.blockSignals(False)
+            return
+        if int(page) == _PAGE_LIBRARY and self._library_active_subpage is not None:
+            # 题库还有未关闭的子页面（编辑/详情/AI 讨论），
+            # 回到该子页面而不是题库首页。
+            self.stack.setCurrentIndex(self._library_active_subpage)
             return
         self.stack.setCurrentIndex(int(page))
         if page == _PAGE_DASHBOARD:
@@ -3181,6 +3189,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self.stack.currentIndex() == _PAGE_LIBRARY:
             self._capture_library_state()
+        self._library_active_subpage = _PAGE_PROBLEM_DETAIL
         problem = self.services.get_problem(problem_id)
         if not problem:
             self._show_status_toast("题目不存在或已被删除")
@@ -3245,6 +3254,7 @@ class MainWindow(QMainWindow):
 
     def _close_problem_detail(self) -> None:
         target = self._detail_return_page
+        self._library_active_subpage = None
         self.stack.setCurrentIndex(target)
         if target == _PAGE_LIBRARY:
             self._restore_library_state()
@@ -3365,6 +3375,7 @@ class MainWindow(QMainWindow):
             self._editor_return_page = current_page
         else:
             self._editor_return_page = _PAGE_LIBRARY
+        self._library_active_subpage = _PAGE_PROBLEM_EDITOR
         self.problem_editor_page.set_problem(p)
         self.stack.setCurrentIndex(_PAGE_PROBLEM_EDITOR)
 
@@ -3377,6 +3388,9 @@ class MainWindow(QMainWindow):
     def _finish_problem_editor(
         self, *, saved: bool, problem_id: str | None = None
     ) -> None:
+        # 编辑页关闭（保存/取消）后不再视为活动子页面；
+        # 若返回详情页，_open_problem_detail 会重新设置。
+        self._library_active_subpage = None
         target = self._editor_return_page
         if target == _PAGE_PROBLEM_DETAIL:
             self._detail_return_page = self._editor_detail_return_page
@@ -3396,6 +3410,7 @@ class MainWindow(QMainWindow):
     def _open_problem_chat(self, problem_id: str) -> None:
         if self.stack.currentIndex() == _PAGE_LIBRARY:
             self._capture_library_state()
+        self._library_active_subpage = _PAGE_PROBLEM_CHAT
         problem = self.services.get_problem(problem_id)
         if not problem:
             self._show_status_toast("题目不存在或已被删除")
