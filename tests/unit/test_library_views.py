@@ -31,6 +31,7 @@ from yancuo_win.application.bootstrap import bootstrap_runtime
 from yancuo_win.application.services import AppServices
 from yancuo_win.config.settings import default_toml_path
 from yancuo_win.domain.rules import DomainError
+from yancuo_win.application.problem_chat_service import ProblemReference
 from yancuo_win.ui.main_window import MainWindow
 from yancuo_win.ui.math_content import MathContentView
 from yancuo_win.ui.widgets import ChevronComboBox, SoftItemDelegate, ThemedTreeBranchStyle
@@ -1235,6 +1236,81 @@ def test_problem_editor_preview_locks_zoom_and_uses_3_to_2_split(
     assert left > 0 and right > 0
     assert abs(left / right - 1.5) < 0.2
     window._close_problem_editor()
+
+
+def test_problem_chat_opens_as_independent_page(window: MainWindow) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
+    window._open_problem_detail(problem.id)
+    app.processEvents()
+    window.problem_detail_page._request_chat()
+    app.processEvents()
+    assert window.stack.currentIndex() == window.stack.indexOf(
+        window.problem_chat_page
+    )
+    chat_page = window.problem_chat_page
+    assert chat_page.problem_id == problem.id
+    assert chat_page.context_title.text() == problem.title
+    window.problem_chat_page.back_requested.emit()
+    app.processEvents()
+    assert window.stack.currentIndex() == window.stack.indexOf(
+        window.problem_detail_page
+    )
+
+
+def test_problem_chat_page_sends_through_task_queue(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
+    window._open_problem_detail(problem.id)
+    window.problem_detail_page._request_chat()
+    app.processEvents()
+    chat_page = window.problem_chat_page
+    chat_page.chat_input.setPlainText("解释一下")
+    chat_page._send_chat()
+    job_id = chat_page._chat_job_id
+    assert job_id is not None
+    for _ in range(100):
+        app.processEvents()
+        if chat_page._chat_job_id is None:
+            break
+        time.sleep(0.02)
+    assert chat_page._chat_job_id is None
+    conversation = window.problem_chat.get_conversation(chat_page._conversation_id())
+    assert conversation is not None
+    assert [(m.role, m.status) for m in conversation.messages] == [
+        ("user", "complete"),
+        ("assistant", "complete"),
+    ]
+
+
+def test_problem_chat_page_attaches_box_select_reference(
+    window: MainWindow,
+) -> None:
+    app = QApplication.instance()
+    assert app is not None
+    problem = next(
+        item for item in window.services.list_problems() if item.status == "active"
+    )
+    window._open_problem_detail(problem.id)
+    window.problem_detail_page._request_chat()
+    app.processEvents()
+    chat_page = window.problem_chat_page
+    chat_page._reference_sources = [
+        {"asset_id": "asset_x", "page_index": 0, "path": None}
+    ]
+    reference = ProblemReference("asset_x", 0, 0.1, 0.1, 0.3, 0.2)
+    chat_page._apply_box_select([reference])
+    assert len(chat_page._attached_references) == 1
+    assert chat_page.attach_previews.count() == 1
+    assert "框选区域" in chat_page.attach_status.text()
 
 
 def test_catalog_actions_follow_selected_node_type_and_position(

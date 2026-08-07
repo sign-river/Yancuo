@@ -515,6 +515,7 @@ class ProblemDetailPage(QWidget):
     archive_requested = Signal(str)
     trash_requested = Signal(str)
     restore_requested = Signal(str)
+    chat_requested = Signal(str)
     status_message = Signal(str)
 
     @staticmethod
@@ -605,7 +606,7 @@ class ProblemDetailPage(QWidget):
         self.edit_button = primary_button("编辑题目")
         self.edit_button.clicked.connect(self._request_edit)
         self.chat_button = QPushButton("AI 讨论")
-        self.chat_button.clicked.connect(self._toggle_chat)
+        self.chat_button.clicked.connect(self._request_chat)
         self.chat_button.setEnabled(chat is not None)
         self.header = PageHeader("题目详情")
         self.title_label = self.header.title
@@ -903,6 +904,10 @@ class ProblemDetailPage(QWidget):
         self.chat_button.setText("AI 讨论")
         self._configure_reference_source()
         self._refresh_conversations()
+
+    def _request_chat(self) -> None:
+        if self.problem_id:
+            self.chat_requested.emit(self.problem_id)
 
     def _toggle_chat(self) -> None:
         if self.width() < 860 and self.chat_card.isVisible():

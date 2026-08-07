@@ -79,6 +79,7 @@ from yancuo_win.ui.operation_results import (
     show_transfer_result,
 )
 from yancuo_win.ui.problem_detail import ProblemDetailPage
+from yancuo_win.ui.problem_chat_page import ProblemChatPage
 from yancuo_win.ui.problem_editor import ProblemEditorPage
 from yancuo_win.ui.review_dialog import ReviewDialog
 from yancuo_win.ui.review_page import ReviewPage
@@ -117,6 +118,7 @@ _PAGE_AI_COMPLETION = 7
 _PAGE_TASK_QUEUE = 8
 _PAGE_AI_JOB_DETAIL = 9
 _PAGE_PROBLEM_EDITOR = 10
+_PAGE_PROBLEM_CHAT = 11
 
 
 def _format_backup_stamp(tag: str) -> str:
@@ -453,6 +455,7 @@ class MainWindow(QMainWindow):
         )
         self.problem_detail_page.back_requested.connect(self._close_problem_detail)
         self.problem_detail_page.edit_requested.connect(self._edit_problem_from_detail)
+        self.problem_detail_page.chat_requested.connect(self._open_problem_chat)
         self.problem_detail_page.previous_requested.connect(
             lambda: self._move_problem_detail(-1)
         )
@@ -498,6 +501,14 @@ class MainWindow(QMainWindow):
         self.problem_editor_page.saved.connect(self._on_problem_editor_saved)
         self.problem_editor_page.cancelled.connect(self._close_problem_editor)
         self.stack.addWidget(self.problem_editor_page)
+        self.problem_chat_page = ProblemChatPage(self.problem_chat, self.ai_coordinator)
+        self.problem_chat_page.back_requested.connect(self._close_problem_chat)
+        self.problem_chat_page.show_answer_requested.connect(
+            self._close_problem_chat
+        )
+        self.problem_chat_page.note_requested.connect(self._open_note_page_from_chat)
+        self.problem_chat_page.status_message.connect(self._show_status_toast)
+        self.stack.addWidget(self.problem_chat_page)
         layout.addWidget(self.stack, stretch=1)
         root_layout.addLayout(layout, stretch=1)
 
@@ -3325,6 +3336,53 @@ class MainWindow(QMainWindow):
                 self._refresh_problem_item(problem_id, select=True)
             self.stack.setCurrentIndex(target)
             self._show_navigation_page(target)
+
+    def _open_problem_chat(self, problem_id: str) -> None:
+        problem = self.services.get_problem(problem_id)
+        if not problem:
+            self._show_status_toast("题目不存在或已被删除")
+            return
+        subject_name: str | None = None
+        chapter_name: str | None = None
+        if problem.subject_id:
+            subject_name = next(
+                (
+                    subject.name
+                    for subject in self.services.list_subjects()
+                    if subject.id == problem.subject_id
+                ),
+                None,
+            )
+            if problem.chapter_id:
+                chapter_name = next(
+                    (
+                        " / ".join(choice.chapter_path)
+                        for choice in self.services.list_category_choices()
+                        if choice.chapter_id == problem.chapter_id
+                    ),
+                    None,
+                )
+        self.problem_chat_page.set_problem(
+            problem,
+            content_blocks=content_blocks_with_images(
+                problem.question_content_json,
+                problem.assets or (),
+                self.services.store.resolve,
+            ),
+            subject_name=subject_name,
+            chapter_name=chapter_name,
+        )
+        self.stack.setCurrentIndex(_PAGE_PROBLEM_CHAT)
+
+    def _close_problem_chat(self) -> None:
+        problem_id = self.problem_chat_page.problem_id or ""
+        if problem_id:
+            self._open_problem_detail(problem_id)
+        else:
+            self.stack.setCurrentIndex(_PAGE_PROBLEM_DETAIL)
+
+    def _open_note_page_from_chat(self) -> None:
+        self._show_navigation_page(_PAGE_NOTES)
 
     def _promote_selected(self) -> None:
         pid = self._require_one()
