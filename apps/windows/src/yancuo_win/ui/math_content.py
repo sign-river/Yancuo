@@ -11,11 +11,11 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from latex2mathml import converter
-from PySide6.QtCore import QBuffer, QIODevice, QMargins, QMarginsF, QPropertyAnimation, QSize, QSizeF, QTimer, Qt, Signal
+from PySide6.QtCore import QBuffer, QIODevice, QMargins, QMarginsF, QSize, QSizeF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPageLayout, QPageSize, QPalette
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
-from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
 from PySide6.QtWebEngineCore import QWebEnginePage
 
 from yancuo_win.ui.theme import current_theme_name, get_theme_manager, theme_tokens
@@ -806,7 +806,7 @@ class MathContentView(QWidget):
         self._ready_poll_timer.setInterval(30)
         self._ready_poll_timer.timeout.connect(self._poll_page_ready)
         self._ready_poll_count = 0
-        self._overlay_fade: QPropertyAnimation | None = None
+        self._ready_stable_count = 0
         _PREVIEW_VIEWS.add(self)
         manager = get_theme_manager(QApplication.instance())
         if manager is not None:
@@ -1196,27 +1196,21 @@ class MathContentView(QWidget):
             overlay.show()
             overlay.raise_()
         self._ready_poll_count = 0
+        self._ready_stable_count = 0
         self._ready_poll_timer.start()
 
     def _poll_page_ready(self) -> None:
         self._ready_poll_count += 1
-        if self._is_page_rendered() or self._ready_poll_count > 200:
+        if self._is_page_rendered():
+            self._ready_stable_count += 1
+        else:
+            self._ready_stable_count = 0
+        # 连续多帧稳定后才认为页面完全渲染，避免在渐进绘制中揭开遮罩。
+        if self._ready_stable_count >= 2 or self._ready_poll_count > 200:
             self._ready_poll_timer.stop()
             overlay = getattr(self, "_loading_overlay", None)
             if overlay is not None and overlay.isVisible():
-                self._fade_out_overlay(overlay)
-
-    def _fade_out_overlay(self, overlay: QWidget) -> None:
-        """让遮罩淡出，下方已渲染内容平滑显现，避免内容突然出现闪一下。"""
-        effect = QGraphicsOpacityEffect(overlay)
-        overlay.setGraphicsEffect(effect)
-        animation = QPropertyAnimation(effect, b"opacity", overlay)
-        animation.setDuration(160)
-        animation.setStartValue(1.0)
-        animation.setEndValue(0.0)
-        animation.finished.connect(overlay.hide)
-        animation.start()
-        self._overlay_fade = animation
+                overlay.hide()
 
     def _is_page_rendered(self) -> bool:
         viewport_getter = getattr(self._view, "viewport", None)
@@ -1234,21 +1228,32 @@ class MathContentView(QWidget):
             return False
         # 页面未光栅化时 QPdfView 画白色占位；
         # 渲染完成后页面背景是主题深色。
-        # 采样多个点，只要有一个深色点就认为就绪。
+        # 要求所有采样点都不再是白色占位，
+        # 避免页面还在渐进绘制时就揭开遮罩。
         points = (
             (width // 2, height // 2),
             (width // 2, height // 4),
             (width // 2, 3 * height // 4),
             (width // 4, height // 2),
             (3 * width // 4, height // 2),
+            (width // 8, height // 2),
+            (7 * width // 8, height // 2),
+            (width // 2, height // 8),
+            (width // 2, 7 * height // 8),
         )
+        dark_count = 0
+        total = 0
         for x, y in points:
             if x < 0 or y < 0 or x >= width or y >= height:
                 continue
             color = image.pixelColor(x, y)
-            if (color.red() + color.green() + color.blue()) / 3 < 150:
-                return True
-        return False
+            brightness = (color.red() + color.green() + color.blue()) / 3
+            total += 1
+            if brightness < 150:
+                dark_count += 1
+        if total == 0:
+            return False
+        return dark_count == total
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
         super().resizeEvent(event)
