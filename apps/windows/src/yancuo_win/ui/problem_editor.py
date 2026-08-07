@@ -64,7 +64,10 @@ class ProblemEditorPage(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.preview_view = MathContentView()
-        self.preview_view.set_adaptive_content_height(1200, reserve_height=True)
+        # 独立缩放：固定 100% 显示，不随全局预览缩放变化
+        self.preview_view.set_fixed_zoom_scale(1.0)
+        # 内容高度自适应：完整显示，超过 1200px 时出现纵向滚动条
+        self.preview_view.set_adaptive_content_height(1200, reserve_height=False)
         splitter.addWidget(self.preview_view)
 
         scroll = QScrollArea()
@@ -157,9 +160,9 @@ class ProblemEditorPage(QWidget):
         body_layout.addStretch(1)
         scroll.setWidget(body)
         splitter.addWidget(scroll)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([380, 420])
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([600, 400])
         layout.addWidget(splitter, stretch=1)
 
         set_tab_order_chain(

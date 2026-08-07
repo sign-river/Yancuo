@@ -1211,6 +1211,32 @@ def test_problem_editor_opens_as_embedded_page(window: MainWindow) -> None:
     assert window.stack.currentIndex() == previous
 
 
+def test_problem_editor_preview_locks_zoom_and_uses_3_to_2_split(
+    window: MainWindow,
+) -> None:
+    from PySide6.QtWidgets import QSplitter
+
+    item = window.problem_list.item(0)
+    assert item is not None
+    problem_id = str(item.data(Qt.ItemDataRole.UserRole))
+    window._open_editor(problem_id)
+    page = window.problem_editor_page
+    preview = page.preview_view
+    assert preview.follows_global_zoom() is False
+    assert preview._zoom_scale == 1.0
+    assert preview._reserve_content_height is False
+    app = QApplication.instance()
+    assert app is not None
+    window.show()
+    app.processEvents()
+    splitters = page.findChildren(QSplitter)
+    assert splitters
+    left, right = splitters[0].sizes()
+    assert left > 0 and right > 0
+    assert abs(left / right - 1.5) < 0.2
+    window._close_problem_editor()
+
+
 def test_catalog_actions_follow_selected_node_type_and_position(
     window: MainWindow,
 ) -> None:
