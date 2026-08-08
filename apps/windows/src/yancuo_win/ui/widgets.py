@@ -173,6 +173,13 @@ def default_button(text: str, parent: QWidget | None = None) -> QPushButton:
 def friendly_cloud_error(error: str) -> str:
     """Turn common CloudBase gateway errors into user-readable messages."""
     text = str(error or "")
+    lowered = text.lower()
+    if any(token in lowered for token in ("timed out", "timeout", "timeout exceeded")):
+        return "连接云端超时，请检查网络后重试"
+    if any(token in lowered for token in ("connection refused", "connection reset", "network is unreachable", "无法连接")):
+        return "无法连接云端服务，请检查网络后重试"
+    if any(token in lowered for token in ("getaddrinfo", "name or service not known", "dns")):
+        return "无法解析云端服务地址，请检查网络/DNS 后重试"
     if "401" in text and "登录已失效" in text:
         return "登录已失效，请重新登录后重试"
     if "HTTP 4" in text or "HTTP 5" in text:

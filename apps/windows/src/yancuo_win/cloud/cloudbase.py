@@ -84,6 +84,25 @@ class CloudBaseGatewayProvider(CloudProvider):
 
         try:
             raw = _open(self._token())
+        except (URLError, OSError, TimeoutError) as exc:
+            # 瞬时网络故障：先尝试刷新令牌，再自动重试一次，减少断联后手动重登
+            try:
+                retry_token = force_refresh_token(
+                    self.environment_id, self.credential_key
+                )
+            except DomainError:
+                retry_token = self._token()
+            try:
+                raw = _open(retry_token)
+            except (URLError, OSError, TimeoutError) as retry_exc:
+                reason = (
+                    retry_exc.reason
+                    if isinstance(retry_exc, URLError)
+                    else str(retry_exc)
+                )
+                raise DomainError(
+                    f"无法连接 CloudBase 网关（已自动重试一次）：{reason}"
+                ) from retry_exc
         except HTTPError as exc:
             detail = exc.read(_MAX_ERROR_RESPONSE_BYTES).decode(
                 "utf-8", errors="replace"

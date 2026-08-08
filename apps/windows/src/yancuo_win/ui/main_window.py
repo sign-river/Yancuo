@@ -1830,7 +1830,6 @@ class MainWindow(QMainWindow):
 
     def _build_cloud_sync_page(self) -> QWidget:
         page = ServiceSettingsPage(self.runtime, "cloud")
-        page.status_message.connect(self._show_status_toast)
         profiles = CardFrame()
         profiles.setProperty("surfaceRole", "settings")
         profiles.add_title("云端资料")

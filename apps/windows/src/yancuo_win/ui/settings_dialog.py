@@ -952,7 +952,7 @@ class ServiceSettingsPage(QWidget):
         self.token_edit.setToolTip("")
         if key and (load_stored_session(key) is not None or get_secret(key)):
             self.cloud_permission_notice.set_state(
-                "已登录 CloudBase，可进行连接测试和远端操作。",
+                "已登录 CloudBase（本地会话已保存）；实际连通性以连接测试为准。",
                 "success",
             )
         else:
